@@ -24,11 +24,11 @@ Example for a React frontend, FastAPI backend, and SQLAlchemy data layer:
 
 ```sh
 npm i -D \
-  @gate-forge/cli@0.11.0 \
-  @gate-forge/pack-playwright@0.11.0 \
-  @gate-forge/pack-http@0.11.0 \
-  @gate-forge/pack-fastapi@0.11.0 \
-  @gate-forge/pack-sqlalchemy@0.11.0
+  @gate-forge/cli@0.11.1 \
+  @gate-forge/pack-playwright@0.11.1 \
+  @gate-forge/pack-http@0.11.1 \
+  @gate-forge/pack-fastapi@0.11.1 \
+  @gate-forge/pack-sqlalchemy@0.11.1
 ```
 
 Use the project-local `gateforge` binary from your npm script or add `node_modules/.bin` to your shell `PATH`. If the scan recommends other packs, add only the ones your code uses, at the same version. A mismatched Gateforge package contract can stop the CLI with exit code 2 and `GATEFORGE_PACKAGE_INCOMPATIBLE`.
@@ -49,7 +49,7 @@ This installs every pack of the release; the scan still recommends the ones your
 
 **You should see:** npm installs the packages without a Gateforge compatibility error.
 
-**If not:** align every direct `@gate-forge/*` package to `0.11.0`, then install again. Do not work around the compatibility error.
+**If not:** align every direct `@gate-forge/*` package to `0.11.1`, then install again. Do not work around the compatibility error.
 
 ## 2. Pick a goal
 
@@ -445,7 +445,7 @@ the registry. To gate a release that is not on the registry yet (a local
 regenerate:
 
 ```sh
-GATEFORGE_CI_ENGINE_SOURCE=vendor/gate-forge-cli-0.11.0.tgz \
+GATEFORGE_CI_ENGINE_SOURCE=vendor/gate-forge-cli-0.11.1.tgz \
   gateforge enforce --ci github
 ```
 

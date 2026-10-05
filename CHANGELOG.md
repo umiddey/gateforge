@@ -1,6 +1,13 @@
 # Changelog
 
 
+
+## 0.11.1
+
+### Fixed
+
+- `gateforge check`'s own cache is excluded from candidate trees, so a concurrent check does not change the tree for a run using a non-default `test-gates --out` directory. No other ignored or run-state files are excluded.
+
 ## 0.11.0
 
 ### Changed
