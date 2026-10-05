@@ -1625,10 +1625,24 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
   // exactly the same `evaluateApprovedPolicy(...).status === 'enforced'`
   // condition. One product source in the change set denies the neutrality,
   // so the strict re-grade returns. Nothing else moves.
-  const adoptedBaselineSurvivesStrictE2E =
-    diffScoped &&
-    (scopeDecision.policyInputsOnly ||
-      (adoptionCommit && scopeDecision.productBehaviorNeutral)) &&
+  //
+  // 0.10.4 (`enforcement.adoptedDebt`, the OWNER-PINNED setting for how
+  // adopted debt is treated under strict E2E AFTER the adoption commit):
+  // `lenient` — the ABSENT default — drops the `adoptionCommit` term from
+  // the neutrality branch, so the forgiveness survives on ANY diff-scoped
+  // change set with no product source: a later commit that only adds tests,
+  // the mapping sidecar or runner configuration no longer has to re-prove
+  // debt `gateforge adopt` already recorded, which is what 0.10.3 demanded
+  // of the first test-adding commit of every repository. `strict` keeps
+  // the 0.10.3 condition byte for byte (an adoption commit or
+  // policy-inputs-only, plus the enforced pin). The pin requirement is
+  // UNCHANGED in both values, a newly claimed obligation is still graded
+  // on its own evidence (the forgiveness covers adopted-baseline entries
+  // only), and one discovered resource's source in the change set denies
+  // the neutrality in either value. `init --preset strict` writes no key,
+  // so a preset install gets the lenient default like every other.
+  const adoptedDebtLenient = config.enforcement?.adoptedDebt !== 'strict';
+  const ownerPinEnforced =
     evaluateApprovedPolicy(
       docsApprovalResolution ??
         resolveApprovedPolicyDigest({
@@ -1640,6 +1654,30 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
       docsApprovalDigest ?? trustedPolicyDigestForConfig(io.cwd, config),
       config.enforcement?.strictE2E === true || hasOwnerExclusions,
     ).status === 'enforced';
+  const adoptedBaselineSurvivesStrictE2E =
+    diffScoped &&
+    (scopeDecision.policyInputsOnly ||
+      ((adoptionCommit || adoptedDebtLenient) && scopeDecision.productBehaviorNeutral)) &&
+    ownerPinEnforced;
+
+  // 0.10.4: the same slice as a RECEIPT-COVERAGE fact. Forgiveness alone
+  // would not unblock the commit it exists for: a tests/test-map/runner-
+  // config change expands the evaluation to every obligation, so the
+  // scoped receipt is refused with `EVIDENCE_SCOPE_INCOMPLETE` over the
+  // adopted debt BEFORE any verdict is graded. Under strict E2E with the
+  // lenient default such a change set therefore demands exactly what
+  // adoption mode demands of the wiring commit — coverage of the
+  // obligations it newly claims — while every untouched obligation stays
+  // unproven, named debt. Narrowed to the lenient value, to strict E2E
+  // (a non-strict run keeps today's requirement byte for byte) and to an
+  // ENFORCED pin (same trust bar as the forgiveness above), so `strict`
+  // and an unpinned candidate keep 0.10.3 exactly.
+  const adoptedDebtCoverageSlice =
+    config.enforcement?.strictE2E === true &&
+    adoptedDebtLenient &&
+    diffScoped &&
+    scopeDecision.productBehaviorNeutral &&
+    ownerPinEnforced;
 
   // Static annotations are compared with generated sidecar entries. The
   // advisory is deliberately separate from blockers for this warning-only
@@ -1891,9 +1929,16 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
   // mismatch, a receipt bound to another candidate tree, a
   // `CHANGE_UNMAPPED` file and an uncovered newly claimed obligation are
   // all refused exactly as before.
+  // ADOPTED DEBT (0.10.4, `adoptedDebtCoverageSlice` above): the same
+  // treatment a product-behaviour-neutral change set gets after the
+  // adoption commit — coverage of what it newly claims, never of the
+  // adopted debt the change cannot have affected.
   //
   const coverageChangedFiles =
-    diffScoped && (scopeDecision.mode === 'changed' || adoptionCommit) ? scopeDecision.changedFiles : null;
+    diffScoped &&
+    (scopeDecision.mode === 'changed' || adoptionCommit || adoptedDebtCoverageSlice)
+      ? scopeDecision.changedFiles
+      : null;
   const requiredCoverage = (): ScopedObligationRef[] => {
     const sources = sourcesByResourceId(pipeline.graph, pipeline.behaviorCatalog);
     return pipeline.policy.obligations

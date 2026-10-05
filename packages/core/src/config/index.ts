@@ -121,6 +121,34 @@ export const EnforcementConfigSchema = z
      */
     strictE2E: z.boolean().default(false),
     /**
+     * How ADOPTED debt is treated under `enforcement.strictE2E` after
+     * the adoption commit (0.10.4; REFERENCE "Adopted debt after
+     * adoption"). `lenient` (the ABSENT default) keeps the adopted
+     * baseline's forgiveness on any change set that carries no product
+     * behaviour — every changed file is a policy input, a gate-defining
+     * input, a catalog test file, test infrastructure, a runtime-declared
+     * input, declared test tooling or documentation, and NO discovered
+     * resource's source is in it — so a commit that only adds tests, the
+     * mapping sidecar or runner configuration does not have to re-prove
+     * debt the owner already recorded. `strict` keeps the 0.10.3
+     * behaviour exactly: only an ADOPTION COMMIT (HEAD has no gate and
+     * this candidate wires one, computed from the base revision) can
+     * keep the forgiveness; every later commit re-grades adopted debt
+     * blocking.
+     *
+     * The setting moves WHICH obligations the strict-E2E re-grade
+     * forgives, never WHO may approve the policy: both values require
+     * the owner pin to be enforced, and an owner WAIVER is never
+     * forgiveness. One discovered resource's source in the change set
+     * denies the neutrality in either value, so the debt is re-graded
+     * exactly as before.
+     *
+     * The key lives in `.gateforge.yml`, so its bytes are inside the
+     * owner-pinned trusted policy digest: flipping it is a policy
+     * revision change the owner must re-approve.
+     */
+    adoptedDebt: z.enum(['lenient', 'strict']).optional(),
+    /**
      * The OWNER-APPROVED policy revision digest (ADR 0005 D6 enforcement):
      * the `trustedPolicyDigest` value the owner pinned as the approved
      * policy revision. Gates compare the candidate's recomputed digest

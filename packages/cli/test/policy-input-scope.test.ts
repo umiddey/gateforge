@@ -87,18 +87,23 @@ interface Report {
  * Installs the two-resource strict-E2E repository and adopts
  * its red set. `baseIgnore` is the base revision's `.gitignore`
  * (the default already carries the engine-state entry).
+ * `adoptedDebt` writes `enforcement.adoptedDebt` (0.10.4); absent is the
+ * `lenient` default, under which a `.gitignore` line outside the managed
+ * block — an ignore control, so no product behaviour — keeps the adopted
+ * debt forgiven. A test that pins the 0.10.3 re-grade asks for `strict`.
  */
 async function installAndAdopt(
   repo: TempRepo,
   baseIgnore = '.gateforge/test-gates/\nnode_modules/\n',
+  adoptedDebt: 'lenient' | 'strict' | null = null,
 ): Promise<void> {
   installFixture(repo);
   repo.writeFiles({
     ...SPECS,
     '.gateforge/adapters/accounts.mjs': ADAPTER,
     '.gateforge/adapters/orders.mjs': ADAPTER,
-    '.gateforge.yml': `enforcement:\n  strictE2E: true\n${configYml()}`,
-    'playwright.config.mjs': "export default { testDir: 'e2e', projects: [{ name: 'chromium' }] };\n",
+    '.gateforge.yml':
+      `enforcement:\n  strictE2E: true\n${adoptedDebt === null ? '' : `  adoptedDebt: ${adoptedDebt}\n`}${configYml()}`,
     'node_modules/playwright/cli.js': STUB_CLI,
     '.gitignore': baseIgnore,
   });
@@ -239,9 +244,14 @@ describe('Gateforge-owned policy inputs in the changed scope (real CLI)', () => 
     });
   }, 240_000);
 
-  it('a .gitignore line outside the managed block re-grades the adopted debt', async () => {
+  it('with `adoptedDebt: strict`, a .gitignore line outside the managed block re-grades the adopted debt', async () => {
     await withTempRepo({}, async (repo) => {
-      await installAndAdopt(repo, 'node_modules/\n');
+      // 0.10.4: the LENIENT default keeps the adopted debt forgiven here —
+      // an ignore control carries no product behaviour, so a `.gitignore`
+      // line outside the managed block is still neutral and its change set
+      // is not the re-grade trigger. The 0.10.3 re-grade is the behaviour
+      // an owner opts into, and this is where it stays pinned.
+      await installAndAdopt(repo, 'node_modules/\n', 'strict');
       // `dist/` is the owner's own ignore wiring — not
       // Gateforge's managed block — so the change set is not
       // product-behavior-neutral. `.gitignore` keeps its
@@ -297,9 +307,12 @@ describe('Gateforge-owned policy inputs in the changed scope (real CLI)', () => 
     });
   }, 240_000);
 
-  it('a staged setup commit with a .gitignore line outside the managed block blocks', async () => {
+  it('with `adoptedDebt: strict`, a staged setup commit with a .gitignore line outside the managed block blocks', async () => {
     await withTempRepo({}, async (repo) => {
-      await installAndAdopt(repo, 'node_modules/\n');
+      // 0.10.4: the LENIENT default forgives the adopted debt for this
+      // change set, so the fail-closed re-grade it asserts is the
+      // behaviour an owner asks for by name.
+      await installAndAdopt(repo, 'node_modules/\n', 'strict');
       const pin = stageSetupCommit(repo, {
         '.gitignore': `node_modules/\n${IGNORE_BLOCK}dist/\n`,
       });

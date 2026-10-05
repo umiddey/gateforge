@@ -153,6 +153,11 @@ It records today's blocking findings as forgiven debt, in
 - Under `--preset strict` / `strictE2E`, an adopted E2E obligation is not
   proof. It blocks with `ENFORCEMENT_UNTRUSTED` again as soon as a change
   touches it — adoption forgives today's state, not the next edit.
+- After the adoption commit itself, a commit that carries NO product
+  behaviour — tests, the mapping sidecar, runner configuration — still keeps
+  the adopted debt forgiven: that is `enforcement.adoptedDebt: lenient`, the
+  default. Declare `strict` in `.gateforge.yml` to re-grade it on every
+  commit, as 0.10.3 did.
 - `gateforge adopt --help` prints this contract, and
   `gateforge baseline diff <before> <after>` compares two adopted sets by
   obligation ID.

@@ -35,8 +35,10 @@
  * - the three negatives the forgiveness needs: ONE changed product
  *   resource source re-grades the debt (while the obligation that change
  *   newly claims stays covered), the same neutral change set in a LATER
- *   commit is judged exactly as today, and without the owner pin there is
- *   no forgiveness at all;
+ *   commit is judged exactly as 0.10.3 once the owner declares
+ *   `enforcement.adoptedDebt: strict` (0.10.4; the lenient DEFAULT is
+ *   covered in `adopted-debt-mode.test.ts`), and without the owner pin
+ *   there is no forgiveness at all;
  * - R7 — a repository whose HEAD ALREADY has a gate still demands full
  *   scope, and deleting the generated hook is a policy-input change the
  *   owner must re-approve (§9's last paragraph);
@@ -104,6 +106,11 @@ const ADOPTED_SOURCE = `src/${ADOPTED_NAMES[0]}.txt`;
 const ENFORCEMENT_BLOCKS = {
   '': '',
   strict: 'mode: changed\nenforcement:\n  strictE2E: true\n',
+  // 0.10.4 `enforcement.adoptedDebt: strict` — the 0.10.3 treatment of
+  // adopted debt AFTER the adoption commit. A suite that asserts "a later
+  // neutral commit re-grades the debt" must now ask for it by name; the
+  // lenient DEFAULT is covered in `adopted-debt-mode.test.ts`.
+  'strict-debt': 'mode: changed\nenforcement:\n  strictE2E: true\n  adoptedDebt: strict\n',
   off: 'enforcement:\n  strictE2E: false\n',
 } as const;
 /**
@@ -111,7 +118,10 @@ const ENFORCEMENT_BLOCKS = {
  * repository with configuration and NO gate, which is what HEAD looks
  * like the day before adoption.
  */
-function fixtureConfig(enforcement: '' | 'strict' | 'off', testTooling?: readonly string[]): string {
+function fixtureConfig(
+  enforcement: '' | 'strict' | 'strict-debt' | 'off',
+  testTooling?: readonly string[],
+): string {
   return `${ENFORCEMENT_BLOCKS[enforcement]}${configYml(testTooling === undefined ? {} : { testTooling })}`;
 }
 
@@ -287,12 +297,16 @@ describe('F2 adoption mode: the first commit that wires the gate', () => {
     }
   }, 240_000);
 
-  it('the same neutral change set in a LATER commit is judged exactly as today', async () => {
+  it('with `adoptedDebt: strict` the same neutral change set in a LATER commit is judged exactly as 0.10.3', async () => {
     const app = await startEvidenceApp();
     try {
       await withTempRepo({}, async (repo) => {
         await installUngated(repo, app.url);
-        await stageAdoptionCommit(repo);
+        // 0.10.4: the lenient default forgives this commit's adopted debt
+        // (see `adopted-debt-mode.test.ts`); the owner who wants the
+        // 0.10.3 treatment of adopted debt after the adoption commit asks
+        // for it by name.
+        await stageAdoptionCommit(repo, { '.gateforge.yml': fixtureConfig('strict-debt') });
         await sealScopedReceipt(repo, gateEnv(trustedPolicyDigestForConfig(repo.root, loadConfig(repo.path('.gateforge.yml')))));
         // The adoption commit lands. From here HEAD has a gate, so the
         // condition can never hold again.
@@ -324,9 +338,10 @@ describe('F2 adoption mode: the first commit that wires the gate', () => {
         const output = `${run.stdout}\n${run.stderr}`;
         const report = JSON.parse(run.stdout) as Report;
 
-        // Unchanged behaviour: adoption mode is one-shot, so this commit is
-        // judged like every later one — the expanded scope demands
-        // full-scope coverage, and the adopted debt is re-graded blocking.
+        // Unchanged behaviour under `adoptedDebt: strict`: adoption mode is
+        // one-shot, so this commit is judged like every later one — the
+        // expanded scope demands full-scope coverage, and the adopted debt
+        // is re-graded blocking.
         expect(
           report.blocking.map((entry) => entry.cause ?? ''),
           output,

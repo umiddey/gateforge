@@ -773,6 +773,42 @@ mapping or no sealed evidence; and any commit after the first one. Adoption
 mode moves WHICH obligations must be proven, never WHO may approve the
 policy.
 
+### Adopted debt after adoption
+
+`gateforge adopt` records the debt a repository already carries, and under
+`enforcement.strictE2E` a baselined obligation is still not proof: every
+adopted `missing` verdict is re-graded blocking. From 0.10.3 that made the
+FIRST commit after setup — the one that adds tests, the mapping sidecar and
+runner configuration, with no product code at all — demand proof of every
+adopted obligation, which no scoped run can produce.
+
+`enforcement.adoptedDebt` is the owner-pinned setting that decides it:
+
+- `lenient` (the DEFAULT; the key may be absent) — the adopted baseline keeps
+  its forgiveness on any change set that carries no product behaviour: every
+  changed file is a policy input, a gate-defining input (including the
+  manifest and lockfile), a catalog test file, test infrastructure, a
+  runtime-declared input, declared `testTooling`, or documentation, and NO
+  discovered resource's source is in it. Such a commit demands receipt
+  coverage of the obligations it NEWLY CLAIMS — the same slice an adoption
+  commit demands — and the adopted debt it cannot have affected stays named,
+  forgiven debt. Any discovered resource's source in the change set denies
+  the neutrality, and the debt is re-graded blocking exactly as before.
+- `strict` — the 0.10.3 treatment: only an ADOPTION COMMIT (the one-shot,
+  computed condition above) keeps the forgiveness, so every later commit
+  re-grades adopted debt blocking again.
+
+What the setting never moves: the owner pin is required in BOTH values
+(`evaluateApprovedPolicy(...).status === 'enforced'`, or nothing is
+forgiven), a newly claimed or newly arising obligation is still graded on
+its own evidence in both values, and an owner WAIVER is never forgiveness —
+strict E2E re-grades it either way. The key lives in `.gateforge.yml`, so its
+bytes are inside the approved policy digest: flipping it is a policy-revision
+change the owner re-approves, never something a candidate grants itself.
+`gateforge init --preset strict` writes no key, so a preset install gets the
+lenient default like every other configuration; declare `strict` in
+`.gateforge.yml` to keep the 0.10.3 treatment.
+
 ### The pack configs and the generated wiring are owner-pinned
 
 `.gateforge/planes.json`, `.gateforge/endpoints.json`,
@@ -1066,6 +1102,9 @@ Enforcement-relevant sections:
   `strictE2E: boolean` (default `false`), and optional
   `receiptStage: pre-push | pre-commit | ci`. New configs choose `pre-push`;
   omission preserves legacy behavior.
+- `enforcement.adoptedDebt:` — `lenient | strict` (default `lenient`): how
+  ADOPTED debt is treated under `strictE2E` after the adoption commit. See
+  "Adopted debt after adoption" below.
 - `coveragePolicy:` (opt-in, fail closed) — the closed-world CRUD coverage
   policy: enumerated user-facing tables (validated against the run's
   resource inventory on EVERY run — an unknown table name is a config error,

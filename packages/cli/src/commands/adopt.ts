@@ -96,8 +96,11 @@ project that already has code and therefore already has findings.
 
   strictE2E — with \`enforcement.strictE2E: true\` a baselined E2E
   obligation is NOT proof. It blocks with ENFORCEMENT_UNTRUSTED again
-  as soon as a change touches it; adoption forgives today's state, not
-  the next edit.
+  as soon as a change touches what it proves. A change set that carries
+  no product behaviour at all — tests, the mapping sidecar, runner
+  configuration — keeps the adopted debt forgiven under the default
+  \`enforcement.adoptedDebt: lenient\`; declare \`strict\` to re-grade it
+  on every commit after this one.
 
   wiring — after recording, it applies the blocking wiring (pre-commit
   hook block + CI template) through the same idempotent path as

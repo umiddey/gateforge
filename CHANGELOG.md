@@ -1,6 +1,16 @@
 # Changelog
 
 
+## 0.10.4
+
+### Added
+
+- **`enforcement.adoptedDebt: lenient | strict` — the owner-pinned setting for how ADOPTED debt is treated under `strictE2E` after the adoption commit.** Default `lenient`; the key may be absent. Under `lenient` the adopted baseline keeps its forgiveness on any change set that carries no product behaviour — every changed file is a policy input, a gate-defining input (manifest and lockfile included), a catalog test file, test infrastructure, a runtime-declared input, declared `testTooling` or documentation, and NO discovered resource's source is in it — and such a commit demands receipt coverage of the obligations it newly claims, the same slice an adoption commit demands. The pin requirement is unchanged (`evaluateApprovedPolicy(...).status === 'enforced'`, or nothing is forgiven), a newly claimed or newly arising obligation is still graded on its own evidence, an owner WAIVER is still re-graded, and one discovered resource's source in the change set denies the neutrality in either value. The key lives in `.gateforge.yml`, so its bytes are inside the approved policy digest: flipping it is a policy-revision change the owner re-approves, never something a candidate grants itself.
+
+### Changed
+
+- **The default behaviour after adoption is now lenient.** Measured on a real repository running 0.10.3: once the adoption commit landed, the first commit that added tests, the mapping sidecar and runner configuration — no product code at all — expanded the evaluation to every obligation, and under `strictE2E` every adopted `verdict:missing` obligation was re-graded blocking (`strict E2E mode: baselined: adopted as forgiven (was missing) …`), so that commit had to prove ALL the debt `gateforge adopt` had just recorded — which no scoped run can do. Such a commit is now committable: the adopted debt stays reported as forgiven debt. Declare `enforcement.adoptedDebt: strict` to keep the 0.10.3 behaviour exactly, in which case only an ADOPTION COMMIT (the one-shot condition computed from the base revision) keeps the forgiveness and every later commit re-grades adopted debt blocking. `gateforge init --preset strict` writes no key, so a preset install gets the lenient default like every other configuration.
+
 ## 0.10.3
 
 ### Fixed
