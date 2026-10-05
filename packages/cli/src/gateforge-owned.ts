@@ -95,7 +95,7 @@ export const GATEFORGE_OWNED_DIRS: readonly string[] = [
 
 /**
  * Extensions accepted for an engine document directly under `.gateforge/`
- * (`.gateforge/policies.yml`, `.gateforge/planes.json`, …). Source and
+ * (`.gateforge/policies.yml`, `.gateforge/behavior.yml`, …). Source and
  * executable code never qualifies: only documents the engine itself reads.
  */
 const ENGINE_DOCUMENT_EXTENSIONS: ReadonlySet<string> = new Set([

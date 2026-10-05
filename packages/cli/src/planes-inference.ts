@@ -3,8 +3,9 @@
  *
  * Unconfigured repos block every table with `PLANE_UNRESOLVED` — the
  * classifier never guesses across tenant/master/global (ADR 0003 D5) —
- * so init can PROPOSE `.gateforge/planes.json` from what discovery
- * actually saw: the source directories of the discovered business
+ * so init can PROPOSE the `planes:` section of the owner-answers
+ * document from what discovery actually saw: the source directories of
+ * the discovered business
  * tables. The proposal is a review artifact, never a silent decision:
  * every rule carries a reason naming the directory it was inferred
  * from, init writes the file only on explicit consent, and the user is

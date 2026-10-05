@@ -547,7 +547,7 @@ function endpointSemanticsGuidance(detail: string, graph: ResourceGraph): string
  *   `router '<x>' in <file> declares a computed prefix`): the value is
  *   hidden in an expression, so the fix is a literal at the mount site.
  *   Nothing else reaches it, and that is verified, not assumed — a
- *   `.gateforge/endpoints.json` capability rule cannot match (no route
+ *   `endpoints:` capability rule cannot match (no route
  *   fact is emitted for this mount, so a rule has no method/path to
  *   select on) and `gateforge waive` cannot resolve it (`waive: no
  *   obligation resolves for …`, exit 2).
@@ -556,7 +556,7 @@ function endpointSemanticsGuidance(detail: string, graph: ResourceGraph): string
  *   form of the same thing): the mount names a router the scanner cannot
  *   follow, so NO prefix edit can apply — the mount may carry no prefix
  *   at all. The remedy is a declaration,
- *   `.gateforge/fastapi.json`'s `importRoots`, naming the directory the
+ *   `scan.fastapi`'s `importRoots` in `.gateforge.yml`, naming the directory the
  *   absolute imports in that file are written relative to. Verified
  *   against the real python detector on the canonical template shape
  *   (`backend/app/main.py` including `app.api.main.api_router`, which

@@ -93,7 +93,7 @@ export interface EndpointCapabilityRule {
   readonly reason: string;
 }
 
-/** Parsed `.gateforge/endpoints.json` document (strict schema). */
+/** Parsed `endpoints:` section of the owner-answers document (strict schema). */
 export interface EndpointsConfig {
   readonly rules: readonly EndpointCapabilityRule[];
 }

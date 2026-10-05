@@ -22,22 +22,23 @@
  *   itself (the route/table collision red probe stays green).
  *
  * Endpoint-plane config channel (plan phase 5): the SAME
- * `.gateforge/planes.json` document that classifies business tables can
- * declare endpoint planes — an explicit, human-reviewed declaration
+ * `planes:` section of the owner-answers document that classifies
+ * business tables can declare endpoint planes — an explicit,
+ * human-reviewed declaration
  * keyed on the ROUTER SOURCE FILE path (`match` globs; `tables` rules
  * never apply to endpoints). ALL matching rules must agree: agreement
  * emits a plane-dimension signal exactly like the classifier's
  * inheritance channel; disagreement emits a typed
  * `PLANE_RULE_CONTRADICTION` blocking entry and no plane evidence; no
  * matching rule leaves the endpoint on the inheritance/operational/
- * unresolved channels as before. Absence of the config file is normal
- * and byte-identical to not having this channel; a malformed document
+ * unresolved channels as before. Absence of the section is normal
+ * and byte-identical to not having this channel; a malformed section
  * throws (fail closed). The config plane participates as EVIDENCE, never
  * as a blanket override: when the linked-resource/operational plane
  * derivable from the contributions contradicts it, both assertions are
  * emitted so the classifier blocks with `PLANE_CONTRADICTION`.
  *
- * Endpoint-capability config channel (`.gateforge/endpoints.json`, see
+ * Endpoint-capability config channel (`endpoints:`, see
  * `endpoint-config.ts`): the explicit escape hatch the
  * `ENDPOINT_SEMANTICS_UNRESOLVED` message promises. A rule keyed on
  * router source path / handler simple name / canonical path / exact
@@ -937,7 +938,7 @@ export function compileEndpointContribution(
       }
     }
     // -- Declarative endpoint-capability config channel -------------------
-    // (.gateforge/endpoints.json): the explicit escape hatch for
+    // (`endpoints:` of the owner-answers document): the explicit escape hatch for
     // capabilities detector facts cannot see (service-layer delegation).
     // ALL matching rules must agree: disagreement emits a typed
     // contradiction and applies nothing (fail closed, never
@@ -1196,8 +1197,8 @@ function endpointSignal(dimension: string, assertion: unknown, record: EndpointR
  * A plane-dimension declaration signal for one endpoint, shaped exactly
  * like the classifier's inheritance pass mints them (`basis:
  * 'declaration'`, channel-qualified source). `channel` explains WHERE the
- * assertion came from: `config` (the reviewed `.gateforge/planes.json`
- * rule) or the mirrored `linked-resource` / `operational` derivation the
+ * assertion came from: `config` (the reviewed `planes:` rule) or the
+ * mirrored `linked-resource` / `operational` derivation the
  * classifier would otherwise apply only when no config evidence exists.
  * `location` overrides the router source when the evidence lives on the
  * linked resource instead.

@@ -40,7 +40,7 @@ Then put the project-local binary on your `PATH` (`export
 PATH="$PWD/node_modules/.bin:$PATH"`) or prefix the commands below with
 `npx `.
 
-Run these commands from `example/`. The checked-in `.gateforge/planes.json` and `.gateforge/endpoints.json` make the sample's route classification and endpoint behavior explicit; the verification script is excluded from product-source scanning.
+Run these commands from `example/`. The `planes:` and `endpoints:` sections of the checked-in `.gateforge/classification-policy.yml` make the sample's route classification and endpoint behavior explicit; the verification script is excluded from product-source scanning.
 
 ```sh
 gateforge init --no-ci --no-blocking

@@ -124,9 +124,9 @@ async function installPlaneUnresolvedFixture(
  * owner-reviewed channel that resolves a table's plane from a marker
  * in its own source file — the table-side answer of a plane rule
  * (`gateforge classify plane` writes the route-side answer into
- * `.gateforge/planes.json`). Since 0.11.0 the declaration syntax a
- * detector may read is `.gateforge.yml`'s `scan.declarations`, not a
- * key in the answers document.
+ * the `planes:` section of `.gateforge/classification-policy.yml`).
+ * Since 0.11.0 the declaration syntax a detector may read is
+ * `.gateforge.yml`'s `scan.declarations`, not a key in the answers document.
  */
 const PLANE_DECLARED_CONFIG_YML = configYml({
   scan: {
