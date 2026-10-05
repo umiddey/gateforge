@@ -18,7 +18,12 @@
  *   rule's cases `failing` — a red test is never forgiven — and a failing
  *   run seals no receipt;
  * - a named run that does not execute the mapped test grades the case
- *   `unproven` — visible, never satisfied, never silently absent.
+ *   `unproven` — visible, never satisfied, never silently absent;
+ * - §7.6: a rule case mapped to a MOCKED spec (`page.route`, statically
+ *   scanned by the playwright pack), to an owner-QUARANTINED test, or
+ *   to a test nothing DECLARED (inference alone) never becomes
+ *   satisfied — the mark is refused, the run grades unproven/unmapped,
+ *   and the output names which of the three reasons bit.
  *
  * The stub runner plays the suite-side role the real `@gate-forge/
  * pack-playwright` fixture plays in a browser run — resolve the
@@ -42,7 +47,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { EvidenceRecordSchema, loadConfig, withTempRepo, type TempRepo } from '@gate-forge/core';
 import { trustedPolicyDigestForConfig } from '../src/execution.js';
-import { answersYml, businessRule, configYml, fixtureFingerprint, installFixture, runCli } from './helpers.js';
+import { answersYml, businessRule, configYml, fixtureFingerprint, installFixture, PLUGIN_SOURCE, runCli } from './helpers.js';
 import {
   DEFAULT_EVIDENCE_NAMES,
   VERIFIER_KEY,
@@ -93,7 +98,7 @@ interface RuleSectionEntry {
 
 interface Report {
   summary: { blocking: number };
-  blocking: Array<{ cause: string | null; detail: string }>;
+  blocking: Array<{ cause: string | null; name: string | null; detail: string }>;
   businessRules?: RuleSectionEntry[];
 }
 
@@ -161,7 +166,7 @@ function invoicesWaiver(): string {
  * spool handling in another node process, so no in-process fake timer
  * or awaitable signal exists — the loop is the await, and it is bounded.
  */
-function observeStubCli(): string {
+function observeStubCli(observeClaims: readonly string[] = [CLAIM_AFTER, CLAIM_FIELDS]): string {
   const titles = Object.fromEntries(evidenceSpecTable(NAMES).map((row) => [`e2e/${row.name}.spec.mjs`, row.title]));
   return [
     "const { readFileSync, writeFileSync, appendFileSync, mkdirSync } = require('node:fs');",
@@ -171,7 +176,7 @@ function observeStubCli(): string {
     `const keys = ${JSON.stringify(evidenceKeys(NAMES))};`,
     `const observeFile = ${JSON.stringify(RULE_FILE)};`,
     `const probePath = ${JSON.stringify(PROBE_PATH)};`,
-    `const observeClaims = ${JSON.stringify([CLAIM_AFTER, CLAIM_FIELDS])};`,
+    `const observeClaims = ${JSON.stringify(observeClaims)};`,
     "if (argv.includes('--list')) {",
     '  process.stdout.write(JSON.stringify({',
     '    config: { rootDir: process.cwd() },',
@@ -276,11 +281,20 @@ function observeStubCli(): string {
  * three evidence specs (the invoice spec without the persistence marker),
  * attested adapters, the observe-extended stub runner, the rule-extended
  * sidecar and the owner waiver for the invoice obligation.
+ *
+ * `options.scanSpecs` extends the closed-world scan roots with the
+ * invoice SPEC FILE itself, so the playwright pack statically scans it
+ * (a real spec file the pack parses — not a stub-listed row) and its
+ * catalog row carries the static facts: inference signals AND, when the
+ * spec intercepts the network, the mock signal. The fixture plugin skips
+ * those scanned spec paths (a language plugin would never read a
+ * playwright spec as a resource), so the scan adds no junk resources.
  */
 function installObserveRepo(
   repo: TempRepo,
   appUrl: string,
   specOverrides: Record<string, string> = {},
+  options: { scanSpecs?: boolean; observeClaims?: readonly string[] } = {},
 ): void {
   installFixture(repo);
   repo.writeFiles({
@@ -295,9 +309,23 @@ function installObserveRepo(
     '.gateforge/test-map.yml': observeTestMap(),
     '.gateforge/waivers/invoices.json': invoicesWaiver(),
     '.gateforge/classification-policy.yml': answersYml([RULE]),
-    '.gateforge.yml': `mode: changed\n${configYml()}`,
+    '.gateforge.yml': `mode: changed\n${configYml(
+      options.scanSpecs === true ? { include: "['src/**/*.txt', 'e2e/invoices.spec.mjs']" } : {},
+    )}`,
+    ...(options.scanSpecs === true
+      ? {
+          // The spec file rides the scan roots, so the fixture plugin
+          // receives it with everything else; a real detector would not
+          // read a playwright spec as a business resource, and neither
+          // does this one.
+          'plugin.mjs': PLUGIN_SOURCE.replace(
+            'for (const rel of paths) {',
+            "for (const rel of paths) {\n      if (rel.startsWith('e2e/')) continue;",
+          ),
+        }
+      : {}),
     'playwright.config.mjs': "export default { testDir: 'e2e', projects: [{ name: 'chromium' }] };\n",
-    'node_modules/playwright/cli.js': observeStubCli(),
+    'node_modules/playwright/cli.js': observeStubCli(options.observeClaims),
     '.gitignore': '.gateforge/test-gates/\nnode_modules/\n',
   });
 }
@@ -506,6 +534,208 @@ describe('§7.5 a real sealed run grades the rule from its own authorized record
         ]);
         expect(
           report.businessRules?.every((entry) => entry.finding?.detail.includes('the sealed run did not execute it')),
+          output,
+        ).toBe(true);
+      });
+    } finally {
+      await app.close();
+    }
+  }, 240_000);
+});
+
+/** The invoice spec with the journey's network access MOCKED away: the
+ * `page.route` interception answers in place of the real app, so the
+ * test proves the mock, never the rule. No `__EVIDENCE__` marker, exactly
+ * like the honest rule spec (no persistence intent is forwarded). */
+function mockedRuleSpec(): string {
+  return [
+    "import { test } from 'playwright/test';",
+    "test('reads an invoice', async ({ page }) => {",
+    "  await page.route('**/invoices-after-issue', (route) =>",
+    "    route.fulfill({ status: 200, contentType: 'application/json', body: '{\"mocked\":true}' }));",
+    '});',
+    '',
+  ].join('\n');
+}
+
+describe('§7.6 a mocked, quarantined or merely inferred mapping never satisfies', () => {
+  it('refuses to mark a mocked spec, and even a passing sealed run keeps the case unproven naming the mock', async () => {
+    const app = await startEvidenceApp();
+    try {
+      await withTempRepo({}, async (repo) => {
+        // The invoice spec REALLY intercepts the network (`page.route`),
+        // and the pack statically scans it (scanSpecs) — the catalog row
+        // for the rule's test carries the observed mock signal, exactly
+        // as it would in a real repository.
+        installObserveRepo(repo, app.url, { [RULE_FILE]: mockedRuleSpec() }, { scanSpecs: true });
+        repo.commitFiles({}, 'base');
+        const env = gateEnv(repo, app.url);
+
+        // The product refuses the dishonest declaration outright: an
+        // explicit e2e kind cannot override observed mocking (§5.3).
+        const refused = await runCli(
+          repo,
+          [
+            'tests', 'mark',
+            '--test', RULE_KEY,
+            '--kind', 'observed-e2e',
+            '--rule', 'invoices-stay-readable/read-after-issue',
+            '--reason', 'the mocked journey claims the case',
+          ],
+        );
+        const refusedOutput = `${refused.stdout}\n${refused.stderr}`;
+        expect(refused.code, refusedOutput).toBe(2);
+        expect(refused.stderr, refusedOutput).toContain('observed mocking');
+        expect(refused.stderr, refusedOutput).toContain('§5.3');
+
+        // The bypass a determined agent would attempt — the declaration
+        // hand-written into the sidecar — is graded, not trusted. Statically
+        // the case is already unproven WITH the mock as the named reason.
+        const staticCheck = await runCli(repo, ['check', '--require-e2e', '--format', 'json'], env);
+        const staticOutput = `${staticCheck.stdout}\n${staticCheck.stderr}`;
+        expect(staticCheck.code, staticOutput).toBe(1);
+        const staticReport = JSON.parse(staticCheck.stdout) as Report;
+        expect(
+          staticReport.businessRules?.map((entry) => [entry.caseId, entry.status, entry.channel]),
+          staticOutput,
+        ).toEqual([
+          ['read-after-issue', 'unproven', null],
+          ['read-shows-fields', 'unproven', null],
+        ]);
+        expect(
+          staticReport.businessRules?.every((entry) =>
+            entry.finding?.detail.includes('mock the system under test — a mocked spec never proves an end-to-end rule'),
+          ),
+          staticOutput,
+        ).toBe(true);
+
+        // And the sealed run settles it: the mocked test RUNS and PASSES
+        // (the stub executes it green, the proxy traffic is witnessed and
+        // claimed) — and the case is STILL unproven, because the proof a
+        // mocked spec produces is the mock's, never the rule's.
+        const run = await runCli(repo, ['test-gates', '--changed', '--format', 'json'], env);
+        const output = `${run.stdout}\n${run.stderr}`;
+        expect(run.code, output).toBe(1);
+        const report = JSON.parse(run.stdout) as Report;
+        expect(report.businessRules?.map((entry) => [entry.caseId, entry.status, entry.channel]), output).toEqual([
+          ['read-after-issue', 'unproven', null],
+          ['read-shows-fields', 'unproven', null],
+        ]);
+        expect(
+          report.businessRules?.every((entry) =>
+            entry.finding?.detail.includes('mock the system under test — a mocked spec never proves an end-to-end rule') &&
+            entry.finding?.tests.includes(RULE_KEY),
+          ),
+          output,
+        ).toBe(true);
+        // The resolver's own §5.3 refusal stays visible: the declaration
+        // contradicts the observed mocking, by claim id.
+        const ambiguous = report.blocking.filter((entry) => entry.cause === 'TEST_MAPPING_AMBIGUOUS');
+        expect(ambiguous.length, output).toBeGreaterThan(0);
+        expect(ambiguous.some((entry) => entry.name === CLAIM_AFTER), output).toBe(true);
+        expect(ambiguous.some((entry) => entry.detail.includes('observed mocking')), output).toBe(true);
+        // A run whose rule never held seals no receipt.
+        expect(existsSync(join(repo.root, '.gateforge/test-gates/receipt.json')), output).toBe(false);
+      });
+    } finally {
+      await app.close();
+    }
+  }, 240_000);
+
+  it('never satisfies through an owner-quarantined test: the sealed run excludes it and says so', async () => {
+    const app = await startEvidenceApp();
+    try {
+      await withTempRepo({}, async (repo) => {
+        installObserveRepo(repo, app.url);
+        repo.commitFiles({}, 'base');
+        // The owner quarantines the rule's own test (the fixed fixture
+        // clock is 2026-01-01, so a 2026-01-10 expiry is in the future).
+        const quarantined = await runCli(repo, [
+          'quarantine', RULE_KEY,
+          '--owner', 'owner',
+          '--approver', 'approver',
+          '--reason', 'the invoice read is flaky in CI',
+          '--expires', '2026-01-10',
+        ]);
+        const quarantineOutput = `${quarantined.stdout}\n${quarantined.stderr}`;
+        expect(quarantined.code, quarantineOutput).toBe(0);
+
+        // Quarantines are owner-pinned policy: the digest is minted over
+        // the quarantine document, AFTER it exists.
+        const env = gateEnv(repo, app.url);
+        const run = await runCli(repo, ['test-gates', '--changed', '--format', 'json'], env);
+        const output = `${run.stdout}\n${run.stderr}`;
+        expect(run.code, output).toBe(1);
+        const report = JSON.parse(run.stdout) as Report;
+        // The quarantined test never ran: its outcome and its session
+        // were discarded, so the case cannot read satisfied — the finding
+        // says exactly which mapped test the sealed run did not execute.
+        expect(report.businessRules?.map((entry) => [entry.caseId, entry.status, entry.channel]), output).toEqual([
+          ['read-after-issue', 'unproven', null],
+          ['read-shows-fields', 'unproven', null],
+        ]);
+        expect(
+          report.businessRules?.every(
+            (entry) =>
+              entry.finding?.cause === 'BUSINESS_RULE_TEST_UNPROVEN' &&
+              entry.finding?.detail.includes('the sealed run did not execute it') &&
+              entry.finding?.tests.includes(RULE_KEY),
+          ),
+          output,
+        ).toBe(true);
+        // The run names the quarantine itself, so the reason a mapped
+        // test did not run is on the same report.
+        const quarantineSection = (
+          report as Report & { quarantine?: { count: number; tests: Array<{ testKey: string }> } }
+        ).quarantine;
+        expect(quarantineSection?.count, output).toBe(1);
+        expect(quarantineSection?.tests.map((entry) => entry.testKey), output).toEqual([RULE_KEY]);
+        expect(existsSync(join(repo.root, '.gateforge/test-gates/receipt.json')), output).toBe(false);
+      });
+    } finally {
+      await app.close();
+    }
+  }, 240_000);
+
+  it('never satisfies on inference alone: a green witnessed run without a declared mapping keeps the case unmapped', async () => {
+    const app = await startEvidenceApp();
+    try {
+      await withTempRepo({}, async (repo) => {
+        // The invoice journey exists, runs GREEN under supervision, and
+        // its traffic is witnessed — but NOTHING declares the rule cases:
+        // the sidecar maps the test for its obligation only. The catalog's
+        // inference can see the candidate; inference never writes a
+        // mapping, and a declaration is never conjured from one.
+        installObserveRepo(repo, app.url, {}, {
+          observeClaims: ['tenant.invoices:persistence:read'],
+        });
+        repo.writeFiles({
+          '.gateforge/test-map.yml': observeTestMap().replace(
+            `      - ${CLAIM_AFTER}\n      - ${CLAIM_FIELDS}\n`,
+            '',
+          ),
+        });
+        repo.commitFiles({}, 'base');
+        const env = gateEnv(repo, app.url);
+
+        const run = await runCli(repo, ['test-gates', '--changed', '--format', 'json'], env);
+        const output = `${run.stdout}\n${run.stderr}`;
+        expect(run.code, output).toBe(1);
+        const report = JSON.parse(run.stdout) as Report;
+        // The strongest possible near-miss: the only plausible test ran,
+        // passed, and produced witnessed records — and the case is still
+        // UNMAPPED, because only a declared mapping can carry proof.
+        expect(report.businessRules?.map((entry) => [entry.caseId, entry.status, entry.channel]), output).toEqual([
+          ['read-after-issue', 'unmapped', null],
+          ['read-shows-fields', 'unmapped', null],
+        ]);
+        expect(
+          report.businessRules?.every(
+            (entry) =>
+              entry.finding?.cause === 'BUSINESS_RULE_TEST_MISSING' &&
+              entry.mappedTests.length === 0 &&
+              entry.finding.detail.includes('no test is mapped for this case'),
+          ),
           output,
         ).toBe(true);
       });
