@@ -1,7 +1,7 @@
 # Changelog
 
 
-## Unreleased
+## 0.10.2
 
 ### Changed
 
