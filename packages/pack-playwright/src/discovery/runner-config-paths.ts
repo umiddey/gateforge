@@ -14,7 +14,7 @@
  * the same list, so the two can never disagree about which
  * configurations exist.
  */
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 
 import { findPlaywrightConfig } from './reconcile.js';
@@ -49,7 +49,17 @@ const RUNNER_CONFIG_CANDIDATES: Record<string, readonly string[]> = {
 };
 
 /**
- * Whether one token names a file that exists inside the repository.
+ * Whether one token names an existing regular FILE inside the
+ * repository.
+ *
+ * A DIRECTORY is not a file, and the difference is load-bearing: every
+ * accepted path joins the input snapshot, which refuses a non-file
+ * input. Accepting the `e2e` in `npm ci --prefix e2e` (a real directory
+ * in every repository) therefore turned the whole run into
+ * `unsupported input snapshot: input snapshot rejects non-file input
+ * 'e2e'` — exit 2 on a repository that was green before. So the check
+ * stats the path and accepts a regular file only, exactly as the name
+ * of this function promises.
  *
  * Args:
  *   cwd: absolute repo root.
@@ -58,8 +68,8 @@ const RUNNER_CONFIG_CANDIDATES: Record<string, readonly string[]> = {
  * Returns:
  *   string | null: the normalized repo-relative posix path, or null when
  *   the token is a flag, a URL, an absolute path outside the repository,
- *   or names nothing that exists (a `${service:id:port}` placeholder, a
- *   binary on PATH, a directory the repository does not have).
+ *   or names nothing that is an existing regular file inside it (a
+ *   `${service:id:port}` placeholder, a binary on PATH, a directory).
  */
 export function existingRepoFile(cwd: string, token: string): string | null {
   if (token.length === 0 || token.startsWith('-')) return null;
@@ -67,7 +77,11 @@ export function existingRepoFile(cwd: string, token: string): string | null {
   const absolute = isAbsolute(token) ? token : resolve(cwd, token);
   const repoRelative = relative(cwd, absolute).split('\\').join('/');
   if (repoRelative.length === 0 || repoRelative.startsWith('../')) return null;
-  if (!existsSync(absolute)) return null;
+  try {
+    if (!statSync(absolute).isFile()) return null;
+  } catch {
+    return null;
+  }
   return repoRelative;
 }
 

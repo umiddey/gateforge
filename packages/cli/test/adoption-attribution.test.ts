@@ -20,7 +20,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { loadConfig, parseConfig, withTempRepo } from '@gate-forge/core';
-import { configYml, currentInputDigest, installFixture } from './helpers.js';
+import { configYml, currentInputDigest, installFixture, runCli } from './helpers.js';
 import { computeEvaluationScope } from '../src/scope.js';
 import { collectDeclaredInputs } from '../src/input-snapshot.js';
 import type { GateforgeConfig } from '@gate-forge/core';
@@ -144,6 +144,64 @@ describe('runtime-declared inputs: what `runtime.yml` NAMES, and only that', () 
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it('a DIRECTORY token is never a runtime input: the input snapshot refuses one', () => {
+    const root = makeRoot();
+    try {
+      writeTree(root, {
+        '.gateforge/runtime.yml': [
+          'schemaVersion: 1',
+          'services_up:',
+          '  commands:',
+          // `--prefix e2e` and `--project backend` are DIRECTORIES that
+          // exist in the repository. 0.10.2 accepted any existing path, so
+          // the input snapshot then rejected the whole run
+          // (`input snapshot rejects non-file input 'e2e'`) and turned a
+          // green repository red on upgrade.
+          '    - ["npm", "ci", "--prefix", "e2e"]',
+          '    - ["bash", "scripts/e2e/run.sh", "--project", "backend"]',
+          '',
+        ].join('\n'),
+        'e2e/keep.txt': 'fixture\n',
+        'backend/keep.txt': 'fixture\n',
+        'scripts/e2e/run.sh': '#!/usr/bin/env bash\n',
+      });
+      const paths = runtimeDeclaredInputs(root, runtimeConfig());
+      expect(paths).toEqual(['scripts/e2e/run.sh']);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('a directory in a runtime command does not fail `check --changed`', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.writeFiles({
+        '.gateforge.yml': configYml().replace(
+          'policies: .gateforge/policies.yml',
+          'runtime: .gateforge/runtime.yml\npolicies: .gateforge/policies.yml',
+        ),
+        '.gateforge/runtime.yml': [
+          'schemaVersion: 1',
+          'services_up:',
+          '  commands:',
+          '    - ["npm", "ci", "--prefix", "e2e"]',
+          '    - ["bash", "scripts/e2e/run.sh"]',
+          '',
+        ].join('\n'),
+        'e2e/keep.txt': 'fixture\n',
+        'scripts/e2e/run.sh': '#!/usr/bin/env bash\n',
+        'src/accounts.txt': 'accounts fixture.table\n# touched\n',
+      });
+      repo.stage();
+
+      const run = await runCli(repo, ['check', '--changed']);
+      const output = `${run.stdout}\n${run.stderr}`;
+
+      expect(output).not.toContain('rejects non-file input');
+      expect(run.code, output).not.toBe(2);
+    });
+  }, 240_000);
 });
 
 describe('the depth-one dotenv is a RUNTIME input, never an owner-pinned one', () => {
