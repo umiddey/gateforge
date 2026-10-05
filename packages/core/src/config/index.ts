@@ -752,6 +752,26 @@ export const GateforgeConfigSchema = z
 export type GateforgeConfig = z.infer<typeof GateforgeConfigSchema>;
 
 /**
+ * The pre-0.11 shape: {@link GateforgeConfigSchema} with `scan:` optional.
+ *
+ * Only `gateforge migrate` parses this. A repository that has not migrated
+ * yet carries its scanner settings at the top of
+ * `.gateforge/classification-policy.yml`, so there is no `scan:` block to
+ * validate — and inventing a default one would write a scan scope the owner
+ * never wrote. `scan` stays ABSENT here, and the migrator composes it from
+ * the keys it is moving.
+ *
+ * zod 4: `.merge()` throws on a strict object, so the variant is built
+ * with `.extend`.
+ */
+export const PreMigrationConfigSchema = GateforgeConfigSchema.extend({
+  scan: ScanConfigSchema.optional(),
+});
+
+/** Inferred pre-0.11 `.gateforge.yml` shape (`scan:` may be absent). */
+export type PreMigrationConfig = z.infer<typeof PreMigrationConfigSchema>;
+
+/**
  * Inferred `.gateforge.yml` `tenancy` section (plan Phase 4b item 3a):
  * the owner-declared tenant scope columns. ABSENT means the pack's
  * default list — today's behavior, byte-identical.
@@ -974,6 +994,24 @@ export function parseConfig(
       },
     ]);
   }
+  // Migration diagnostic (0.11.0): the four scanner settings moved OUT of
+  // the owner-answers document into `scan:` here. A repository that has
+  // not migrated declares no `scan:` at all, and the generic "expected
+  // object, received undefined" leaves the owner with no next step — so
+  // the one diagnostic that matters is named, exactly like every other
+  // consolidated declaration.
+  if (input !== null && typeof input === 'object' && !Array.isArray(input) && !('scan' in input)) {
+    throw new GateforgeConfigError([
+      {
+        file,
+        jsonPath: '$.scan',
+        message:
+          'since 0.11 the scanner settings (`scanRoots`, `coverage`, `declarations`, ' +
+          '`volatileFields`) live in .gateforge.yml under `scan:` — run `gateforge migrate` ' +
+          '(preview, then --confirm), then re-approve the policy digest',
+      },
+    ]);
+  }
   const result = GateforgeConfigSchema.safeParse(input);
   if (result.success) {
     return result.data;
@@ -1034,4 +1072,65 @@ export function loadConfig(path = '.gateforge.yml'): GateforgeConfig {
   // block binds "none" and every task contract stays fail-closed.
   bindQueueObserver(config.queueObserver);
   return config;
+}
+
+/**
+ * Parses a PRE-0.11 `.gateforge.yml`: identical to {@link parseConfig}
+ * except that `scan:` may be absent, because a repository that has not
+ * migrated yet has its scanner settings at the top of
+ * `.gateforge/classification-policy.yml` and no `scan:` block to validate.
+ *
+ * This exists for `gateforge migrate` and nothing else: every run reads
+ * the strict shape, so a repository still carrying the old documents
+ * fails closed rather than running on settings the engine cannot see. The
+ * absent `scan:` is reported as absent, never defaulted — a migrate that
+ * invented one would write a scan scope the owner never wrote.
+ *
+ * @param input - the parsed YAML document.
+ * @param options.file - the source file, named in diagnostics.
+ * @returns the config, with `scan` present only when the file declares it.
+ * @throws GateforgeConfigError for any other schema violation.
+ */
+export function parsePreMigrationConfig(
+  input: unknown,
+  { file = '<inline>' }: { file?: string } = {},
+): PreMigrationConfig {
+  const result = PreMigrationConfigSchema.safeParse(input);
+  if (result.success) {
+    return result.data as PreMigrationConfig;
+  }
+  throw new GateforgeConfigError(diagnosticsFromZodError(result.error, file, input));
+}
+
+/**
+ * Loads and validates a pre-0.11 `.gateforge.yml` for `gateforge migrate`.
+ *
+ * @param path - config file path (default '.gateforge.yml').
+ * @returns the config, with `scan` present only when the file declares it.
+ * @throws GateforgeConfigError for a missing/unreadable/unparsable/invalid
+ *   config.
+ */
+export function loadPreMigrationConfig(path = '.gateforge.yml'): PreMigrationConfig {
+  let raw: string;
+  try {
+    raw = readFileSync(path, 'utf8');
+  } catch (cause) {
+    const code = (cause as NodeJS.ErrnoException).code ?? 'UNKNOWN';
+    throw new GateforgeConfigError([
+      { file: path, jsonPath: '$', message: `cannot read config file (${code})` },
+    ]);
+  }
+  let document: unknown;
+  try {
+    document = parseYaml(raw);
+  } catch (cause) {
+    throw new GateforgeConfigError([
+      {
+        file: path,
+        jsonPath: '$',
+        message: `invalid YAML: ${(cause as Error).message.split('\n')[0] ?? 'parse error'}`,
+      },
+    ]);
+  }
+  return parsePreMigrationConfig(document, { file: path });
 }

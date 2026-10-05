@@ -57,7 +57,7 @@ import { QUARANTINE_DIR } from '@gate-forge/core';
 import { obligationFingerprint } from './evaluate.js';
 import { TEST_MAP_RELATIVE } from './mapping.js';
 import { sourcesByResourceId } from './pipeline.js';
-import { normalizeRepoModule, PACK_CONFIGS } from './input-snapshot.js';
+import { normalizeRepoModule } from './input-snapshot.js';
 import type { GateforgeConfig } from '@gate-forge/core';
 import type { ProjectScope, RunnerOutcomesDocument } from '@gate-forge/pack-playwright';
 import { UsageError } from './errors.js';
@@ -313,13 +313,11 @@ export function trustedPolicyDigestEntriesForConfig(
     const normalized = normalizeRepoModule(module);
     if (normalized !== null) pluginModules.push(normalized);
   }
-  // Present-only: a repository that ships no pack config and no
-  // generated wiring contributes NOTHING here, so its digest is exactly
-  // what it was before these inputs were pinned.
-  const pinnedFiles = [
-    ...PACK_CONFIGS.filter((relative) => existsSync(join(cwd, ...relative.split('/')))),
-    ...generatedWiringFiles(cwd),
-  ];
+  // Present-only: a repository that ships no generated wiring contributes
+  // NOTHING here, so its digest is exactly what it was before these inputs
+  // were pinned. Since 0.11.0 the pack answers need no entry of their own:
+  // they live in documents already pinned above.
+  const pinnedFiles = generatedWiringFiles(cwd);
   return trustedPolicyDigestEntries(cwd, {
     config: '.gateforge.yml',
     policies: config.policies,

@@ -38,7 +38,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { GateforgeConfig } from '@gate-forge/core';
-import { PACK_CONFIGS, normalizeRepoModule } from './input-snapshot.js';
+import { normalizeRepoModule } from './input-snapshot.js';
 import { DEFAULT_STATE_DIR } from './state.js';
 
 /** Repo-relative path of the tracked mapping sidecar. */
@@ -186,9 +186,6 @@ export function gateforgeOwnedInput(file: string, config: GateforgeConfig): Gate
     return { path: GATEFORGE_ENGINE_REFERENCE_PATH, kind: 'engine-reference' };
   }
   if (posix === GATEFORGE_TEST_MAP_PATH) return { path: GATEFORGE_TEST_MAP_PATH, kind: 'mapping-sidecar' };
-  for (const packConfig of PACK_CONFIGS) {
-    if (posix === packConfig) return { path: packConfig, kind: 'pack-config' };
-  }
   // Configured documents: the config may point anywhere in the repository.
   if (posix === normalizeRepoPath(config.policies)) return { path: posix, kind: 'policy' };
   if (posix === normalizeRepoPath(config.classificationPolicy)) {

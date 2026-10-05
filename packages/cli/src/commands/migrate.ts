@@ -1,31 +1,40 @@
 /**
  * `gateforge migrate`: move owner declarations that used to live in their
- * own files into `.gateforge.yml`, without touching anything else.
+ * own files into the documents that read them, without touching anything
+ * else.
  *
  * 0.10 removed `.gateforge/docs-exclusions.yml` and
- * `.gateforge/cache-exclusions.yml`; evidence exclusions now live in
- * `.gateforge.yml` under `evidence.exclude`. Every command refuses a
- * repository that still carries either file (reading it would silently
- * drop the owner's exclusions), so this command is the way through.
+ * `.gateforge/cache-exclusions.yml`; 0.11.0 folds four more files away:
  *
- * Three properties make it safe to run on a real repository:
- * - **Preview by default.** Without `--confirm` nothing on disk moves; the
- *   exact diff of `.gateforge.yml` and the files that would be removed are
- *   printed and the exit code is 0.
- * - **Text insert, never re-serialize.** The owner's YAML is spliced, so
- *   every comment and key order survives byte for byte; only the
- *   `evidence.exclude` block is new. A declaration this release cannot
- *   extend safely (an inline `evidence:`, a non-list `exclude`) is
- *   refused by name instead of being overwritten.
+ * - `.gateforge/planes.json` and `.gateforge/endpoints.json` become the
+ *   `planes:` / `endpoints:` SECTIONS of the owner-answers document;
+ * - `.gateforge/http-clients.json` and `.gateforge/fastapi.json` become
+ *   `scan.httpClients` / `scan.fastapi` in `.gateforge.yml`;
+ * - the four scanner keys leave the answers document for `scan:`.
+ *
+ * Contract (unchanged, extended):
+ *
+ * - **Fail closed.** A file whose bytes its new home would refuse is
+ *   refused BY NAME here, and nothing is written — a migrate that half
+ *   succeeded would leave a repository that cannot load.
+ * - **Text-level writes.** The answers document is an owner review
+ *   artifact: every section spliced into it preserves the bytes around it,
+ *   comments included (see `yaml-section.ts`).
  * - **Idempotent.** Nothing to migrate prints `nothing to migrate` and
  *   exits 0, so a re-run after a partial adoption is free.
  *
  * Migrating changes a policy input, so it ends with the re-pin reminder:
- * the approved digest must be regenerated outside the repository.
+ * the bytes moved between documents are still owner-pinned, and a
+ * repository that trusts a digest computed over the old files would be
+ * trusting a set of inputs that no longer exists.
  */
 import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { loadConfig, type GateforgeConfig } from '@gate-forge/core';
+import {
+  loadPreMigrationConfig,
+  type GateforgeConfig,
+  type ScanConfig,
+} from '@gate-forge/core';
 import { parseArgs } from '../args.js';
 import { UsageError } from '../errors.js';
 import type { Io } from '../io.js';
@@ -39,86 +48,33 @@ import {
   legacyExclusionPathsPresent,
 } from '../legacy-exclusion-paths.js';
 import { rejectUnknownFlags } from './common.js';
+import { composeScanSection, movedDocumentSteps, type MigrationStep } from './migrate-moved-documents.js';
 
 export const MIGRATE_USAGE =
   'usage: gateforge migrate [--confirm]\n' +
-  '       Moves owner declarations out of their own files and into .gateforge.yml.\n' +
-  '       Today that is the evidence exclusions: .gateforge/docs-exclusions.yml and\n' +
-  `       ${LEGACY_CACHE_EXCLUSIONS_PATH} become\n` +
-  '       `evidence.exclude.docs` and `evidence.exclude.cache` in .gateforge.yml.\n' +
+  '       Moves owner declarations out of their own files into the documents that read them.\n' +
+  '       Today that is:\n' +
+  `         .gateforge/docs-exclusions.yml and ${LEGACY_CACHE_EXCLUSIONS_PATH}\n` +
+  '           become `evidence.exclude.docs` / `evidence.exclude.cache` in .gateforge.yml\n' +
+  '         .gateforge/planes.json and .gateforge/endpoints.json\n' +
+  '           become the `planes:` / `endpoints:` sections of the owner-answers document\n' +
+  '         .gateforge/http-clients.json and .gateforge/fastapi.json\n' +
+  '           become `scan.httpClients` / `scan.fastapi` in .gateforge.yml\n' +
+  '         `scanRoots`, `coverage`, `declarations`, `volatileFields`\n' +
+  '           move out of the owner-answers document into `scan:` in .gateforge.yml\n' +
   '       Preview by default (prints the exact diff, writes nothing, exit 0);\n' +
-  '       --confirm writes the block and deletes the old files. Idempotent: a repository\n' +
-  '       with nothing to migrate prints `nothing to migrate` and exits 0.\n' +
-  '       The old files are NOT read by any other command: while either is present every\n' +
+  '       --confirm writes each section as TEXT (every other byte survives) and deletes the\n' +
+  '       old files. Idempotent: a repository with nothing to migrate prints `nothing to\n' +
+  '       migrate` and exits 0.\n' +
+  '       The old files are NOT read by any other command: while any of them is present every\n' +
   '       command refuses and names this one.';
 
 /** Flags the command accepts (plus the implicit `help`). */
 const MIGRATE_FLAGS = ['confirm', 'help'] as const;
 
-/** What one migration step found, before anything is written. */
-interface MigrationStep {
-  /** Stable id, printed so a later step can be recognized in a diff. */
-  readonly id: string;
-  /** One owner-facing line describing what would change. */
-  readonly describe: string;
-  /** Repo-relative files this step would delete. */
-  readonly removals: readonly string[];
-  /** The exact preview text for the repository's config document. */
-  readonly diff: string;
-  /** Applies the step: rewrite the config, then delete the old files. */
-  apply(cwd: string, configPath: string): void;
-}
-
-/**
- * Builds the evidence-exclusions step, or null when there is nothing to do.
- *
- * Args:
- *   cwd: absolute repository root.
- *   config: the validated `.gateforge.yml` (read WITHOUT the pre-0.10
- *     refusal: that refusal names this command).
- *
- * Returns:
- *   MigrationStep | null: the step, or null when no old file is present.
- */
-function evidenceExclusionsStep(cwd: string, config: GateforgeConfig): MigrationStep | null {
-  if (legacyExclusionPathsPresent(cwd).length === 0) return null;
-  const docs = existsSync(join(cwd, ...LEGACY_DOCS_EXCLUSIONS_PATH.split('/')))
-    ? readLegacyDocsExclusions(cwd, config)
-    : undefined;
-  const cache = existsSync(join(cwd, ...LEGACY_CACHE_EXCLUSIONS_PATH.split('/')))
-    ? readLegacyCacheExclusions(cwd, config)
-    : undefined;
-  const configPath = '.gateforge.yml';
-  const absoluteConfig = join(cwd, configPath);
-  const before = existsSync(absoluteConfig) ? readFileSync(absoluteConfig, 'utf8') : '';
-  // Throws (by name) when the existing block cannot be extended safely.
-  const after = setEvidenceExclude(before, { docs, cache }, configPath);
-  const declared = [
-    ...(docs === undefined ? [] : [`evidence.exclude.docs (${String(docs.length)})`]),
-    ...(cache === undefined ? [] : [`evidence.exclude.cache (${String(cache.length)})`]),
-  ];
-  const removals = [
-    ...(docs === undefined ? [] : [LEGACY_DOCS_EXCLUSIONS_PATH]),
-    ...(cache === undefined ? [] : [LEGACY_CACHE_EXCLUSIONS_PATH]),
-  ];
-  return {
-    id: 'evidence-exclusions',
-    describe: `${declared.join(', ')} move into ${configPath}; ${removals.join(' and ')} deleted`,
-    removals,
-    diff: configTextDiff(configPath, before, after),
-    apply: (repoRoot: string, path: string) => {
-      writeFileAtomic(repoRoot, path, after);
-      for (const removal of removals) {
-        const absolute = join(repoRoot, ...removal.split('/'));
-        if (existsSync(absolute)) unlinkSync(absolute);
-      }
-    },
-  };
-}
-
 /**
  * Writes a file through a sibling temporary file, so an interrupted
- * migrate never leaves a half-written `.gateforge.yml` behind.
+ * migrate never leaves a half-written document behind.
  *
  * Args:
  *   cwd: absolute repository root.
@@ -140,9 +96,54 @@ function writeFileAtomic(cwd: string, path: string, text: string): void {
   }
 }
 
-/** Every migration step, in the order they are applied. */
-function planSteps(cwd: string, config: GateforgeConfig): MigrationStep[] {
-  return [evidenceExclusionsStep(cwd, config)].filter((step): step is MigrationStep => step !== null);
+/**
+ * Builds the evidence-exclusions step, or null when there is nothing to do.
+ *
+ * Args:
+ *   cwd: absolute repository root.
+ *   config: the config as the repository will read it AFTER this migration
+ *     (the pre-0.11 file plus the composed `scan:`), because the exclusion
+ *     validators refuse to hide a declared gate input.
+ *
+ * Returns:
+ *   MigrationStep[]: the step, or an empty list when no old file is present.
+ */
+function evidenceExclusionsSteps(cwd: string, config: GateforgeConfig): MigrationStep[] {
+  if (legacyExclusionPathsPresent(cwd).length === 0) return [];
+  const docs = existsSync(join(cwd, ...LEGACY_DOCS_EXCLUSIONS_PATH.split('/')))
+    ? readLegacyDocsExclusions(cwd, config)
+    : undefined;
+  const cache = existsSync(join(cwd, ...LEGACY_CACHE_EXCLUSIONS_PATH.split('/')))
+    ? readLegacyCacheExclusions(cwd, config)
+    : undefined;
+  const configPath = '.gateforge.yml';
+  const absoluteConfig = join(cwd, configPath);
+  const before = existsSync(absoluteConfig) ? readFileSync(absoluteConfig, 'utf8') : '';
+  // Throws (by name) when the existing block cannot be extended safely.
+  const after = setEvidenceExclude(before, { docs, cache }, configPath);
+  const declared = [
+    ...(docs === undefined ? [] : [`evidence.exclude.docs (${String(docs.length)})`]),
+    ...(cache === undefined ? [] : [`evidence.exclude.cache (${String(cache.length)})`]),
+  ];
+  const removals = [
+    ...(docs === undefined ? [] : [LEGACY_DOCS_EXCLUSIONS_PATH]),
+    ...(cache === undefined ? [] : [LEGACY_CACHE_EXCLUSIONS_PATH]),
+  ];
+  return [
+    {
+      id: 'evidence-exclusions',
+      describe: `${declared.join(', ')} move into ${configPath}; ${removals.join(' and ')} deleted`,
+      removals,
+      diff: configTextDiff(configPath, before, after),
+      apply: (repoRoot: string) => {
+        writeFileAtomic(repoRoot, configPath, after);
+        for (const removal of removals) {
+          const absolute = join(repoRoot, ...removal.split('/'));
+          if (existsSync(absolute)) unlinkSync(absolute);
+        }
+      },
+    },
+  ];
 }
 
 /**
@@ -165,14 +166,25 @@ export function migrateCommand(io: Io, argv: readonly string[]): number {
   if (options['confirm'] !== undefined && options['confirm'] !== true) {
     throw new UsageError("migrate: '--confirm' must be a boolean flag");
   }
-  // Read the config DIRECTLY: `loadConfigAt` refuses the pre-0.10 files
-  // by naming this very command.
+  // Read the config LENIENTLY, without either refusal: a repository that
+  // needs migrating is exactly the one whose `.gateforge.yml` has no `scan:`
+  // yet and whose answers document still carries the scanner keys the
+  // strict loader refuses by name. This command is the ONE place those
+  // shapes are readable.
   const configPath = join(io.cwd, '.gateforge.yml');
   if (!existsSync(configPath)) {
     throw new UsageError('migrate: no .gateforge.yml in this repository — run `gateforge init` first');
   }
-  const config = loadConfig(configPath);
-  const steps = planSteps(io.cwd, config);
+  const preMigration = loadPreMigrationConfig(configPath);
+  // The scanner settings as the repository will read them once this command
+  // is done. Everything downstream validates against them, so a migration
+  // that would produce a config a run rejects fails here instead.
+  const scan = composeScanSection(io.cwd, preMigration);
+  const effective: GateforgeConfig = { ...preMigration, scan } as GateforgeConfig;
+  const steps = [
+    ...evidenceExclusionsSteps(io.cwd, effective),
+    ...movedDocumentSteps(io.cwd, preMigration),
+  ];
   if (steps.length === 0) {
     writeLine(io.stdout, 'nothing to migrate');
     return 0;
@@ -190,7 +202,7 @@ export function migrateCommand(io: Io, argv: readonly string[]): number {
   }
 
   for (const step of steps) {
-    step.apply(io.cwd, '.gateforge.yml');
+    step.apply(io.cwd);
     writeLine(io.stdout, `migrated: ${step.describe}`);
   }
   writeLine(

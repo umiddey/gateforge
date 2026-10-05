@@ -179,6 +179,13 @@ export function configYml(options: {
     declarations?: Record<string, string>;
     /** YAML flow list of bookkeeping columns. */
     volatileFields?: string;
+    /**
+     * The HTTP client-scan section (0.11.0 `scan.httpClients`, was
+     * `.gateforge/http-clients.json`), as a whole YAML block indented four
+     * spaces. Absent means the section is absent, so every other fixture
+     * keeps byte-identical `.gateforge.yml` text.
+     */
+    httpClients?: string;
   };
 } = {}): string {
   const include = options.include ?? "['src/**/*.txt']";
@@ -207,6 +214,9 @@ export function configYml(options: {
       ];
     })(),
     `  volatileFields: ${options.scan?.volatileFields ?? '[]'}`,
+    ...(options.scan?.httpClients === undefined
+      ? []
+      : ['  httpClients:', ...options.scan.httpClients.split('\n').map((line) => `    ${line}`)]),
   ].join('\n');
   const fixedAt = options.clockMode === 'system' ? '' : `  fixedAt: '${FIXED_AT}'\n`;
   const clockBlock =

@@ -43,7 +43,6 @@ import {
   GIT_SCOPE_CONTROL_BASENAMES,
   MANIFEST_NAMES,
   normalizeRepoModule,
-  PACK_CONFIGS,
 } from './input-snapshot.js';
 
 /** One effective evaluation scope, decided before grading. */
@@ -163,7 +162,6 @@ function matchGateDefiningInput(
   if (file === gate.classificationPolicy) return gate.classificationPolicy;
   if (file === gate.baselines) return gate.baselines;
   if (gate.behaviorPolicy !== null && file === gate.behaviorPolicy) return gate.behaviorPolicy;
-  if (PACK_CONFIGS.includes(file)) return file;
   if (underDir(file, gate.adapters)) return gate.adapters;
   if (underDir(file, gate.waivers)) return gate.waivers;
   for (const module of gate.pluginModules) {

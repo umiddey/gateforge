@@ -32,7 +32,7 @@ import { writeLine } from '../io.js';
 import { runPipeline, resolveRepoPath } from '../pipeline.js';
 import { resolveStateDir } from '../state.js';
 import { loadConfigAt, rejectUnknownFlags } from './common.js';
-import { declaresTopLevelSection, setTopLevelSection } from '../yaml-section.js';
+import { declaresSection, setSection } from '../yaml-section.js';
 import { UsageError } from '../errors.js';
 
 export const CLASSIFY_USAGE =
@@ -273,7 +273,7 @@ async function classifyPlaneCommand(io: Io, argv: readonly string[]): Promise<nu
   // `planes:` section the writer cannot parse is refused here rather than
   // rewritten from a half-understood body.
   const answers = parseYaml(before) as Record<string, unknown> | null;
-  if (!declaresTopLevelSection(before, 'planes', OWNER_ANSWERS_PATH)) {
+  if (!declaresSection(before, ['planes'], OWNER_ANSWERS_PATH)) {
     throw new UsageError(
       `classify plane updates only an existing owner-reviewed 'planes:' section of ` +
         `'${OWNER_ANSWERS_PATH}'; add the reviewed section before using this command`,
@@ -320,9 +320,9 @@ async function classifyPlaneCommand(io: Io, argv: readonly string[]): Promise<nu
   const rule = { match, plane: planeValue as SqlalchemyPlane, reason: reason.trim() };
   // Text-level splice into the existing document: every other section, and
   // every comment the owner wrote, survives byte for byte.
-  const after = setTopLevelSection(
+  const after = setSection(
     before,
-    'planes',
+    ['planes'],
     { rules: [...current.rules, rule] },
     OWNER_ANSWERS_PATH,
   );

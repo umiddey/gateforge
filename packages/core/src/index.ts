@@ -604,6 +604,16 @@ export { parseConfig } from './config/index.js';
 export { loadConfig } from './config/index.js';
 
 /**
+ * The PRE-0.11 `.gateforge.yml` shape: `GateforgeConfigSchema` with
+ * `scan:` optional. Only `gateforge migrate` parses it — a repository that
+ * has not migrated yet has its scanner settings in the answers document,
+ * and no run may read that.
+ */
+export { PreMigrationConfigSchema, parsePreMigrationConfig, loadPreMigrationConfig } from './config/index.js';
+/** Inferred pre-0.11 `.gateforge.yml` type (`scan:` may be absent). */
+export type { PreMigrationConfig } from './config/index.js';
+
+/**
  * Diagnostics helpers: `diagnosticsFromZodError` converts zod issues,
  * `jsonPathFor` renders JSON paths, `formatDiagnostics` renders the
  * human-readable multi-line listing used in error messages.

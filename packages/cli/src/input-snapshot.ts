@@ -107,8 +107,12 @@ export function environmentIdentity(parts: Readonly<Record<string, string>>): st
   });
 }
 
-/** Known pack configuration files (absence is an explicit entry). */
-export const PACK_CONFIGS = ['.gateforge/planes.json', '.gateforge/endpoints.json', '.gateforge/http-clients.json', '.gateforge/fastapi.json'];
+// Since 0.11.0 there is no pack-configuration FILE to pin: the plane,
+// endpoint, HTTP-client and FastAPI answers live in
+// `.gateforge/classification-policy.yml` and in `.gateforge.yml` under
+// `scan:` (plan 2026-10-05 §5 D0), and both documents were already
+// explicit inputs — pinning the old files as well would have listed four
+// paths that no longer exist.
 
 /**
  * Well-known dependency manifests/lockfiles: included explicitly when
@@ -563,16 +567,15 @@ export function collectDeclaredInputs(cwd: string, config: GateforgeConfig): str
     paths.add(toPosix(expanded));
   }
 
-  // Explicit configuration inputs: .gateforge.yml itself, resolved
-  // policy/classification files, the staged-runtime document, and known
-  // pack configs.
+  // Explicit configuration inputs: `.gateforge.yml` itself and the
+  // resolved policy/classification/staged-runtime documents. Since 0.11.0
+  // the pack answers live in two of these, so there is nothing else to pin.
   const explicitFiles = [
     '.gateforge.yml',
     toPosix(config.policies),
     toPosix(config.classificationPolicy),
     ...(config.behaviorPolicy === undefined ? [] : [toPosix(config.behaviorPolicy)]),
     ...(config.runtime === undefined ? [] : [toPosix(config.runtime)]),
-    ...PACK_CONFIGS,
     ...(config.alembic === undefined
       ? []
       : [

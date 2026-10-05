@@ -8,7 +8,7 @@ import { existsSync, lstatSync, readFileSync, readdirSync } from 'node:fs';
 import { parse as parseYaml } from 'yaml';
 import { join, resolve } from 'node:path';
 import type { GateforgeConfig } from '@gate-forge/core';
-import { GIT_SCOPE_CONTROL_BASENAMES, MANIFEST_NAMES, PACK_CONFIGS, collectDeclaredInputs } from './input-snapshot.js';
+import { GIT_SCOPE_CONTROL_BASENAMES, MANIFEST_NAMES, collectDeclaredInputs } from './input-snapshot.js';
 import { UsageError } from './errors.js';
 import { LEGACY_DOCS_EXCLUSIONS_PATH, rejectLegacyExclusions } from './legacy-exclusion-paths.js';
 
@@ -259,7 +259,6 @@ function isProtectedFile(
     declared.has(normalized) ||
     MANIFEST_NAMES.includes(basename) ||
     GIT_SCOPE_CONTROL_BASENAMES.includes(basename) ||
-    PACK_CONFIGS.includes(normalized) ||
     (EXECUTABLE_EXTENSIONS.has(extension) && !declaredFolderContent) ||
     EXECUTION_CONFIG_NAMES.has(lower) ||
     lower.includes('.config.') && !DOCUMENTATION_EXTENSIONS.has(extension) ||

@@ -41,7 +41,7 @@ import { parseArgs } from '../args.js';
 import { resolveAdoptedBaseline } from '../adopted-baseline.js';
 import { UsageError } from '../errors.js';
 import type { Io } from '../io.js';
-import { declaresTopLevelSection } from '../yaml-section.js';
+import { declaresSection } from '../yaml-section.js';
 import { writeLine } from '../io.js';
 import { evaluateRun } from '../evaluate.js';
 import {
@@ -419,7 +419,7 @@ function unresolvedRouteGuidance(
   const answersPath = join(cwd, OWNER_ANSWERS_PATH);
   const planesMissing =
     !existsSync(answersPath) ||
-    !declaresTopLevelSection(readFileSync(answersPath, 'utf8'), 'planes', OWNER_ANSWERS_PATH);
+    !declaresSection(readFileSync(answersPath, 'utf8'), ['planes'], OWNER_ANSWERS_PATH);
   return [
     // One plain line BEFORE the question: a new repo meets this
     // question first, and no shipped document prepares anyone for it.

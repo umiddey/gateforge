@@ -57,7 +57,7 @@ import { rejectUnknownFlags, VERSION } from './common.js';
 import { expandScanPaths, type ExpandError } from '../glob.js';
 import { gitIgnoredPaths } from '../git-ignored.js';
 import { inferPlanesConfig } from '../planes-inference.js';
-import { declaresTopLevelSection, setTopLevelSection } from '../yaml-section.js';
+import { declaresSection, setSection } from '../yaml-section.js';
 import { hasGateforgeMarker, installCommitHook, installPrePushHook, writeStandaloneGateScript } from '../git-hooks.js';
 import {
   appendPreCommitHook,
@@ -1477,7 +1477,7 @@ async function proposePlanesConfig(
     return;
   }
   const before = readFileSync(answersPath, 'utf8');
-  if (declaresTopLevelSection(before, 'planes', OWNER_ANSWERS_PATH)) {
+  if (declaresSection(before, ['planes'], OWNER_ANSWERS_PATH)) {
     writeLine(io.stdout, `exists, leaving untouched: the planes: section of ${answersPath}`);
     return;
   }
@@ -1533,7 +1533,7 @@ async function proposePlanesConfig(
   // Self-check the draft against the runtime's strict reader contract
   // BEFORE writing (a broken proposal must fail here, not at the next run).
   parsePlanesConfigDocument({ rules: combined }, `${OWNER_ANSWERS_PATH} planes:`);
-  const after = setTopLevelSection(before, 'planes', { rules: combined }, OWNER_ANSWERS_PATH);
+  const after = setSection(before, ['planes'], { rules: combined }, OWNER_ANSWERS_PATH);
   writeFileSync(answersPath, after, 'utf8');
   if (inference.config === null) {
     writeLine(
