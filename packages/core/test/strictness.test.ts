@@ -27,6 +27,12 @@ const baseConfig = {
   adapters: '.gateforge/adapters',
   waivers: '.gateforge/waivers',
   baselines: '.gateforge/baselines/obligations.json',
+  // Scanner settings (0.11.0) — REQUIRED in `.gateforge.yml`.
+  scan: {
+    scanRoots: ['backend/**'],
+    declarations: { internality: 'gateforge:internal' },
+    volatileFields: [],
+  },
   changed: { provider: 'auto' },
   witness: { maxDurationSeconds: 30 },
   clock: { mode: 'system' },

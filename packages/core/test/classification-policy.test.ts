@@ -8,13 +8,13 @@ import {
   sortLifecycleRules,
 } from '../src/index.js';
 
+// Since 0.11.0 the answers document holds ONLY owner answers; the scanner
+// settings (`scanRoots`, `coverage`, `declarations`, `volatileFields`) live
+// in `.gateforge.yml` under `scan:`, and this document rejects them.
 const BASE_POLICY = {
   schemaVersion: 1,
-  scanRoots: ['backend/**/*.py'],
   trustedInternalEntryPoints: [],
   internalRules: [],
-  declarations: {},
-  volatileFields: [],
 };
 
 describe('classification-policy lifecycleRules', () => {
@@ -213,5 +213,41 @@ describe('classification-policy deleteRules', () => {
         { match: 'backend/models/**', semantics: 'archive', archiveFields: { status: 'archived' }, reason: 'Retained.' },
       ]).success,
     ).toBe(false);
+  });
+});
+
+describe('answers document after the 0.11.0 consolidation', () => {
+  it('rejects the scanner settings that moved to .gateforge.yml scan:', () => {
+    for (const [key, value] of [
+      ['scanRoots', ['backend/**/*.py']],
+      ['coverage', []],
+      ['declarations', {}],
+      ['volatileFields', []],
+    ] as const) {
+      const parsed = ClassificationPolicySchema.safeParse({ ...BASE_POLICY, [key]: value });
+      expect(parsed.success).toBe(false);
+      expect(parsed.error?.issues[0]?.message).toContain(key);
+    }
+  });
+
+  it('accepts the sections that moved IN from their own files, and the owner rules', () => {
+    const parsed = ClassificationPolicySchema.safeParse({
+      ...BASE_POLICY,
+      planes: { rules: [{ match: 'backend/models/**', plane: 'tenant', reason: 'Reviewed.' }] },
+      endpoints: { rules: [{ paths: ['/api/**'], capability: 'crud-read', reason: 'Reviewed.' }] },
+      rules: [
+        {
+          id: 'invoice-cancel-only-unpaid',
+          title: 'An invoice can only be cancelled while it is unpaid',
+          cases: [{ id: 'paid-cannot-cancel', describe: 'Cancelling a paid invoice is refused' }],
+        },
+      ],
+    });
+    expect(parsed.success).toBe(true);
+  });
+
+  it('rejects a planes/endpoints section that is not a rule list', () => {
+    expect(ClassificationPolicySchema.safeParse({ ...BASE_POLICY, planes: { rules: {} } }).success).toBe(false);
+    expect(ClassificationPolicySchema.safeParse({ ...BASE_POLICY, endpoints: [] }).success).toBe(false);
   });
 });

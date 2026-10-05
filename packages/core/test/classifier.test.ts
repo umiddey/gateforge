@@ -16,7 +16,7 @@ import {
   classifyResources,
   RULES,
   signalId,
-  type ClassificationPolicy,
+  type ClassifierPolicy,
   type ClassificationSignal,
   type ClassificationResult,
   type ClassifierResourceRef,
@@ -34,7 +34,7 @@ const ROUTE_LOC = { file: 'backend/api/accounts.py', line: 61, col: 0 };
  * Coverage rules (red-team round 3): a scan is only provably complete
  * against DECLARED per-detector coverage — the fixture declares the
  * sqlalchemy detector for the whole backend tree. */
-function policy(overrides: Partial<ClassificationPolicy> = {}): ClassificationPolicy {
+function policy(overrides: Partial<ClassifierPolicy> = {}): ClassifierPolicy {
   return {
     schemaVersion: 1,
     scanRoots: ['backend/**'],
@@ -173,7 +173,7 @@ function cleanInput(
   overrides: {
     resources?: ClassifierResourceRef[];
     adapters?: string[];
-    policy?: ClassificationPolicy;
+    policy?: ClassifierPolicy;
     scan?: { findings: Array<{ code: string; locations: Array<{ file: string; line: number; col: number }> }>; unresolved: Array<{ location: { file: string; line: number; col: number } }> };
   } = {},
 ) {

@@ -9,7 +9,7 @@ import { describe, expect, it } from 'vitest';
 import {
   ClassificationSignalSchema,
   classifyResources,
-  type ClassificationPolicy,
+  type ClassifierPolicy,
   type ClassificationSignal,
   type ClassifierResourceRef,
 } from '../src/index.js';
@@ -81,7 +81,7 @@ function endpointSignals(endpointName: string): ClassificationSignal[] {
   ];
 }
 
-function policy(overrides: Partial<ClassificationPolicy> = {}): ClassificationPolicy {
+function policy(overrides: Partial<ClassifierPolicy> = {}): ClassifierPolicy {
   return {
     schemaVersion: 1,
     scanRoots: ['backend/**'],
@@ -104,7 +104,7 @@ function structural(): ClassificationSignal[] {
 function runWith(
   resources: ClassifierResourceRef[],
   signals: ClassificationSignal[],
-  policyOverrides: Partial<ClassificationPolicy> = {},
+  policyOverrides: Partial<ClassifierPolicy> = {},
 ) {
   return classifyResources({
     resources,

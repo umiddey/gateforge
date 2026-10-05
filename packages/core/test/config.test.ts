@@ -36,6 +36,14 @@ const validConfig = {
   adapters: '.gateforge/adapters',
   waivers: '.gateforge/waivers',
   baselines: '.gateforge/baselines/obligations.json',
+  // Scanner settings (0.11.0): REQUIRED in `.gateforge.yml`; the same four
+  // keys used to sit at the top of `classification-policy.yml`.
+  scan: {
+    scanRoots: ['backend/**'],
+    coverage: [{ capability: 'models.sqlalchemy', detector: 'gateforge.pack-sqlalchemy', appliesTo: ['backend/**'] }],
+    declarations: { internality: 'gateforge:internal' },
+    volatileFields: ['updated_at'],
+  },
   changed: { provider: 'auto' },
   witness: { maxDurationSeconds: 30 },
   clock: { mode: 'system' },
@@ -118,6 +126,10 @@ policies: .gateforge/policies.yml
 classificationPolicy: .gateforge/classification-policy.yml
 adapters: .gateforge/adapters
 waivers: .gateforge/waivers
+scan:
+  scanRoots: ["**/*.py"]
+  declarations: {internality: 'gateforge:internal'}
+  volatileFields: []
 baselines: .gateforge/baselines/obligations.json
 changed:
   provider: local-staged
@@ -324,6 +336,10 @@ classificationPolicy: .gateforge/classification-policy.yml
 adapters: .gateforge/adapters
 waivers: .gateforge/waivers
 baselines: .gateforge/baselines/obligations.json
+scan:
+  scanRoots: ["**/*.py"]
+  declarations: {internality: 'gateforge:internal'}
+  volatileFields: []
 changed:
   provider: auto
 witness:

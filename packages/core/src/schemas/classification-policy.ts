@@ -9,6 +9,7 @@
 import { z } from 'zod';
 import { compareStrings } from '../graph/util.js';
 import { SchemaVersionField } from './common.js';
+import { BusinessRulesSchema } from './business-rules.js';
 
 /** One trusted internal entry-point category (worker, migration, …). */
 export const InternalEntryPointCategorySchema = z
@@ -321,20 +322,59 @@ export const CoverageRuleSchema = z
 export type CoverageRule = z.infer<typeof CoverageRuleSchema>;
 
 /**
- * The classification-policy document: scan roots (complete-scan scope),
- * trusted internal entry-point categories, organization internal rules,
- * the supported source declaration syntax, and volatile fields.
+ * One owner-declared PLANE rule list — the `planes:` section of the
+ * answers document (0.11.0, was `.gateforge/planes.json`). The section
+ * keeps the document shape it always had (`{ rules: [...] }`) so
+ * `gateforge migrate` is a pure text move, but the RULES themselves stay
+ * validated by the pack that applies them (one validation source, the
+ * same fail-closed reader that has always guarded them): this schema
+ * rejects a wrong document SHAPE and the owning reader rejects a wrong
+ * rule. Absent = no plane channel, byte-identical to today.
+ */
+export const PlanesSectionSchema = z
+  .object({
+    /** Owner-declared plane rules; validated by the SQLAlchemy pack. */
+    rules: z.array(z.unknown()),
+  })
+  .strict();
+
+/** Inferred `planes:` section shape. */
+export type PlanesSection = z.infer<typeof PlanesSectionSchema>;
+
+/**
+ * One owner-declared ENDPOINT-CAPABILITY rule list — the `endpoints:`
+ * section of the answers document (0.11.0, was `.gateforge/endpoints.json`).
+ * Same posture as {@link PlanesSectionSchema}: shape here, rules validated
+ * by the endpoint compiler that applies them.
+ */
+export const EndpointsSectionSchema = z
+  .object({
+    /** Owner-declared endpoint-capability rules; validated by the compiler. */
+    rules: z.array(z.unknown()),
+  })
+  .strict();
+
+/** Inferred `endpoints:` section shape. */
+export type EndpointsSection = z.infer<typeof EndpointsSectionSchema>;
+
+/**
+ * The classification-policy document: the ONE owner-answers file
+ * (`.gateforge/classification-policy.yml`, name kept by owner decision).
+ * Since 0.11.0 it holds every owner answer — trusted internal
+ * entry-point categories, organization internal rules, exact lifecycle
+ * disables, delete semantics, plane rules, endpoint capabilities, and
+ * the owner's business `rules:`.
+ *
+ * The SCANNER settings (`scanRoots`, `coverage`, `declarations`,
+ * `volatileFields`) MOVED OUT to `.gateforge.yml` under `scan:`, next to
+ * the other machine-wide declarations. They are no longer accepted here:
+ * a repository still carrying them fails closed naming `gateforge
+ * migrate` rather than silently running on a setting the engine cannot
+ * see.
  */
 export const ClassificationPolicySchema = z
   .object({
     schemaVersion: SchemaVersionField,
-    /**
-     * Repo-root-relative globs defining the scope a closed-world proof
-     * must cover. A non-empty list is the prerequisite of every
-     * complete-scan attestation (ADR 0003 D4); findings or unresolved
-     * entries inside these roots invalidate the attestation.
-     */
-    scanRoots: z.array(z.string().min(1)).min(1),
     /** Entry-point categories counted as trusted-internal reachability. */
     trustedInternalEntryPoints: z.array(InternalEntryPointCategorySchema),
     /** Organization internal rules — certificate inputs, never overrides. */
@@ -346,28 +386,21 @@ export const ClassificationPolicySchema = z
      * Declaring semantics ADDS an evidence contract — it can resolve
      * DELETE_SEMANTICS_UNRESOLVED, never remove an obligation: detector
      * evidence that disagrees still blocks as a contradiction.
+     *
+     * This is the ONE place the hard/archive answer exists (0.11.0);
+     * `endpoints:` no longer takes `crud-delete`/`crud-archive`.
      */
     deleteRules: DeleteRulesSchema.optional(),
+    /** Owner-declared data-plane rules (was `.gateforge/planes.json`). */
+    planes: PlanesSectionSchema.optional(),
+    /** Owner-declared endpoint capabilities (was `.gateforge/endpoints.json`). */
+    endpoints: EndpointsSectionSchema.optional(),
     /**
-     * Coverage requirements for COMPLETE-scan proofs (ADR 0003 D4). A
-     * closed-world attestation holds only when every rule's detector is
-     * configured, reports coverage, and covers every applicable requested
-     * file. Declaring none means no scan is provably complete — closed-
-     * world proofs stay unavailable (fail closed).
+     * The owner's BUSINESS RULES (0.11.0). Each rule names the test type
+ * that must prove it and its observable cases. Absent = the feature is
+     off, byte for byte: no finding, no report row, no digest change.
      */
-    coverage: z.array(CoverageRuleSchema).optional(),
-    /**
-     * Supported source declaration syntax: the machine-readable keys
-     * detectors may translate into declaration signals (e.g.
-     * `internality: 'gateforge:internal'`). Declarations are assertions
-     * consumed by the classifier — contradictory code signals still block.
-     */
-    declarations: z.record(z.string(), z.string().min(1)),
-    /**
-     * Bookkeeping columns that never satisfy an update by themselves
-     * (mirrors the verdict engine's `updateableFields` fail-closed rule).
-     */
-    volatileFields: z.array(z.string().min(1)),
+    rules: BusinessRulesSchema.optional(),
   })
   .strict();
 

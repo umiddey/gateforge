@@ -73,8 +73,10 @@ function record(kind: string, sessionId: string): EvidenceRecord {
   };
 }
 
-function facts(overrides: Partial<BusinessRuleRunFacts> = {}): BusinessRuleRunFacts {
-  const list = overrides.tests === undefined ? [testFact()] : [...overrides.tests.values()];
+function facts(
+  overrides: Omit<Partial<BusinessRuleRunFacts>, 'tests'> & { tests?: BusinessRuleTestFact[] } = {},
+): BusinessRuleRunFacts {
+  const list = overrides.tests ?? [testFact()];
   return {
     scope: 'full',
     docsOnly: false,

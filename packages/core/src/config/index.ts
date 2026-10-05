@@ -11,6 +11,7 @@ import { readFileSync } from 'node:fs';
 import { parse as parseYaml } from 'yaml';
 import { SchemaVersionField, TransportSchema } from '../schemas/common.js';
 import { CoveragePolicySchema } from '../schemas/coverage-policy.js';
+import { ScanConfigSchema } from '../schemas/scan-config.js';
 import { QueueObserverConfigSchema } from '../schemas/queue-observer.js';
 import { z } from 'zod';
 import { StrictnessModeSchema } from '../strictness.js';
@@ -618,6 +619,23 @@ export const GateforgeConfigSchema = z
      * owner did not register here.
      */
     diagnostics: DiagnosticsConfigSchema.optional(),
+    /**
+     * SCANNER settings (0.11.0, was the top level of
+     * `.gateforge/classification-policy.yml`): the scope a closed-world
+     * proof must cover, the coverage requirements that make one, the
+     * declaration syntax detectors translate, the bookkeeping columns,
+     * and the two detector configuration documents that used to be their
+     * own files (`.gateforge/http-clients.json`, `.gateforge/fastapi.json`).
+     *
+     * REQUIRED, and deliberately not optional-with-defaults: these
+     * decide what a closed-world proof may claim, so a repository that has
+     * not answered them must fail the config load (exit 2) instead of
+     * silently getting the weaker today's-default behaviour. The key
+     * lives in `.gateforge.yml`, so it is inside the owner-approved
+     * policy digest exactly like the answers it replaced — moving the
+     * bytes between documents never moves them out of the pin.
+     */
+    scan: ScanConfigSchema,
     /**
      * Path to the staged-runtime document (plan 2026-09-21 witnessed
      * pre-commit). Convention: `.gateforge/runtime.yml`. ABSENT = the

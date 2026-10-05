@@ -21,10 +21,10 @@ import { compareLocations, compareStrings } from '../graph/util.js';
 import type { Location } from '../schemas/common.js';
 import { ClassificationSchema, type Classification, type Lifecycle } from '../schemas/classification.js';
 import type {
-  ClassificationPolicy,
   LifecycleOperation,
   LifecycleRule,
 } from '../schemas/classification-policy.js';
+import type { ClassifierPolicy } from '../schemas/scan-config.js';
 import { signalId, type ClassificationSignal, type SignalAssertion } from '../schemas/classification-signal.js';
 import {
   BLOCK_DIMENSIONS,
@@ -100,7 +100,7 @@ export interface ClassifyResourcesInput {
    */
   authority?: ClassificationSignal[];
   /** The validated classification policy (scan roots, categories, rules). */
-  policy: ClassificationPolicy;
+  policy: ClassifierPolicy;
   /** Reviewed adapter names available for binding. */
   adapters: readonly string[];
   /** Derive absent lifecycle operations only when the scan proves its scope complete. */
@@ -358,7 +358,7 @@ function isOperationalEndpoint(resource: ClassifierResourceRef): boolean {
  * range invalidates every closed-world proof in this run.
  */
 function completeScanHolds(
-  policy: ClassificationPolicy,
+  policy: ClassifierPolicy,
   scan: ClassifierScanInput,
   relevantPaths?: readonly string[],
   relevantDetector?: string,
@@ -448,7 +448,7 @@ function completeScanHolds(
  * authority, the internality certificate is unavailable for the scope.
  */
 function exposureCoverageHolds(
-  policy: ClassificationPolicy,
+  policy: ClassifierPolicy,
   scan: ClassifierScanInput,
 ): boolean {
   const rules = (policy.coverage ?? []).filter(
@@ -470,7 +470,7 @@ function exposureCoverageHolds(
 }
 
 /** Whether a repo-root-relative path falls inside ANY configured scan root. */
-function pathInRoots(path: string, policy: ClassificationPolicy): boolean {
+function pathInRoots(path: string, policy: ClassifierPolicy): boolean {
   for (const root of policy.scanRoots) {
     if (globMatch(path, root)) return true;
   }
@@ -509,7 +509,7 @@ function decisionFingerprint(input: {
  */
 function reachabilityRejection(
   signal: ClassificationSignal,
-  trustedEntries: ClassificationPolicy['trustedInternalEntryPoints'],
+  trustedEntries: ClassifierPolicy['trustedInternalEntryPoints'],
   scan: ClassifierScanInput,
 ): string | null {
   const category = internalityCategory(signal);
@@ -576,7 +576,7 @@ function isSuppressiveShape(signal: ClassificationSignal): boolean {
  */
 function isConfiguredDeclarationSource(
   signal: ClassificationSignal,
-  policy: ClassificationPolicy,
+  policy: ClassifierPolicy,
 ): boolean {
   if (Object.values(policy.declarations).includes(signal.source)) return true;
   if (signal.source.startsWith('gateforge.declaration:')) {
@@ -588,7 +588,7 @@ function isConfiguredDeclarationSource(
 
 /** Returns owner lifecycle rules for one exact, resolved resource identity. */
 function lifecycleRulesFor(
-  policy: ClassificationPolicy,
+  policy: ClassifierPolicy,
   resource: ClassifierResourceRef,
   plane: 'tenant' | 'master' | 'global',
   operation: LifecycleOperation,
@@ -639,7 +639,7 @@ function lifecycleDerivationDetail(reason: LifecycleDerivation['reason']): strin
 function deriveLifecycleSignals(
   resources: readonly ClassifierResourceRef[],
   signals: readonly ClassificationSignal[],
-  policy: ClassificationPolicy,
+  policy: ClassifierPolicy,
 ): ClassificationSignal[] {
   const derived: ClassificationSignal[] = [];
   const operations = ['read', 'update', 'delete'] as const;
@@ -1011,14 +1011,14 @@ function assertionShapeError(signal: ClassificationSignal): string | null {
 }
 /** Context one resource is classified within. */
 interface ClassifyContext {
-  policy: ClassificationPolicy;
+  policy: ClassifierPolicy;
   scan: ClassifierScanInput;
   adapters: readonly string[];
   scanComplete: boolean;
   /** Exhaustive exposure-capability coverage holds (round 6). */
   exposureComplete: boolean;
   trustedCategories: ReadonlySet<string>;
-  trustedEntries: ClassificationPolicy['trustedInternalEntryPoints'];
+  trustedEntries: ClassifierPolicy['trustedInternalEntryPoints'];
 }
 
 /** Sorts decisions like graph resources: id-bearing first, then by name. */

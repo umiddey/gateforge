@@ -24,7 +24,7 @@ import { runClassification } from '../classifier/bind.js';
 import type { ClassificationSignal } from '../schemas/classification-signal.js';
 import type { Claim } from '../schemas/claim.js';
 import type { Classification } from '../schemas/classification.js';
-import type { ClassificationPolicy } from '../schemas/classification-policy.js';
+import type { ClassifierPolicy } from '../schemas/scan-config.js';
 import type { PolicyFile } from '../schemas/policy.js';
 import type { EvidenceRecord } from '../schemas/evidence.js';
 import type { Obligation } from '../schemas/obligation.js';
@@ -92,7 +92,7 @@ export interface RunGatesInput {
    * deterministically from detector signals on every run — there is no
    * manual classifications document.
    */
-  classificationPolicy: ClassificationPolicy;
+  classificationPolicy: ClassifierPolicy;
   /** Policies document (`.gateforge/policies.yml` content). */
   policies: PolicyFile;
   /** The obligation evaluator (pin #9). */

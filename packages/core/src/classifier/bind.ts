@@ -19,7 +19,7 @@ import type { GraphResource, ResourceGraph } from '../graph/schema.js';
 import { compareLocations, compareStrings } from '../graph/util.js';
 import type { BlockingEntry } from '../policy/index.js';
 import type { ClassificationSignal } from '../schemas/classification-signal.js';
-import type { ClassificationPolicy } from '../schemas/classification-policy.js';
+import type { ClassifierPolicy } from '../schemas/scan-config.js';
 import {
   classifyResources,
   type ClassificationDecision,
@@ -40,7 +40,7 @@ export interface RunClassificationInput {
    */
   authority?: readonly ClassificationSignal[];
   /** The validated classification policy. */
-  policy: ClassificationPolicy;
+  policy: ClassifierPolicy;
   /** Reviewed adapter names available for binding. */
   adapters: readonly string[];
   /** Enable host-derived lifecycle defaults for complete detector scans. */

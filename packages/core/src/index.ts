@@ -716,17 +716,20 @@ export { ClassificationSignalSchema, signalId, SignalTargetSchema, SignalDimensi
 export type { ClassificationSignal, SignalTarget, SignalDimension, SignalBasis, SignalAssertion } from './schemas/classification-signal.js';
 
 /**
- * ClassificationPolicy: the `classification-policy.yml` document —
- * scan roots, trusted internal entry-point categories, organization
- * internal rules (certificate inputs, never overrides), exact owner
- * lifecycle rules (closed-world disables), supported declaration syntax,
- * and volatile fields.
+ * ClassificationPolicy: the ONE owner-answers document
+ * (`.gateforge/classification-policy.yml`) — trusted internal
+ * entry-point categories, organization internal rules (certificate
+ * inputs, never overrides), exact owner lifecycle rules (closed-world
+ * disables), delete semantics, plane rules, endpoint capabilities, and
+ * the owner's business rules. The scanner settings that used to live
+ * here moved to `.gateforge.yml` under `scan:` (see {@link ScanConfigSchema}).
  */
 export {
   ClassificationPolicySchema,
   DeleteRuleSchema,
   DeleteRulesSchema,
   DeleteSemanticsSchema,
+  EndpointsSectionSchema,
   InternalEntryPointCategorySchema,
   InternalRuleSchema,
   InternalRuleMatchSchema,
@@ -734,20 +737,47 @@ export {
   LifecycleRuleSchema,
   LifecycleRulesSchema,
   LIFECYCLE_OPERATIONS,
+  PlanesSectionSchema,
   sortLifecycleRules,
 } from './schemas/classification-policy.js';
-/** Inferred classification-policy type. */
+/** Inferred classification-policy types. */
 export type {
   ClassificationPolicy,
   DeleteRule,
   DeleteSemantics,
+  EndpointsSection,
   InternalEntryPointCategory,
   InternalRule,
   InternalRuleMatch,
   LifecycleOperation,
   LifecycleRule,
   LifecycleRuleMatch,
+  PlanesSection,
 } from './schemas/classification-policy.js';
+
+/**
+ * `scan:` — the scanner settings of `.gateforge.yml` (0.11.0): the scope
+ * a closed-world proof must cover, its coverage requirements, the
+ * declaration syntax, the bookkeeping columns, and the two detector
+ * configuration sections that used to be standalone files.
+ * {@link ClassifierPolicy} is what the classifier consumes: the answers
+ * document composed with these settings.
+ */
+export {
+  FastapiScanSectionSchema,
+  HttpClientsScanSectionSchema,
+  isMovedScannerKey,
+  MOVED_SCANNER_KEYS,
+  ScanConfigSchema,
+} from './schemas/scan-config.js';
+/** Inferred scanner-settings types. */
+export type {
+  ClassifierPolicy,
+  FastapiScanSection,
+  HttpClientsScanSection,
+  MovedScannerKey,
+  ScanConfig,
+} from './schemas/scan-config.js';
 
 /**
  * The deterministic conservative classifier (ADR 0003 D2):
