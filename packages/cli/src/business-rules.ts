@@ -145,15 +145,14 @@ export function witnessedRunnersOf(config: GateforgeConfig): Set<string> {
 function testFactOf(
   result: ExecutionResult,
   logicalKey: string,
+  executionKey: string,
   runners: ReadonlyMap<string, string>,
 ): BusinessRuleTestFact {
-  const planned = result.planned.find((instance) => instance.logicalKey === logicalKey);
-  const outcome = result.outcomes.find((row) => row.logicalKey === logicalKey);
+  const planned = result.planned.find((instance) => instance.logicalKey === executionKey);
+  const outcome = result.outcomes.find((row) => row.logicalKey === executionKey);
   // The session trace joins on the INSTANCE identity (project, file,
-  // title path) because the logical key the catalog mints and the key
-  // the reporter emits are the same string only for natively reconciled
-  // rows. An absent trace yields no sessions, and a test with no
-  // sessions cannot produce attributable witness evidence.
+  // title path). Runner adapters may use a reconciliation key in the
+  // sealed result while the catalog and sidecar use the catalog key.
   const trace = (result.sessionTrace ?? []).find(
     (test) =>
       planned !== undefined &&
@@ -165,9 +164,14 @@ function testFactOf(
     logicalKey,
     runner: runners.get(logicalKey) ?? '',
     status: outcome?.status ?? 'not-run',
-    inGradedSlice: result.selection.logicalKeys.includes(logicalKey),
+    inGradedSlice: result.selection.logicalKeys.includes(executionKey),
     sessionIds: (trace?.sessions ?? []).map((session) => session.sessionId),
   };
+}
+
+/** Stable join key shared by catalog, planned, and executed test instances. */
+function instanceKey(project: string | null, file: string, titlePath: readonly string[]): string {
+  return `${project ?? ''}\u0000${file}\u0000${titlePath.join('>')}`;
 }
 
 /** The sealed facts one run makes available, or null when no run exists. */
@@ -207,17 +211,48 @@ export interface BusinessRuleFactsInput {
 export function businessRuleRunFacts(input: BusinessRuleFactsInput): BusinessRuleRunFacts | null {
   if (input.result === null) return null;
   const runners = catalogRunnerIndex(input.catalog);
+  const logicalKeyByInstance = new Map(
+    input.catalog.entries.map((entry) => [
+      instanceKey(entry.project, entry.file, entry.titlePath),
+      entry.logicalKey,
+    ]),
+  );
+  const logicalKeyOf = (
+    project: string | null,
+    file: string,
+    titlePath: readonly string[],
+    fallback: string,
+  ): string => logicalKeyByInstance.get(instanceKey(project, file, titlePath)) ?? fallback;
   const tests = new Map<string, BusinessRuleTestFact>();
   // Planned instances first (the expected set), then any outcome for a
   // key the plan never listed: the plan is pre-run, the outcome is what
   // actually ran, and an executed-but-unplanned key is still a fact.
   for (const planned of input.result.planned) {
-    tests.set(planned.logicalKey, testFactOf(input.result, planned.logicalKey, runners));
+    const logicalKey = logicalKeyOf(planned.project, planned.file, planned.titlePath, planned.logicalKey);
+    tests.set(logicalKey, testFactOf(input.result, logicalKey, planned.logicalKey, runners));
   }
   for (const outcome of input.result.outcomes) {
-    if (tests.has(outcome.logicalKey)) continue;
-    tests.set(outcome.logicalKey, testFactOf(input.result, outcome.logicalKey, runners));
+    const logicalKey = logicalKeyOf(outcome.project, outcome.file, outcome.titlePath, outcome.logicalKey);
+    if (tests.has(logicalKey)) continue;
+    tests.set(logicalKey, testFactOf(input.result, logicalKey, outcome.logicalKey, runners));
   }
+  // Runner adapters use their reconciliation identity (`file#title`)
+  // in execution results, while catalog/sidecar mappings use the
+  // declared logical key (`pytest:suite:file:title`). Bridge only rows
+  // from the runner whose execution this result records, and only when
+  // the planned instance identifies one unambiguous catalog row.
+  for (const entry of input.catalog.entries) {
+    if (entry.runner !== input.result.selection.runner || tests.has(entry.logicalKey)) continue;
+    const matchingInstances = input.result.planned.filter(
+      (planned) =>
+        planned.file === entry.file &&
+        planned.titlePath.join('>') === entry.titlePath.join('>'),
+    );
+    const instance = matchingInstances[0];
+    if (matchingInstances.length !== 1 || instance === undefined) continue;
+    tests.set(entry.logicalKey, testFactOf(input.result, entry.logicalKey, instance.logicalKey, runners));
+  }
+
   return {
     scope: input.scope,
     docsOnly: input.docsOnly,
