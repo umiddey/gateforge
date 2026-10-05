@@ -216,6 +216,19 @@ gateforge tests mark \
 
 **If not:** rerun discovery, copy the exact test key and obligation ID, and resolve any mapping contradiction. Do not use a declaration to silence a blocker.
 
+### Write your rules down
+
+Product statements the owner wants proved — "an invoice can only be
+cancelled while it is unpaid" — live in the `rules:` section of
+`.gateforge/classification-policy.yml` (`gateforge init --rules` adds a
+commented example). Each rule names the test type that must prove it
+(`e2e` by default), and each case is mapped like a claim above, with
+`gateforge tests mark --rule <ruleId>/<caseId> …`. A mapping alone is a
+declaration: the case is satisfied only when its mapped test ran in a
+sealed supervised run, passed, and delivered the type's proof. See
+[Business rules](REFERENCE.md#business-rules-the-rules-section) in the
+REFERENCE for the type table and the honest scope of the proof.
+
 ## 6. Prepare a verifier key and the app
 
 Keep the key outside the repository and run-state folder:

@@ -29,6 +29,7 @@
  *   by the OWNER's declaration on the rule, never by a new severity.
  */
 import {
+  BUSINESS_RULE_TYPE_TABLE,
   businessRuleClaimId,
   EvidenceRecordSchema,
   casesOf,
@@ -423,4 +424,67 @@ export function businessRuleReportEntries(
             tests: result.finding.tests,
           },
   }));
+}
+
+/**
+ * The `next` guidance for the run's rule findings (plan D6, §7.2): one
+ * block per graded case that carries a finding — the rule title, the
+ * case describe, the declared proof type — and, for a case with NO
+ * mapped test, the printed starter test (the type table's `starter`
+ * field picks the template: a Playwright test on the Gateforge fixture
+ * for `e2e`, a pytest function for `pytest`) plus the exact
+ * `tests mark --rule` line that maps it once written. A case that IS
+ * mapped gets the finding statement only: its gap is proof, not a
+ * missing declaration, and inventing a second mark line would steer the
+ * owner to map a duplicate instead of running the gate.
+ *
+ * Pure text; `next` prints these lines for EVERY finding case (§7.2:
+ * two starter tests and two mark lines for a two-case rule), not only
+ * for the top-ranked candidate.
+ */
+export function businessRuleGuidanceLines(
+  rules: readonly BusinessRule[],
+  cases: readonly BusinessRuleCaseResult[],
+): string[] {
+  const lines: string[] = [];
+  for (const result of cases) {
+    if (result.finding === null) continue;
+    const rule = rules.find((entry) => entry.id === result.ruleId);
+    if (rule === undefined) continue;
+    const businessCase = casesOf(rule).find((entry) => entry.id === result.caseId);
+    const describe = businessCase?.describe ?? result.caseId;
+    const row = BUSINESS_RULE_TYPE_TABLE[rule.test];
+    lines.push(
+      `business rule '${rule.id}' case '${result.caseId}' needs a '${row.label}' test ` +
+        `(${row.acceptedKinds.join(' or ')} under runner '${row.runner}') — ${rule.title}`,
+    );
+    if (result.status !== 'unmapped') continue;
+    if (row.starter === 'playwright') {
+      const title = `business rule ${rule.id}: ${describe}`;
+      const file = `e2e/${rule.id}.spec.mjs`;
+      lines.push(`  starter (the fixture's page is what routes the journey through the witness):`);
+      lines.push(`    import { test, expect } from '@gate-forge/pack-playwright/fixture';`);
+      lines.push(`    test('${title}', async ({ page }) => {`);
+      lines.push(`      // Prove "${rule.title}" — ${describe}`);
+      lines.push(`    });`);
+      lines.push(
+        `  then map it: gateforge tests mark --rule ${rule.id}/${result.caseId}` +
+          ` --test '${file}#${title}' --kind ${row.acceptedKinds[0] ?? 'browser-e2e'}` +
+          ` --reason 'asserts ${rule.id}/${result.caseId} in the real app'`,
+      );
+    } else {
+      const slug = (value: string): string => value.replace(/[^a-z0-9]+/g, '_');
+      const pytestName = `test_business_rule_${slug(rule.id)}_${slug(result.caseId)}`;
+      const file = `tests/test_${slug(rule.id)}.py`;
+      lines.push(`  starter (inside the WITNESSED pytest suite the run supervises):`);
+      lines.push(`    def ${pytestName}():`);
+      lines.push(`        """Prove "${rule.title}" — ${describe}."""`);
+      lines.push(
+        `  then map it: gateforge tests mark --rule ${rule.id}/${result.caseId}` +
+          ` --test '${file}#${pytestName}' --kind ${row.acceptedKinds[0] ?? 'unit'}` +
+          ` --reason 'asserts ${rule.id}/${result.caseId} in the witnessed suite'`,
+      );
+    }
+  }
+  return lines;
 }

@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+### Added
+
+- **Owner-declared business rules, test-type agnostic (0.12.0).** The owner writes the
+  product's rules down in the `rules:` section of `.gateforge/classification-policy.yml`
+  (`gateforge init --rules` adds a commented example; a repository without the section is
+  byte-identical to a release without the feature). Each rule names the test type that must
+  prove it — `e2e` (default) or `pytest` — and splits into CASES (the observable
+  consequences; a rule without `cases:` has one implicit `default`). A case is mapped by the
+  claim id `business-rule:<ruleId>/<caseId>` through the ONE mapping resolver
+  (`tests mark --rule <ruleId>/<caseId> …`): staleness, ambiguity, quarantine and
+  inferred-only behave exactly as for obligations, and rule bindings never enter any
+  obligation set, graded obligation array or receipt coverage list. A declaration is never
+  proof: the case is graded by a pure evaluator over the sealed run's own facts — `e2e`
+  requires the mapped test to have run, passed, and carry witness evidence attributable to
+  its own session (engine `ui.action` anchor, or a witnessed `http.request` exchange of the
+  session for `observed-e2e`); `pytest` requires the witnessed suite of the sealed run. Every
+  mapped test of a case must deliver the proof (a green sibling never forgives a red one), a
+  mocked spec never proves an end-to-end rule, a test outside the run's graded slice is
+  reported `unproven` — never satisfied, never silently absent — and rule findings are
+  run-wide, never diff-scoped away. `enforcement: advisory` (requires `advisoryReason`) rides
+  the report's existing advisory channel every run, out of `blocking` and out of the exit
+  code. The gate surfaces: `check` blocks (or advises) per case; `check --require-e2e` and
+  `test-gates` grade from the sealed receipt's authorized records; the json report carries an
+  additive `businessRules` section naming every graded case with its status and proof
+  channel; `gateforge next` ranks the four rule causes with the coverage band and prints, per
+  missing case, a starter test (the type table picks the Playwright-fixture or witnessed-
+  pytest template) plus the exact `tests mark --rule` line. An unknown `subject` is a
+  configuration error (exit 2).
+
 ### Fixed
 
 - **A fresh adoption can push again: an empty optional config directory is digested exactly like an absent one.** `gateforge init` creates EMPTY `.gateforge/adapters/` and `.gateforge/waivers/`, and Git cannot carry an empty directory — so the committed tree has neither, while the live worktree has both. The trusted-policy digest entry list and the input snapshot each gave the two shapes DIFFERENT absence markers (`(no .mjs adapters)` vs `(missing adapters dir)`, `absent:<dir>/(empty)` vs `absent:<waiversDir>/(missing waivers dir)`), so the pin an owner minted over their adoption commit (`enforcement pin`) was a digest the pre-push/CI candidate-commit gate never computed for that very commit: every push blocked `ENFORCEMENT_UNTRUSTED`, and re-pinning could not converge. Both surfaces now emit ONE absence marker per optional directory (nested empty directories are invisible, exactly as Git sees them), which also retires the worktree-shaping of materialized candidate checkouts (`mirrorEmptyConfigDirs` is gone — the bytes of the tree under test are the whole story). A repository with a missing directory, or with tracked adapter/waiver files, keeps today's digest byte-for-byte; only a repository that pinned over empty directories re-pins once, and from then on every surface agrees.

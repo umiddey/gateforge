@@ -1143,6 +1143,7 @@ pin before strict gates run.
 | `deleteRules` | how removal manifests, per source glob (a RESOURCE's own answer) | `match` glob + `semantics` (+ `archiveFields`) |
 | `planes` | the plane of a source tree or table set (see [below](#endpoint-plane-rules-the-planes-section)) | `rules[]` of `match`/`tables` + `plane` + `reason` |
 | `endpoints` | capabilities detector facts cannot see (see [below](#endpoint-capability-rules-the-endpoints-section)) | `rules[]` of selectors + `capability` + `reason` |
+| `rules` | business rules a named test type must prove (see [below](#business-rules-the-rules-section)) | `rules[]` of id + title + cases + `test` + `enforcement` |
 | `coverage` | which detector must examine which files before a proof counts | capability + detector + globs (+ `exhaustive`) |
 
 Since 0.11.0 this document holds ONLY answers. The four scanner settings
@@ -1155,6 +1156,67 @@ Since 0.11.0 this document holds ONLY answers. The four scanner settings
 Unknown keys, an unknown value, and two rules answering the same target
 are refused (exit 2, fail closed) — the document is an input, never a
 place to smuggle intent past the schema.
+
+## Business rules (the `rules:` section)
+
+Owner-declared statements about the product — "an invoice can only be
+cancelled while it is unpaid" — that a test of a NAMED type must prove in
+a sealed supervised run (0.12.0). The section lives in the answers
+document, so it is owner-pinned: adding, weakening, deleting a rule, or
+making it advisory changes the trusted-policy digest and re-approves the
+pin. A repository without a `rules:` section is byte-identical to a
+release without the feature.
+
+```yaml
+rules:
+  - id: invoice-cancel-only-unpaid
+    title: An invoice can only be cancelled while it is unpaid
+    subject: invoices            # optional; must exist in the inventory (unknown -> exit 2)
+    test: e2e                    # e2e (default) | pytest
+    enforcement: block           # block (default) | advisory (+ required advisoryReason)
+    cases:
+      - id: unpaid-can-cancel
+        describe: Cancelling an unpaid invoice succeeds and it shows as cancelled
+      - id: paid-cannot-cancel
+        describe: Cancelling a paid invoice is refused and it stays paid
+```
+
+A rule's CASES are its observable consequences (usually a positive and a
+negative side; a rule without `cases:` has one implicit `default` case).
+A case is mapped by the claim id `business-rule:<ruleId>/<caseId>` — the
+same sidecar (`tests mark --rule <ruleId>/<caseId> --test <key> --kind
+<kind> --reason "…"`) and the same resolver as obligations, so stale,
+ambiguous, quarantined and inferred-only declarations behave exactly as
+they do there.
+
+**A declaration is never proof.** The type table decides what proof each
+mapped test owes, and every mapped test of a case must deliver it — a red
+test is never forgiven by a green sibling, a mocked spec never proves an
+end-to-end rule, and a test the run's graded slice did not select is
+reported `unproven`, never satisfied and never silently absent.
+
+| `test:` | Accepted kinds / runner | Required proof per mapped test |
+| --- | --- | --- |
+| `e2e` (default) | `browser-e2e`, `observed-e2e` (runner playwright) | Executed in the sealed supervised run, passed, AND witness evidence attributable to that test's own session: an engine `ui.action` anchor (browser-e2e) or a witnessed `http.request` exchange of its session (observed-e2e). The channel is named in the output (`engine` / `observe`). |
+| `pytest` | `unit`, `integration`, `server-e2e` (runner pytest) | Executed inside the WITNESSED pytest suite of the sealed run and passed (channel `execution`). Not run, or the suite not declared `witnessed`, stays `unproven` — no weaker labelled proof. |
+
+Case statuses, in the evaluator's own words: `unmapped`
+(`BUSINESS_RULE_TEST_MISSING`), `wrong-type`
+(`BUSINESS_RULE_TEST_TYPE_MISMATCH` — a weaker kind never satisfies a
+stronger type), `failing` (`BUSINESS_RULE_TEST_FAILING`), `unproven`
+(`BUSINESS_RULE_TEST_UNPROVEN` — no sealed run, test not executed,
+outside the graded slice, or missing the type's proof), and `satisfied`
+with the proof channel. Findings are run-wide — never diff-scoped away —
+and an `enforcement: advisory` rule's findings ride the report's advisory
+channel every run, out of `blocking` and out of the exit code.
+
+**Honest scope of the proof.** Gateforge proves the named test exists,
+ran under supervision, passed, and (e2e) exercised the real app through
+the witness. It does NOT prove the test asserts the rule's meaning: the
+mapping's `reason` carries that claim, the owner reviews it, and the
+output always names which of these was proven. `gateforge next` prints a
+starter test and the exact mark command per missing case; `init --rules`
+adds a commented example to the answers document.
 
 ## Scanner settings (`.gateforge.yml` `scan:`)
 

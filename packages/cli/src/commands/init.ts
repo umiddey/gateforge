@@ -112,7 +112,8 @@ export const INIT_USAGE =
   '[--witnessed staged|full] [--ci] [--no-ci] ' +
   '[--docs-exclude <folder,...> [--docs-exclude-file <path>] [--confirm-doc-exclusions]] [--cache-exclude <file,...> ' +
   '[--confirm-cache-exclusions]] [--strict-e2e] [--planes] [--no-planes] ' +
-  '[--behavior] [--no-behavior] [--behavior-packs <pack,...>] [--unmatched-routes block|warn]';
+  '[--behavior] [--no-behavior] [--behavior-packs <pack,...>] [--unmatched-routes block|warn] ' +
+  '[--rules]';
 
 /** Template for the complete-behavior owner document (plan §4.1). */
 export const BEHAVIOR_TEMPLATE = `\
@@ -482,6 +483,7 @@ ${coverageRules.length > 0 ? coverageRules.join('\n') : '    []'}
 export function classificationPolicyTemplate(
   languages: readonly string[],
   pluginIds: readonly string[],
+  options: { rules?: boolean } = {},
 ): string {
   void languages;
   const selected = new Set(pluginIds);
@@ -517,6 +519,33 @@ ${workerEntry}
     patterns: ['**/scripts/maintenance/**']
 # Organization internal rules — certificate INPUTS, never overrides.
 internalRules: []
+${rulesExample(options.rules === true)}`;
+}
+
+/**
+ * The commented `rules:` example `init --rules` appends to the answers
+ * document (plan D6). COMMENTED, always: the feature is off unless the
+ * owner uncomments and fills it in, and a commented key is invisible to
+ * the parser — the document with the example still parses and digests
+ * exactly like one without any rules section.
+ */
+function rulesExample(requested: boolean): string {
+  if (!requested) return '';
+  return `#
+# Business rules (0.12.0): statements about the product the owner writes
+# down and a test of the named type must prove in a sealed supervised
+# run. Uncomment and edit; every case needs a mapped test.
+# rules:
+#   - id: invoice-cancel-only-unpaid
+#     title: An invoice can only be cancelled while it is unpaid
+#     subject: invoices            # optional; must exist in the inventory
+#     test: e2e                    # e2e (default) or pytest
+#     enforcement: block           # block (default) or advisory (+ advisoryReason)
+#     cases:
+#       - id: unpaid-can-cancel
+#         describe: Cancelling an unpaid invoice succeeds and it shows as cancelled
+#       - id: paid-cannot-cancel
+#         describe: Cancelling a paid invoice is refused and it stays paid
 `;
 }
 /**
@@ -712,6 +741,13 @@ You are gated by Gateforge. Work one blocking item at a time.
 - Never run \`gateforge tests mark\` as proof — mappings declare intent;
   only witnessed overlay evidence satisfies an obligation.
 - \`tests suggest\` is inspection, not a gate.
+- E2E tests take \`page\` and \`test\` only from the Gateforge fixture
+  (\`@gate-forge/pack-playwright/fixture\`): a plain \`@playwright/test\`
+  page reaches the app directly and bypasses the witness — the run sees
+  no traffic and proves nothing.
+- Claims must be literal strings in the test file or mapped in
+  \`.gateforge/test-map.yml\`: runtime-computed annotations are invisible
+  to the commit gate.
 
 ## Never self-approve
 
@@ -1702,6 +1738,7 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
       'strict-e2e',
       'planes',
       'no-planes',
+      'rules',
       'behavior',
       'unmatched-routes',
       'no-behavior',
@@ -1958,7 +1995,7 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
       path: join(gateforgeDir, 'classification-policy.yml'),
       label: 'classification policy',
       write: () => {
-        const policyText = classificationPolicyTemplate(languages, pluginIds);
+        const policyText = classificationPolicyTemplate(languages, pluginIds, { rules: options['rules'] === true });
         // Self-check against the pinned policy schema (same contract as
         // the config template).
         ClassificationPolicySchema.parse(parseYaml(policyText));

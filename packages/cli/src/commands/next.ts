@@ -20,6 +20,7 @@ import {
   PolicyFileSchema,
   sha256Canonical,
   type BlockingEntry,
+  type BusinessRuleCaseResult,
   type CauseCode,
   type ClassificationDecision,
   type ChangedProvider,
@@ -39,6 +40,12 @@ import {
 } from '@gate-forge/pack-playwright';
 import { parseArgs } from '../args.js';
 import { resolveAdoptedBaseline } from '../adopted-baseline.js';
+import {
+  businessRuleGuidanceLines,
+  businessRuleInventory,
+  gradeBusinessRules,
+  partitionBusinessRuleEntries,
+} from '../business-rules.js';
 import { UsageError } from '../errors.js';
 import type { Io } from '../io.js';
 import { declaresSection } from '../yaml-section.js';
@@ -210,6 +217,14 @@ function rankCause(cause: CauseCode | null | undefined, kind: string): number {
     case 'MIGRATION_SCRATCH_UNSAFE':
       return 2;
     case 'CRUD_COVERAGE_MISSING':
+      return 3;
+    // Owner-declared business rules ride the coverage band (plan D4/D6):
+    // a missing rule test is the same shape of gap as a missing coverage
+    // proof — the owner wrote a requirement down and no test answers it.
+    case 'BUSINESS_RULE_TEST_MISSING':
+    case 'BUSINESS_RULE_TEST_TYPE_MISMATCH':
+    case 'BUSINESS_RULE_TEST_UNPROVEN':
+    case 'BUSINESS_RULE_TEST_FAILING':
       return 3;
     case 'CHANGE_UNMAPPED':
       return 4;
@@ -1155,11 +1170,35 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
     }
   }
 
+  // A repository that declares rules discovers its catalog even outside
+  // --changed: rule cases are graded against the runner's OWN enumeration
+  // (the catalog is what makes a binding's kind and runner gradeable),
+  // exactly as `check` does for the same inputs. A repository with rules
+  // but no runner configuration keeps the sidecar-only resolution — the
+  // rule grading below is skipped with it, as in `check`.
+  if (pipeline.businessRules.length > 0 && discoveryResult === undefined) {
+    const runnerConfig = findRunnerConfigPath(io.cwd, config.runner);
+    if (runnerConfig !== null) {
+      try {
+        discoveryResult = await discoverTestCatalog({
+          cwd: io.cwd,
+          config,
+          collectPytest: true,
+          excludeFile: engineGeneratedStateFileFilter(io.cwd, stateDir),
+        });
+      } catch (error) {
+        if (error instanceof TestDiscoveryError) throw new UsageError(error.message);
+        throw error;
+      }
+    }
+  }
+
   const mapped = await resolveRepositoryMappings({
     cwd: io.cwd,
     config,
     stateDir,
     obligations: pipeline.policy.obligations,
+    businessRules: pipeline.businessRules,
     ...(discoveryResult !== undefined
       ? {
           catalog: discoveryResult.catalog,
@@ -1200,7 +1239,28 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
     },
   });
 
-  const candidates = rankBlockers(evaluated.blocking, evaluated.verdicts, focusedRouteKeys(pipeline.graph));
+  // Owner-declared business rules (plan D4/D6), graded statically: `next`
+  // carries no sealed run, so every mapped case is `unproven` here and an
+  // unmapped one is the `missing` finding the guidance below answers.
+  // Findings join the ranked candidates like any other blocking entry;
+  // the guidance prints EVERY finding case (§7.2), not just the top one.
+  let ruleCases: BusinessRuleCaseResult[] = [];
+  if (pipeline.businessRules.length > 0 && discoveryResult !== undefined) {
+    ruleCases = gradeBusinessRules({
+      rules: pipeline.businessRules,
+      ruleBindings: mapped.resolution.ruleBindings,
+      inventory: businessRuleInventory(pipeline.graph),
+      runFacts: null,
+      catalog: discoveryResult.catalog,
+    }).cases;
+  }
+  const ruleBlocking = partitionBusinessRuleEntries(pipeline.businessRules, ruleCases).blocking;
+
+  const candidates = rankBlockers(
+    [...evaluated.blocking, ...ruleBlocking],
+    evaluated.verdicts,
+    focusedRouteKeys(pipeline.graph),
+  );
   // Unmatched by-id routes the owner graded as advisory (0.9.0, owner
   // decision D7): printed near the top whether or not anything blocks,
   // because `next` is where an owner looks to learn what a run is
@@ -1256,6 +1316,7 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
     routeGuidance === null ? endpointSemanticsGuidance(first.why, pipeline.graph) : [];
   const prefixGuidance = routeGuidance === null ? fastapiPrefixGuidance(first.why, io.cwd) : [];
   const classifierBlocks = classifierBlockGuidance(first, pipeline.classification.decisions);
+  const businessRuleGuidance = businessRuleGuidanceLines(pipeline.businessRules, ruleCases);
   const guide = ENVIRONMENT_GUIDES[first.cause as CauseCode] ?? null;
   const scopeNote = observationScopeNote(
     first,
@@ -1307,6 +1368,7 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
         ...(endpointGuidance.length === 0 ? {} : { endpointSemanticsGuidance: endpointGuidance }),
         ...(prefixGuidance.length === 0 ? {} : { fastapiPrefixGuidance: prefixGuidance }),
         ...(classifierBlocks === null ? {} : { classifierBlockGuidance: classifierBlocks.lines }),
+        ...(businessRuleGuidance.length === 0 ? {} : { businessRuleGuidance }),
       }),
     );
   } else {
@@ -1333,6 +1395,7 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
       writeLine(io.stdout, `do: ${first.do}`);
     }
     for (const line of behaviorGuidance) writeLine(io.stdout, line);
+    for (const line of businessRuleGuidance) writeLine(io.stdout, line);
     for (const line of scopeNote) writeLine(io.stdout, line);
     for (const line of singletonNote) writeLine(io.stdout, line);
     for (const line of taskOffer) writeLine(io.stdout, line);
