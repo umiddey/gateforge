@@ -32,7 +32,8 @@
 // below, and the LAUNCHER is injected (`EngineBrowserManager` requires
 // one) — `@gate-forge/pack-playwright` is the layer that knows which
 // browser to launch. Nothing here imports Playwright at runtime.
-import type { Browser, BrowserContext, Locator, Page, Response } from 'playwright';
+import type { Browser, BrowserContext, Frame, Locator, Page, Response } from 'playwright';
+import { gradePageVisit, type ObservedPageVisit, type PageRoute, type PageVisitVerdict } from './page-observation.js';
 import {
   declaredSurfaceFields,
   renderSurfaceTemplate,
@@ -43,7 +44,64 @@ import {
 } from '../surface.js';
 
 /** The UI operations the engine can perform (constrained subset). */
-export type EngineOperation = 'create' | 'read' | 'update' | 'delete';
+export type EngineOperation = 'create' | 'read' | 'update' | 'delete' | 'visit';
+/** Opens one trusted app route and grades it with the page-observation grader. */
+export async function driveEngineVisit(
+  page: Page,
+  appBase: string,
+  route: PageRoute,
+  pages: readonly PageRoute[],
+  options: { loginRoutes?: readonly string[]; errorMarkers?: readonly string[] } = {},
+): Promise<PageVisitVerdict> {
+  const appOrigin = new URL(appBase).origin;
+  const navigations: string[] = [];
+  const exceptions: string[] = [];
+  const apiResponses: ObservedPageVisit['apiResponses'] = [];
+  const pendingResponses = new Set<Promise<void>>();
+  const onNavigation = (frame: Frame): void => {
+    if (frame === page.mainFrame()) navigations.push(frame.url());
+  };
+  const onError = (error: Error): void => { exceptions.push(error.message); };
+  const onResponse = (response: Response): void => {
+    let url: URL;
+    try { url = new URL(response.url()); } catch { return; }
+    if (url.origin !== appOrigin || !url.pathname.startsWith('/api/')) return;
+    const pending = (async () => {
+      let remoteAddress: string | null = null;
+      try { remoteAddress = (await response.serverAddr())?.ipAddress ?? null; } catch {}
+      apiResponses.push({ url: response.url(), status: response.status(), remoteAddress, proxied: remoteAddress !== null });
+    })();
+    pendingResponses.add(pending);
+    void pending.finally(() => pendingResponses.delete(pending));
+  };
+  page.on('framenavigated', onNavigation);
+  page.on('pageerror', onError);
+  page.on('response', onResponse);
+  try {
+    await page.goto(new URL(route.path, appBase).href, { waitUntil: 'networkidle', timeout: ENGINE_STEP_TIMEOUT_MS });
+    await page.waitForTimeout(300);
+    await Promise.all([...pendingResponses]);
+    const body = await page.locator('body').innerText({ timeout: ENGINE_STEP_TIMEOUT_MS });
+    return gradePageVisit({
+      pages,
+      loginRoutes: options.loginRoutes,
+      visit: {
+        url: page.url(),
+        navigations,
+        exceptions,
+        domMarkerHit: (options.errorMarkers ?? []).some((marker) => body.includes(marker)),
+        apiResponses,
+      },
+    });
+  } catch (error) {
+    if (error instanceof EngineBrowserError) throw error;
+    throw new EngineBrowserError(`browser.visit failed: ${(error as Error).message}`);
+  } finally {
+    page.off('framenavigated', onNavigation);
+    page.off('pageerror', onError);
+    page.off('response', onResponse);
+  }
+}
 
 /** One app-origin exchange the engine captured during an action. */
 export interface EngineCapturedExchange {
@@ -713,6 +771,8 @@ async function driveEngineActionInner(
       requireAppRequest(exchanges, 'delete');
       return { entityId, enteredFields: deleteFields, renderedFields: rendered, exchanges };
     }
+    case 'visit':
+      throw new EngineBrowserError('browser.visit requires an explicit page route and uses driveEngineVisit');
   }
 }
 
