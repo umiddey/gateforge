@@ -1206,15 +1206,18 @@ function isSafeStorageCall(expression: ts.Expression): boolean {
   if (SAFE_STORAGE_METHODS[method] !== true) return false;
   const receiver = storageReceiverName(expression.expression.expression);
   if (receiver !== 'localStorage' && receiver !== 'sessionStorage') return false;
+  const first = expression.arguments[0];
+  const second = expression.arguments[1];
   if (method === 'setItem') {
     return (
-      expression.arguments.length === 2 &&
-      ts.isStringLiteral(expression.arguments[0]) &&
-      ts.isStringLiteral(expression.arguments[1])
+      first !== undefined &&
+      second !== undefined &&
+      ts.isStringLiteral(first) &&
+      ts.isStringLiteral(second)
     );
   }
   if (method === 'removeItem') {
-    return expression.arguments.length === 1 && ts.isStringLiteral(expression.arguments[0]);
+    return expression.arguments.length === 1 && first !== undefined && ts.isStringLiteral(first);
   }
   return expression.arguments.length === 0;
 }
@@ -1237,7 +1240,7 @@ function isSafeStorageStatement(node: ts.Statement): boolean {
 function isStorageOnlyInitScript(call: ts.CallExpression): boolean {
   if (call.arguments.length !== 1) return false;
   const script = call.arguments[0];
-  if (!ts.isArrowFunction(script) && !ts.isFunctionExpression(script)) return false;
+  if (script === undefined || (!ts.isArrowFunction(script) && !ts.isFunctionExpression(script))) return false;
   if (script.parameters.length !== 0) return false;
   if (ts.isBlock(script.body)) {
     return script.body.statements.length > 0 && script.body.statements.every(isSafeStorageStatement);
