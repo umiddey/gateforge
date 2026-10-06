@@ -1286,6 +1286,41 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
     return 0;
   }
   const first = candidates[0] as NextCandidate;
+  const pageObligation = pipeline.policy.obligations.find(
+    (obligation) =>
+      obligation.id === first.id &&
+      (obligation.contract === 'page:loads' || obligation.contract === 'page:data-ok'),
+  );
+  const pageResource =
+    pageObligation === undefined
+      ? undefined
+      : pipeline.graph.resources.find((resource) => resource.id === pageObligation.resourceId);
+  const pagePath =
+    pageResource?.kind === 'ui.page' && typeof pageResource.attributes['path'] === 'string'
+      ? pageResource.attributes['path']
+      : null;
+  const parameterNames = pagePath?.match(/:([A-Za-z0-9_]+)/g)?.map((name) => name.slice(1)) ?? [];
+  const pageBindings = pagePath === null ? undefined : config.pages?.params?.[pagePath];
+  const pageFailure = first.why.match(/PAGE_[A-Z_]+/)?.[0];
+  const pageGuidance =
+    pagePath === null
+      ? null
+      : {
+          do:
+            pageFailure !== undefined
+              ? `resolve ${pageFailure} on ${pagePath}, then rerun test-gates`
+              : config.pages?.sweep === false
+                ? `no test opens ${pagePath}: enable pages.sweep, or add a visit to an existing journey`
+                : parameterNames.some((name) => pageBindings?.[name] === undefined)
+                  ? `no test opens ${pagePath}: bind seeded ids in pages.params, or add a visit to an existing journey`
+                  : `no test opens ${pagePath}: the sweep will, or add a visit to an existing journey`,
+          lines: [
+            ...(parameterNames.some((name) => pageBindings?.[name] === undefined)
+              ? [`PAGE_PARAM_UNBOUND: set pages.params['${pagePath}'] with seeded values for ${parameterNames.map((name) => `'${name}'`).join(', ')}; Gateforge never guesses an id.`]
+              : []),
+            'If PAGE_OBSERVATION_TAMPER_RISK is reported, remove page.evaluate, route interception, route.fulfill, or direct CDP use from the test or its helpers.',
+          ],
+        };
   const unresolvedRoute = pipeline.classification.decisions.find(
     (decision) =>
       decision.name === first.id &&
@@ -1357,7 +1392,7 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
         next: first.id,
         cause: first.cause,
         why: first.why,
-        do: first.do,
+        do: pageGuidance?.do ?? first.do,
         remainingBlocking: candidates.length - 1,
         guide,
         ...(routeGuidance === null ? {} : { guidance: routeGuidance }),
@@ -1369,6 +1404,7 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
         ...(prefixGuidance.length === 0 ? {} : { fastapiPrefixGuidance: prefixGuidance }),
         ...(classifierBlocks === null ? {} : { classifierBlockGuidance: classifierBlocks.lines }),
         ...(businessRuleGuidance.length === 0 ? {} : { businessRuleGuidance }),
+        ...(pageGuidance === null ? {} : { pageGuidance: pageGuidance.lines }),
       }),
     );
   } else {
@@ -1376,7 +1412,10 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
     writeLine(io.stdout, `cause: ${first.cause}`);
     writeLine(io.stdout, `why: ${first.why}`);
     if (guide !== null) writeLine(io.stdout, `guide: ${guide}`);
-    if (routeGuidance !== null) {
+    if (pageGuidance !== null) {
+      writeLine(io.stdout, `do: ${pageGuidance.do}`);
+      for (const line of pageGuidance.lines) writeLine(io.stdout, line);
+    } else if (routeGuidance !== null) {
       writeLine(io.stdout, 'do: confirm the route owner and run only the matching plane command below');
       for (const line of routeGuidance) writeLine(io.stdout, line);
     } else if (endpointGuidance.length > 0) {

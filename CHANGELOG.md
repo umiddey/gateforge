@@ -11,11 +11,20 @@
   `page:data-ok` obligations. In witnessed Playwright runs, the fixture gives
   the witness an independent Chromium debugging endpoint; the witness records
   settled, route-matched visits, login bounces, uncaught errors, configured
-  error markers, and app-origin API statuses. Local fulfilment or an unobserved
-  proxy exchange refuses proof. Only clean page observations from passing tests
-  in the sealed run satisfy obligations; static browser-tampering risks are
-  refused with source locations. `gateforge adopt` records pre-existing page
-  debt without blocking the adoption.
+  error markers, and app-origin API statuses. Local fulfilment or an
+  unobserved proxy exchange refuses proof. A clean observation from a passing
+  test or the post-suite referee sweep satisfies the same page obligation; a
+  page already proved by a test is never swept. Static browser-tampering risks
+  are refused with source locations. `gateforge adopt` records pre-existing
+  page debt without blocking the adoption.
+
+- **Post-suite page sweep and diagnostics (0.13.0).** `test-gates` asks the
+  witness to visit only page obligations without clean channel-B proof,
+  using seeded `pages.params` values or a unique matching engine-observed
+  create ID, with `PAGE_PARAM_UNBOUND` instead of guessing. `pages.sweep: false`
+  leaves gaps unproven. Page observations carry their `observed` or `swept`
+  channel; reports, `explain`, and `next` show page status and the cheapest
+  route, seed, or refusal fix.
 
 ## 0.12.0
 

@@ -205,6 +205,7 @@ import {
   partitionBusinessRuleEntries,
   witnessedRunnersOf,
 } from '../business-rules.js';
+import { bindPageRouteParams, createdEntityIdsFromRecords, pageReportEntries } from '../page-obligations.js';
 import { installedPlaywrightCompatibilityError } from '../package-compatibility.js';
 import { DOCS_EXCLUSIONS_GUARANTEE, loadDocsExclusions } from '../docs-exclusions.js';
 import { CACHE_EXCLUSIONS_GUARANTEE, loadCacheExclusions } from '../cache-exclusions.js';
@@ -4927,6 +4928,7 @@ async function runSupervisedTestGatesInner(
       const priorRecords = ledger !== null && typeof ledger === 'object' && 'records' in ledger && Array.isArray(ledger.records)
         ? ledger.records
         : [];
+      const createdEntityIds = createdEntityIdsFromRecords(priorRecords);
       const cleanPageIds = new Set<string>();
       for (const record of priorRecords) {
         if (record === null || typeof record !== 'object' || !('kind' in record) || record.kind !== 'page.observed' ||
@@ -4943,24 +4945,22 @@ async function runSupervisedTestGatesInner(
       const routesByAudience = new Map<string, Array<{ id: string; path: string }>>();
       for (const page of pageResources) {
         if (cleanPageIds.has(page.id) || config.pages?.exclude?.includes(page.path)) continue;
-        const parameterNames = [...page.path.matchAll(/:([A-Za-z][A-Za-z0-9_]*)/g)].map((match) => match[1] as string);
-        if (parameterNames.length === 0) {
-          const routes = routesByAudience.get(page.audience) ?? [];
-          routes.push(page);
-          routesByAudience.set(page.audience, routes);
-          continue;
-        }
-        const bindings = config.pages?.params?.[page.path];
-        if (bindings === undefined || parameterNames.some((name) => !bindings[name])) {
-          const detail = `PAGE_PARAM_UNBOUND: ${page.path} needs pages.params seed ids before the referee can visit it.`;
+        const resolved = bindPageRouteParams(
+          page.path,
+          page.audience,
+          config.pages?.params?.[page.path],
+          createdEntityIds,
+        );
+        if (resolved.path === null) {
+          const detail =
+            `PAGE_PARAM_UNBOUND: ${page.path} needs seeded pages.params values or a unique ` +
+            `engine-observed create id for parameter(s) ${resolved.unbound.join(', ')}; no id is guessed.`;
           writeLine(io.stderr, detail);
           pageSweepAdvisories.push({ kind: 'finding', resourceId: page.id, name: page.path, detail, location: null, cause: null, nextAction: null });
           continue;
         }
-        let resolvedPath = page.path;
-        for (const name of parameterNames) resolvedPath = resolvedPath.replace(`:${name}`, encodeURIComponent(bindings[name] as string));
         const routes = routesByAudience.get(page.audience) ?? [];
-        routes.push({ ...page, path: resolvedPath });
+        routes.push({ ...page, path: resolved.path });
         routesByAudience.set(page.audience, routes);
       }
       for (const [audienceName, routes] of routesByAudience) {
@@ -5759,6 +5759,21 @@ async function runSupervisedTestGatesInner(
           },
         }),
   };
+  const pageEntries = pageReportEntries(
+    pipeline.graph,
+    evaluated.verdicts,
+    readJsonArray(stateDir, 'records.json'),
+  );
+  const pageSectionText =
+    pageEntries.length === 0
+      ? ''
+      : `\npages:\n${pageEntries
+          .map(
+            (entry) =>
+              `  ${entry.path}: channel=${entry.channel ?? 'none'}; test=${entry.test ?? 'none'}; ` +
+              `status=${entry.status}${entry.reason === null ? '' : `; reason=${entry.reason}`}`,
+          )
+          .join('\n')}`;
   // Report-side strictness + quarantine:
   // ADDITIVE only. A repository that never softened its gate and never
   // quarantined a test gets exactly the document it got before.
@@ -5839,10 +5854,11 @@ async function runSupervisedTestGatesInner(
       ...(ruleCases.length === 0
         ? {}
         : { businessRules: businessRuleReportEntries(pipeline.businessRules, ruleCases) }),
+      ...(pageEntries.length === 0 ? {} : { pages: pageEntries }),
     } as unknown as JsonValue);
   const report =
     format === 'text'
-      ? `${renderedReport}\n${strictnessSummaryLine(strictness)}${
+      ? `${renderedReport}${pageSectionText}\n${strictnessSummaryLine(strictness)}${
           quarantines.active.length === 0
             ? ''
             : `\nquarantined: ${String(quarantines.active.length)} (expires ${quarantines.active

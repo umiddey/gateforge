@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { ResourceGraph } from '@gate-forge/core';
-import { pageObligationsFromGraph } from '../src/page-obligations.js';
+import {
+  bindPageRouteParams,
+  createdEntityIdsFromRecords,
+  pageObligationsFromGraph,
+} from '../src/page-obligations.js';
 import { configYml, installFixture, runCli, withTempRepo } from './helpers.js';
 
 describe('page obligation family', () => {
@@ -14,6 +18,37 @@ describe('page obligation family', () => {
       ['tenant.page-orders-1234abcd:page:data-ok', 'page:data-ok'],
       ['tenant.page-orders-1234abcd:page:loads', 'page:loads'],
     ]);
+  });
+
+  it('uses seeded or uniquely matching engine-created IDs for dynamic routes without guessing', () => {
+    const created = (entityId: string, resourceId = 'tenant.orders') => ({
+      schemaVersion: 1,
+      recordId: 'a'.repeat(64),
+      runId: '00000000-0000-4000-8000-000000000001',
+      trust: 'witnessed',
+      obligationId: `${resourceId}:persistence:create`,
+      kind: 'ui.action',
+      testId: 'orders-journey',
+      payload: { operation: 'create', entityId },
+      origin: 'engine-observed',
+    });
+    const oneCreated = createdEntityIdsFromRecords([created('seed/42')]);
+    expect(bindPageRouteParams('/orders/:id', 'tenant', undefined, oneCreated)).toEqual({
+      path: '/orders/seed%2F42',
+      unbound: [],
+    });
+    const ambiguous = createdEntityIdsFromRecords([created('42'), created('43')]);
+    expect(bindPageRouteParams('/orders/:id', 'tenant', undefined, ambiguous)).toEqual({
+      path: null,
+      unbound: ['id'],
+    });
+    expect(bindPageRouteParams('/orders/:id', 'tenant', { id: 'seeded' }, ambiguous)).toEqual({
+      path: '/orders/seeded',
+      unbound: [],
+    });
+    expect(
+      bindPageRouteParams('/orders/:id', 'tenant', undefined, createdEntityIdsFromRecords([created('42', 'tenant.customers')])),
+    ).toEqual({ path: null, unbound: ['id'] });
   });
 
   it('lists page promises in check and adoption forgives existing page debt', async () => {

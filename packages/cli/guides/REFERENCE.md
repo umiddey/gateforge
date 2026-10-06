@@ -22,6 +22,7 @@ first commands; the guides cover the walks:
 - [Enforcement](#enforcement)
 - [Contract capabilities](#contract-capabilities)
 - [Configuration](#configuration)
+- [Pages](#pages)
 - [Classification policy (`.gateforge/classification-policy.yml`)](#classification-policy-gateforgeclassification-policyyml)
 - [Plugin invocation](#plugin-invocation)
 - [Endpoint plane rules (the `planes:` section)](#endpoint-plane-rules-the-planes-section)
@@ -1127,6 +1128,42 @@ Enforcement-relevant sections:
   error (`check` exits 2). Optional; inside the trusted policy digest, so
   changing the list moves the approved revision. See "Developer and CI
   tooling is owner-declared" above.
+
+## Pages
+
+Each detected frontend route creates two page promises: `page:loads` and
+`page:data-ok`. Existing Playwright journeys prove them through the browser
+fixture (channel `observed`); after the tests, the referee sweeps only pages
+without a clean observed record (channel `swept`). A clean test visit always
+takes precedence over the sweep. Both channels use the same route, redirect,
+crash, error-marker, and API-response grader. Browser API tampering in tests
+is refused as `PAGE_OBSERVATION_TAMPER_RISK`.
+
+Configure the reader and audience in `.gateforge.yml`:
+
+```yaml
+pages:
+  router: react-router
+  audiences:
+    - name: tenant
+      loginRoute: /login
+      guard: TenantGuard
+  errorMarkers: ['Something went wrong']
+  params:
+    '/orders/:id': { id: 'seeded-order-id' }
+  exclude: []
+  sweep: true
+```
+
+`pages.params` supplies seeded IDs for dynamic routes. When no seed is
+configured, the referee can use a unique engine-observed create ID for the
+route's matching resource; ambiguous or unmatched IDs are never guessed, and
+produce `PAGE_PARAM_UNBOUND` with the page left unproven. `pages.sweep: false`
+disables referee visits, so an unopened page remains visible as unproven debt.
+The sealed `test-gates` JSON and text reports include a `pages` section with
+each page's route, proof channel, test/referee, status, and reason. Use
+`gateforge explain <page-obligation-id>` for that page's latest proof details;
+`gateforge next` names the visit, seed, or failure fix.
 
 ## Owner answers (`.gateforge/classification-policy.yml`)
 

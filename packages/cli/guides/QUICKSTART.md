@@ -216,6 +216,32 @@ gateforge tests mark \
 
 **If not:** rerun discovery, copy the exact test key and obligation ID, and resolve any mapping contradiction. Do not use a declaration to silence a blocker.
 
+### Frontend page promises
+
+With the React Router reader configured, every detected page adds `page:loads`
+and `page:data-ok` promises. Existing tests can prove a route by using
+Gateforge's Playwright fixture; after the suite, the referee visits only pages
+without a clean test record. Add seeded IDs for dynamic pages and keep the
+sweep enabled:
+
+```yaml
+pages:
+  router: react-router
+  audiences:
+    - name: tenant
+      loginRoute: /login
+      guard: ProtectedRoute
+  params:
+    '/orders/:id': { id: 'seeded-order-id' }
+  sweep: true
+```
+
+An unbound parameter produces `PAGE_PARAM_UNBOUND` and stays unproven; no
+identifier is guessed. `pages.sweep: false` leaves pages no test opens as
+unproven. See [Pages in the reference](REFERENCE.md#pages) and
+[Connect your project](CONNECT-YOUR-PROJECT.md) for fixture migration and
+tamper restrictions.
+
 ### Write your rules down
 
 Product statements the owner wants proved — "an invoice can only be

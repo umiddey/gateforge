@@ -421,6 +421,44 @@ When the origins disagree, the witness's zero-traffic note now names both —
 the origin the page really requested and the one Gateforge routes — instead of
 guessing at the fixture page alone.
 
+### 6c. Let existing journeys prove pages
+
+The React Router reader creates `page:loads` and `page:data-ok` promises from
+the application's route declarations. Rebasing the shared `test` object in 6a
+onto `@gate-forge/pack-playwright/fixture` is what lets those existing
+journeys prove their page visits; keep their route assertions and test bodies.
+The test channel (`observed`) is primary. After the tests, Gateforge's own
+referee visits only page obligations without a clean test record (`swept`).
+Both channels use the same grader.
+
+Declare the router, login route, audience guard, error markers and seeded
+values for dynamic paths in `.gateforge.yml`:
+
+```yaml
+pages:
+  router: react-router
+  audiences:
+    - name: tenant
+      loginRoute: /login
+      guard: ProtectedRoute
+  errorMarkers: ['Something went wrong']
+  params:
+    '/orders/:id': { id: 'seeded-order-id' }
+  exclude: []
+  sweep: true
+```
+
+Use seeded IDs for `pages.params`; if one was not configured, Gateforge may
+bind a unique engine-observed create ID only when it matches the route's
+resource. Ambiguous or unmatched IDs produce `PAGE_PARAM_UNBOUND` and are
+never guessed. Setting `pages.sweep: false` keeps gaps unproven instead of visiting
+them. Tests and imported helpers must not mutate browser APIs to manufacture
+page state: `page.evaluate`/`setContent`, `addInitScript`, `page.route`,
+`context.route`, `route.fulfill`, and direct CDP sessions trigger
+`PAGE_OBSERVATION_TAMPER_RISK`; remove those edits rather than treating the
+page as proved. See [Pages](REFERENCE.md#pages) for the report and
+`explain`/`next` diagnostics.
+
 ## 7. First run
 
 ```bash

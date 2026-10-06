@@ -148,6 +148,14 @@ interface Verdict {
 }
 interface GateReport {
   advisories?: Array<{ detail: string }>;
+  pages?: Array<{
+    pageId: string;
+    path: string;
+    channel: 'observed' | 'swept' | null;
+    test: string | null;
+    status: string;
+    reason: string | null;
+  }>;
   verdicts?: Verdict[];
   execution?: {
     selectedTests?: {
@@ -430,6 +438,33 @@ describe('page observations through a sealed test-gates run', () => {
         expect(records.find((record) => record.obligationId?.startsWith('tenant.page-orders-'))?.payload?.channel).toBe('observed');
         expect(records.find((record) => record.obligationId?.startsWith('tenant.page-unopened-'))?.payload?.channel).toBe('swept');
         expect(records.find((record) => record.obligationId?.startsWith('tenant.page-bound-'))?.payload?.channel).toBe('swept');
+        expect(report.pages?.find((entry) => entry.path === '/unopened')).toMatchObject({
+          channel: 'swept',
+          test: 'referee',
+          status: 'satisfied',
+        });
+        expect(report.pages?.find((entry) => entry.path === '/unbound/:id')).toMatchObject({
+          channel: null,
+          test: null,
+          status: 'missing',
+        });
+        const unboundPage = report.pages?.find((entry) => entry.path === '/unbound/:id');
+        expect(unboundPage).toBeDefined();
+        const explanation = await runCliProcess(
+          repo.root,
+          ['explain', `${String(unboundPage?.pageId)}:page:loads`],
+          env,
+        );
+        expect(explanation.code, `${explanation.stdout}\n${explanation.stderr}`).toBe(0);
+        expect(explanation.stdout).toContain('page proof (last test-gates report)');
+        expect(explanation.stdout).toContain('channel=none; test=none; status=missing');
+        const next = await runCliProcess(repo.root, ['next', '--json'], env);
+        expect(next.code, `${next.stdout}\n${next.stderr}`).toBe(1);
+        const guidance = JSON.parse(next.stdout) as { do?: string; pageGuidance?: string[] };
+        expect(guidance.pageGuidance).toContain(
+          'If PAGE_OBSERVATION_TAMPER_RISK is reported, remove page.evaluate, route interception, route.fulfill, or direct CDP use from the test or its helpers.',
+        );
+        expect(guidance.do).toMatch(/no test opens \/|resolve PAGE_/);
       } finally {
         await proxy.stop();
         await new Promise<void>((resolve) => app.server.close(() => resolve()));

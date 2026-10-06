@@ -13,7 +13,7 @@
  * its in-code resolution path. Deterministic: re-running the command on
  * an unchanged repository prints byte-identical output.
  */
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { canonicalJson, type GateforgeConfig, fingerprintObligation, type JsonValue } from '@gate-forge/core';
 import { parseArgs } from '../args.js';
@@ -64,8 +64,14 @@ export async function explainCommand(io: Io, argv: readonly string[]): Promise<n
     stateDir: resolveStateDir(io.cwd),
   });
 
+  const pageObligation = pipeline.policy.obligations.find(
+    (obligation) => obligation.id === target && (obligation.contract === 'page:loads' || obligation.contract === 'page:data-ok'),
+  );
   const resource = pipeline.graph.resources.find(
-    (candidate) => candidate.id === target || candidate.name === target,
+    (candidate) =>
+      candidate.id === target ||
+      candidate.name === target ||
+      (pageObligation !== undefined && candidate.id === pageObligation.resourceId),
   );
   if (resource === undefined) {
     // 0.9.0 problem 26: a repo-relative path is a first-class target. When no
@@ -118,6 +124,10 @@ export async function explainCommand(io: Io, argv: readonly string[]): Promise<n
   const obligations = pipeline.policy.obligations.filter(
     (obligation) => obligation.resourceId === resource.id,
   );
+  const pageProof =
+    resource.kind === 'ui.page'
+      ? loadPageProof(resolveStateDir(io.cwd), resource.id, pageObligation?.id ?? null)
+      : null;
 
   if (asJson) {
     writeLine(
@@ -127,6 +137,7 @@ export async function explainCommand(io: Io, argv: readonly string[]): Promise<n
         resource: resource as unknown as JsonValue,
         decision: (decision ?? null) as unknown as JsonValue,
         obligations: obligations as unknown as JsonValue,
+        ...(pageProof === null ? {} : { pageProof: pageProof as unknown as JsonValue }),
         blocking: pipeline.policy.blocking.filter(
           (entry) =>
             entry.resourceId === resource.id ||
@@ -220,6 +231,13 @@ export async function explainCommand(io: Io, argv: readonly string[]): Promise<n
       `  ${obligation.id} (policy ${obligation.policyId}, fingerprint ${fingerprintObligation(obligation)})`,
     );
   }
+  if (pageProof !== null) {
+    writeLine(
+      io.stdout,
+      `page proof (last test-gates report): channel=${pageProof.channel ?? 'none'}; ` +
+        `test=${pageProof.test ?? 'none'}; status=${pageProof.status}; reason=${pageProof.reason ?? 'none'}`,
+    );
+  }
   const blocked = (decision?.blocks.length ?? 0) > 0 || resource.classification === null;
   return blocked ? 1 : 0;
 }
@@ -255,6 +273,65 @@ function resourceSourcesByFile(
     byFile.set(entry.source, [...(byFile.get(entry.source) ?? []), entry.name]);
   }
   return new Map([...byFile].map(([file, labels]) => [file, labels.sort()]));
+}
+
+interface PageProofDetails {
+  channel: 'observed' | 'swept' | null;
+  test: string | null;
+  status: string;
+  reason: string | null;
+}
+
+function loadPageProof(stateDir: string, pageId: string | null, obligationId: string | null): PageProofDetails {
+  const missing = {
+    channel: null,
+    test: null,
+    status: 'unproven',
+    reason: 'no page proof appears in the last test-gates report',
+  } as const;
+  if (pageId === null) return missing;
+  const reportPath = join(stateDir, 'report.json');
+  if (!existsSync(reportPath)) return missing;
+  try {
+    const document = objectRecord(JSON.parse(readFileSync(reportPath, 'utf8')) as unknown);
+    const pages = document?.['pages'];
+    if (!Array.isArray(pages)) return missing;
+    const page = pages
+      .map(objectRecord)
+      .find((entry) => entry?.['pageId'] === pageId);
+    if (page === undefined || page === null) return missing;
+    const verdicts = document?.['verdicts'];
+    const verdict =
+      obligationId !== null && Array.isArray(verdicts)
+        ? verdicts
+            .map(objectRecord)
+            .find((entry) => entry?.['obligationId'] === obligationId)
+        : null;
+    const channel = page['channel'] === 'observed' || page['channel'] === 'swept' ? page['channel'] : null;
+    const test = typeof page['test'] === 'string' ? page['test'] : null;
+    return {
+      channel,
+      test,
+      status: typeof verdict?.['verdict'] === 'string'
+        ? verdict['verdict']
+        : typeof page['status'] === 'string'
+          ? page['status']
+          : 'unproven',
+      reason: typeof verdict?.['reason'] === 'string'
+        ? verdict['reason']
+        : typeof page['reason'] === 'string'
+          ? page['reason']
+          : null,
+    };
+  } catch {
+    return missing;
+  }
+}
+
+function objectRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
 }
 
 /**
