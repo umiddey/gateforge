@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.13.0
 
 - **Pages-family adoption for already-adopted repositories (0.13.0).**
   `gateforge adopt --family pages` revises an ALREADY-adopted repository —
