@@ -95,6 +95,11 @@ export async function startWitnessProcess(
     });
     child.stderr?.on('data', (chunk: Buffer) => {
       stderr += chunk.toString('utf8');
+      // Forward live: the page sweep's per-visit progress lines land on
+      // the operator's terminal as each visit finishes (a killed run
+      // keeps the lines it already earned), and crash diagnostics stay
+      // in `stderr` for the early-exit message below.
+      process.stderr.write(chunk);
     });
     child.once('error', (error) => {
       clearTimeout(timer);

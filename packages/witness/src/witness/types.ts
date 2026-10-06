@@ -1212,6 +1212,8 @@ export interface PageSweepRequest {
   /** Declared live-channel path prefixes (same rule as the observed channel). */
   liveChannels: string[];
   storageState?: unknown;
+  /** Ask for one progress line per visited page, emitted as each finishes. */
+  progress?: boolean;
 }
 
 /** `POST /sessions/page-observer/flush`: finalizes quiet visits before the fixture closes Chromium. */

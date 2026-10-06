@@ -5042,6 +5042,9 @@ async function runSupervisedTestGatesInner(
           errorMarkers: config.pages?.errorMarkers ?? [],
           liveChannels: config.pages?.liveChannels ?? [],
           ...(storageState !== undefined ? { storageState } : {}),
+          // Per-page progress survives a killed run only when the witness
+          // emits it as each visit finishes; `--progress off` asks for none.
+          ...(progressTarget !== null ? { progress: true } : {}),
         });
         if (sweep.sessionRejected != null) {
           writeLine(

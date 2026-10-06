@@ -188,6 +188,23 @@ function normalizePageStorageState(raw: unknown): BrowserContextOptions['storage
   return { cookies, origins };
 }
 
+/**
+ * One sweep progress line, emitted as each visit finishes so a killed run
+ * keeps the lines it already earned.
+ */
+export function formatSweepProgress(info: {
+  index: number;
+  total: number;
+  audience: string;
+  path: string;
+  proven: boolean;
+  firstReason: string | null;
+  ms: number;
+}): string {
+  const outcome = info.proven ? 'proven' : `refused${info.firstReason === null ? '' : ` ${info.firstReason}`}`;
+  return `page ${String(info.index)}/${String(info.total)} ${info.audience} ${info.path} -> ${outcome} (${String(info.ms)} ms)`;
+}
+
 /** One swept route outcome: the page verdict plus whether the sweep visited it. */
 export interface SweptPageVisit {
   routeId: string;
@@ -212,12 +229,16 @@ export async function sweepPageVisits(input: {
   sessionId: string;
   testId: string;
   appBase: string;
+  /** The audience these routes belong to (named in progress lines). */
+  audience: string;
   routes: readonly PageRoute[];
   loginRoutes: readonly string[];
   errorMarkers: readonly string[];
   /** Declared live-channel path prefixes (same rule as the observed channel). */
   liveChannels: readonly string[];
   storageState?: unknown;
+  /** Called as each visited page finishes, with its one progress line. */
+  onProgress?: (line: string) => void;
   issueRecord(obligationId: string, testId: string, payload: unknown): string;
 }): Promise<PageSweepResult> {
   const page = await input.browser.pageFor(input.sessionId, normalizePageStorageState(input.storageState));
@@ -259,6 +280,7 @@ export async function sweepPageVisits(input: {
       visits.push({ routeId: route.id, verdict, visited: false });
       continue;
     }
+    const visitStartedAt = Date.now();
     const observation = await driveEngineVisit(page, input.appBase, route, input.routes, {
       loginRoutes: input.loginRoutes,
       errorMarkers: input.errorMarkers,
@@ -287,6 +309,15 @@ export async function sweepPageVisits(input: {
     input.issueRecord(`${verdict.pageId}:page:loads`, input.testId, payload);
     input.issueRecord(`${verdict.pageId}:page:data-ok`, input.testId, payload);
     visits.push({ routeId: verdict.pageId, verdict, visited: true });
+    input.onProgress?.(formatSweepProgress({
+      index: index + 1,
+      total: input.routes.length,
+      audience: input.audience,
+      path: route.path,
+      proven: verdict.loads.satisfied && verdict.dataOk.satisfied,
+      firstReason: verdict.loads.refusalReasons[0] ?? verdict.dataOk.refusalReasons[0] ?? null,
+      ms: Date.now() - visitStartedAt,
+    }));
     if (index === 0 && input.storageState !== undefined) {
       const login = landedLoginRoute(visit.url, route.path, input.loginRoutes);
       if (login !== null) {

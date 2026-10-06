@@ -2244,11 +2244,15 @@ async function handleRequest(
         sessionId: `page-sweep-${state.options.runId}-${body.audience}`,
         testId: 'page-sweep',
         appBase: requireTrustedUiBase(state),
+        audience: body.audience,
         routes: body.pages,
         loginRoutes: body.loginRoutes,
         errorMarkers: body.errorMarkers,
         liveChannels: body.liveChannels,
         storageState: body.storageState,
+        ...(body.progress === true
+          ? { onProgress: (line: string) => process.stderr.write(`${line}\n`) }
+          : {}),
         issueRecord: (obligationId, testId, payload) =>
           issueRecord(state, obligationId, 'page.observed', testId, payload, 'engine-observed').recordId,
       });
