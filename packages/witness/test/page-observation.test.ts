@@ -9,6 +9,7 @@ const clean = {
   domMarkerHit: false,
   apiResponses: [{ url: 'http://127.0.0.1:47013/api/orders/42', status: 200, remoteAddress: '127.0.0.1', proxied: true }],
   apiRequestsSettled: true,
+  liveChannels: { count: 0, paths: [] },
 };
 
 describe('page observation grading', () => {
@@ -78,6 +79,36 @@ describe('page observation grading', () => {
       visit: { ...clean, apiRequestsSettled: undefined as unknown as boolean },
     });
     expect(verdict.loads.refusalReasons).toContain('PAGE_API_UNSETTLED');
+    expect(verdict.dataOk.refusalReasons).toContain('PAGE_API_UNSETTLED');
+  });
+
+  it('a visit whose only open exchange is a declared live channel satisfies both promises', () => {
+    // The channel never grades a live-channel exchange as app data: the
+    // open long poll is LISTED (liveChannels) and absent from
+    // apiResponses, so a page holding a live connection grades clean
+    // once everything else settled.
+    const verdict = gradePageVisit({
+      pages,
+      visit: {
+        ...clean,
+        apiResponses: [],
+        liveChannels: { count: 1, paths: ['/live/poll'] },
+      },
+    });
+    expect(verdict.loads.satisfied).toBe(true);
+    expect(verdict.dataOk.satisfied).toBe(true);
+    expect(verdict.loads.refusalReasons).toEqual([]);
+    expect(verdict.dataOk.refusalReasons).toEqual([]);
+  });
+
+  it('a non-declared open exchange still refuses both promises as unsettled', () => {
+    const verdict = gradePageVisit({
+      pages,
+      visit: { ...clean, apiResponses: [], apiRequestsSettled: false },
+    });
+    expect(verdict.loads.satisfied).toBe(false);
+    expect(verdict.loads.refusalReasons).toContain('PAGE_API_UNSETTLED');
+    expect(verdict.dataOk.satisfied).toBe(false);
     expect(verdict.dataOk.refusalReasons).toContain('PAGE_API_UNSETTLED');
   });
 });

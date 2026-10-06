@@ -76,6 +76,7 @@ export async function registerPageObserver(input: {
       loginRoutes: context.loginRoutes,
       errorMarkers: context.errorMarkers,
       appOrigins: context.appOrigins,
+      liveChannels: context.liveChannels ?? [],
       isProxiedExchange(url, status) {
         const path = new URL(url).pathname;
         const exchange = state.observed.find((candidate) =>
@@ -121,6 +122,7 @@ export async function registerPageObserver(input: {
           // One payload shared by both promise records; the sequence
           // increases on every observation of this registered session.
           apiRequestsSettled: visit.apiRequestsSettled,
+          liveChannels: visit.liveChannels,
           observationSequence: observationSequence++,
           loads: finalVerdict.loads,
           dataOk: finalVerdict.dataOk,
@@ -194,6 +196,8 @@ export async function sweepPageVisits(input: {
   routes: readonly PageRoute[];
   loginRoutes: readonly string[];
   errorMarkers: readonly string[];
+  /** Declared live-channel path prefixes (same rule as the observed channel). */
+  liveChannels: readonly string[];
   storageState?: unknown;
   issueRecord(obligationId: string, testId: string, payload: unknown): string;
 }): Promise<Array<{ routeId: string; verdict: PageVisitVerdict }>> {
@@ -204,6 +208,7 @@ export async function sweepPageVisits(input: {
     const observation = await driveEngineVisit(page, input.appBase, route, input.routes, {
       loginRoutes: input.loginRoutes,
       errorMarkers: input.errorMarkers,
+      liveChannels: input.liveChannels,
     });
     const { verdict, visit } = observation;
     if (verdict.pageId === null) {
@@ -220,6 +225,7 @@ export async function sweepPageVisits(input: {
       // One payload reused for both contracts; the sequence increases
       // within this sweep.
       apiRequestsSettled: visit.apiRequestsSettled,
+      liveChannels: visit.liveChannels,
       observationSequence: observationSequence++,
       loads: verdict.loads,
       dataOk: verdict.dataOk,

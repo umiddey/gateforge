@@ -769,6 +769,15 @@ export const GateforgeConfigSchema = z
           session: z.string().min(1).optional(),
         }).strict()).default([]),
         errorMarkers: z.array(z.string().min(1)).default([]),
+        /**
+         * Same-origin request path prefixes a page may keep open as a
+         * live channel (long poll, WebSocket handshake, server-sent
+         * events). A request under a declared prefix never counts as
+         * app data evidence and never holds a page visit's settle wait;
+         * it stays listed in the visit payload. Each value must start
+         * with '/'; nothing is guessed from names or traffic.
+         */
+        liveChannels: z.array(z.string().startsWith('/')).default([]),
         params: z.record(z.string(), z.record(z.string(), z.string())).default({}),
         exclude: z.array(z.string().startsWith('/')).default([]),
         sweep: z.boolean().default(true),

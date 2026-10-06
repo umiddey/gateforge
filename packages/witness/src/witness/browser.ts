@@ -43,6 +43,7 @@ import {
   type PageVisitVerdict,
 } from './page-observation.js';
 import { trackPageApiSettlement, type ApiSettlementTracker, type TrackedApiExchange } from './api-settlement.js';
+import { LiveChannelTracker, appHostsOfOrigins } from './page-live-channels.js';
 import {
   ENGINE_PAGE_VISIT_STEP_TIMEOUT_MS,
   ENGINE_PAGE_VISIT_SETTLE_MS,
@@ -73,9 +74,25 @@ export async function driveEngineVisit(
   appBase: string,
   route: PageRoute,
   pages: readonly PageRoute[],
-  options: { loginRoutes?: readonly string[]; errorMarkers?: readonly string[] } = {},
+  options: {
+    loginRoutes?: readonly string[];
+    errorMarkers?: readonly string[];
+    liveChannels?: readonly string[];
+  } = {},
 ): Promise<EnginePageVisitObservation> {
   const appOrigin = new URL(appBase).origin;
+  const live = new LiveChannelTracker(options.liveChannels ?? [], appHostsOfOrigins([appBase]));
+  const tryParseUrl = (raw: string): URL | null => {
+    try {
+      return new URL(raw);
+    } catch {
+      return null;
+    }
+  };
+  const isLiveExchangeUrl = (raw: string): boolean => {
+    const parsed = tryParseUrl(raw);
+    return parsed !== null && live.isLiveByUrl(parsed);
+  };
   const destination = new URL(route.path, appBase);
   if (destination.origin !== appOrigin) throw new EngineBrowserError('browser.visit refuses a page route outside the trusted app origin');
   const navigations: string[] = [];
@@ -97,8 +114,9 @@ export async function driveEngineVisit(
   const foreignNavigations: string[] = [];
   /** The app data exchange check for a network event URL. */
   const isAppDataExchange = (url: URL, resourceType: string): boolean =>
-    url.origin === appOrigin &&
-    (url.pathname.startsWith('/api/') || API_RESOURCE_TYPES[resourceType] === true);
+    (url.origin === appOrigin &&
+      (url.pathname.startsWith('/api/') || API_RESOURCE_TYPES[resourceType] === true)) ||
+    live.isLiveByUrl(url);
   const onNavigation = (frame: Frame): void => {
     if (frame !== page.mainFrame()) return;
     navigations.push(frame.url());
@@ -121,10 +139,31 @@ export async function driveEngineVisit(
     tracker = await trackPageApiSettlement(page, {
       isAppDataExchange,
       onExchangeOpen: (exchange) => {
-        outstandingRequests.add(exchange);
+        // A live channel never holds the settle wait; it is listed at
+        // open (a never-answered long poll has no headers to list at).
+        if (isLiveExchangeUrl(exchange.url)) {
+          const openUrl = tryParseUrl(exchange.url);
+          if (openUrl !== null) live.note(openUrl);
+        } else {
+          outstandingRequests.add(exchange);
+        }
         noteActivity();
       },
-      onExchangeHeaders: (_exchange, headers) => {
+      onExchangeHeaders: (exchange, headers) => {
+        const headerUrl = tryParseUrl(headers.url);
+        if (headerUrl !== null && live.isLiveByUrl(headerUrl)) {
+          live.note(headerUrl);
+          noteActivity();
+          return;
+        }
+        if (LiveChannelTracker.isEventStream(headers.contentType)) {
+          // An endless stream is never a finished app data request:
+          // unblock the settle wait and list it instead.
+          outstandingRequests.delete(exchange);
+          if (headerUrl !== null) live.note(headerUrl);
+          noteActivity();
+          return;
+        }
         apiResponses.push({
           url: headers.url,
           status: headers.status,
@@ -207,6 +246,7 @@ export async function driveEngineVisit(
         failures: failedApiRequests,
         completions: completedApiRequests,
       }),
+      liveChannels: live.snapshot(),
     };
     return { visit, verdict: gradePageVisit({ pages, expectedPage: route, loginRoutes: options.loginRoutes, visit }) };
   } catch (error) {

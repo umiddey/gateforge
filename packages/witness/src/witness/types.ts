@@ -615,6 +615,14 @@ export interface PageObservationContext {
   errorMarkers: string[];
   /** The ONLY app origins a matched page's FINAL URL may carry. */
   appOrigins: string[];
+  /**
+   * Same-origin request path prefixes a page may keep open as a live
+   * channel (long poll, WebSocket handshake, server-sent events). A
+   * request under a declared prefix never counts as app data evidence
+   * and never holds a visit's settle wait; it is listed in the visit
+   * payload instead. Absent = no declared channels.
+   */
+  liveChannels?: string[];
   /** Static browser-API mutation risks keyed by catalog file/test identity. */
   tamperRisks: Array<{ testId: string | null; file: string; locationFile: string; line: number }>;
 }
@@ -1201,6 +1209,8 @@ export interface PageSweepRequest {
   pages: Array<{ id: string; path: string; anonymous?: boolean }>;
   loginRoutes: string[];
   errorMarkers: string[];
+  /** Declared live-channel path prefixes (same rule as the observed channel). */
+  liveChannels: string[];
   storageState?: unknown;
 }
 

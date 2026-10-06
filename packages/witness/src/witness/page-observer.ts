@@ -9,6 +9,7 @@ import {
   type PageVisitVerdict,
 } from './page-observation.js';
 import { trackPageApiSettlement, type ApiSettlementTracker } from './api-settlement.js';
+import { LiveChannelTracker, appHostsOfOrigins, liveChannelSnapshot } from './page-live-channels.js';
 import {
   ENGINE_PAGE_VISIT_ADDRESS_TIMEOUT_MS,
   ENGINE_PAGE_VISIT_API_SETTLE_TIMEOUT_MS,
@@ -20,6 +21,8 @@ export interface PageObserverOptions {
   loginRoutes?: readonly string[];
   errorMarkers: readonly string[];
   appOrigins: readonly string[];
+  /** Controller-declared live-channel path prefixes (`pages.liveChannels`). */
+  liveChannels?: readonly string[];
   isProxiedExchange: (url: string, status: number) => boolean;
   onVisit: (visit: ObservedPageVisit, verdict: PageVisitVerdict) => void | Promise<void>;
   quietMs?: number;
@@ -45,6 +48,8 @@ interface PageWindow {
   failedRequests: ObservedApiRequestFailure[];
   /** Tracked app data requests of this window that reached completion. */
   completedRequests: ObservedApiRequestCompletion[];
+  /** Live-channel request paths of this window (listed, never graded). */
+  liveChannels: Set<string>;
   /** Playwright request opens per key (method + full URL). */
   playwrightOpens: Map<string, number>;
   /** Playwright requestfinished count per key. */
@@ -104,6 +109,14 @@ function apiExchangeKey(method: string, url: string): string {
   return `${method} ${url}`;
 }
 
+/** Case-insensitive response header value; null when absent. */
+function headerValue(headers: Record<string, string>, wanted: string): string | null {
+  for (const [name, value] of Object.entries(headers)) {
+    if (name.toLowerCase() === wanted) return value;
+  }
+  return null;
+}
+
 /**
  * Counts this window's still-outstanding Playwright requests that the
  * CDP completion session proves done. Per key (method + full URL) the
@@ -154,6 +167,14 @@ export async function observePageBrowser(options: PageObserverOptions): Promise<
       return options.appOrigins.includes(new URL(url).origin);
     } catch {
       return false;
+    }
+  };
+  const live = new LiveChannelTracker(options.liveChannels ?? [], appHostsOfOrigins(options.appOrigins));
+  const tryParseUrl = (raw: string): URL | null => {
+    try {
+      return new URL(raw);
+    } catch {
+      return null;
     }
   };
   /** The app data exchange URL of a network event, or null when irrelevant. */
@@ -241,6 +262,7 @@ export async function observePageBrowser(options: PageObserverOptions): Promise<
             failures: window.failedRequests,
             completions: window.completedRequests,
           }),
+          liveChannels: liveChannelSnapshot(window.liveChannels),
         };
         // Evidence is NOT cleared: repeated quiet emissions of the SAME
         // navigation preserve earlier errors and API statuses; only a new
@@ -287,6 +309,7 @@ export async function observePageBrowser(options: PageObserverOptions): Promise<
           failures: window.failedRequests,
           completions: window.completedRequests,
         }),
+        liveChannels: liveChannelSnapshot(window.liveChannels),
       };
       const verdict = gradePageVisit({ pages: options.pages, loginRoutes: options.loginRoutes, visit });
       await options.onVisit(visit, verdict);
@@ -321,6 +344,7 @@ export async function observePageBrowser(options: PageObserverOptions): Promise<
         settleNotify: undefined,
         failedRequests: [],
         completedRequests: [],
+        liveChannels: new Set(),
         playwrightOpens: new Map(),
         playwrightFinished: new Map(),
         cdpSends: new Map(),
@@ -388,6 +412,7 @@ export async function observePageBrowser(options: PageObserverOptions): Promise<
           settleNotify: undefined,
           failedRequests: [],
           completedRequests: [],
+          liveChannels: new Set(),
           playwrightOpens: new Map(),
           playwrightFinished: new Map(),
           cdpSends: new Map(),
@@ -413,7 +438,25 @@ export async function observePageBrowser(options: PageObserverOptions): Promise<
       window.dirty = true;
       settle(state);
     });
+    page.on('websocket', (websocket) => {
+      const websocketUrl = tryParseUrl(websocket.url());
+      if (websocketUrl === null || !live.isLiveByUrl(websocketUrl)) return;
+      // An app-host WebSocket upgrade is a live channel by protocol: it
+      // never holds the settle wait (Playwright never tracks it as a
+      // request) and is listed like every other live channel.
+      state.window.liveChannels.add(websocketUrl.pathname);
+      state.window.dirty = true;
+      settle(state);
+    });
     page.on('request', (request) => {
+      const requestUrl = tryParseUrl(request.url());
+      if (requestUrl !== null && live.isLiveByUrl(requestUrl)) {
+        // A live channel never holds the settle wait and never grades as
+        // app data; the window lists it (its response may never come).
+        state.window.liveChannels.add(requestUrl.pathname);
+        state.window.dirty = true;
+        return;
+      }
       if (apiExchangeUrl(request.url(), request.resourceType()) === null) return;
       const window = state.window;
       window.outstanding.add(request);
@@ -455,11 +498,25 @@ export async function observePageBrowser(options: PageObserverOptions): Promise<
     });
     page.on('response', (response) => {
       const url = response.url();
+      const responseUrl = tryParseUrl(url);
+      if (responseUrl !== null && live.isLiveByUrl(responseUrl)) {
+        live.note(responseUrl);
+        return;
+      }
       if (apiExchangeUrl(url, response.request().resourceType()) === null) return;
       // The response belongs to the window that captured its request at
       // request start. Headers only: collect status/address here; the
       // request stays outstanding until requestfinished/requestfailed.
       const window = state.requestWindows.get(response.request()) ?? state.window;
+      if (LiveChannelTracker.isEventStream(headerValue(response.headers(), 'content-type'))) {
+        // An endless event stream is never a finished app data request:
+        // unblock the window and list it instead.
+        if (window.outstanding.delete(response.request())) state.requestWindows.delete(response.request());
+        if (responseUrl !== null) window.liveChannels.add(responseUrl.pathname);
+        if (window.outstanding.size === 0) window.settleNotify?.();
+        settle(state);
+        return;
+      }
       // Abort any in-flight emission so it cannot grade before this response
       // is collected; the quiet window restarts.
       settle(state);

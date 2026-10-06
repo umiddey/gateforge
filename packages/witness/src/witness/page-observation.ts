@@ -1,4 +1,5 @@
 /** Pure route matching and grading for browser-observed page visits. */
+import type { LiveChannelSnapshot } from './page-live-channels.js';
 
 export interface PageRoute {
   id: string;
@@ -33,6 +34,13 @@ export interface ObservedPageVisit {
    * flight must never read as settled.
    */
   apiRequestsSettled: boolean;
+  /**
+   * The declared/protocol live channels the visit kept open (a
+   * controller-declared path prefix, an app-host WebSocket upgrade, a
+   * `text/event-stream` response). They never count as app data
+   * evidence and never hold the settle wait; they are listed instead.
+   */
+  liveChannels: LiveChannelSnapshot;
 }
 
 /** One tracked app data request that failed without completing. */

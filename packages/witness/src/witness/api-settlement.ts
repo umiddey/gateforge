@@ -52,6 +52,8 @@ export interface TrackedApiResponseHeaders {
   status: number;
   /** Remote peer address; null when none was reported (e.g. local fulfill). */
   remoteAddress: string | null;
+  /** Response content type; null when the hop declared none. */
+  contentType: string | null;
 }
 
 /** How one tracked exchange left the browser's network stack. */
@@ -125,6 +127,7 @@ export async function trackPageApiSettlement(page: Page, host: ApiSettlementHost
           url: params.redirectResponse.url,
           status: params.redirectResponse.status,
           remoteAddress: params.redirectResponse.remoteIPAddress ?? null,
+          contentType: headerOf(params.redirectResponse.headers, 'content-type'),
         });
       }
     }
@@ -168,6 +171,7 @@ export async function trackPageApiSettlement(page: Page, host: ApiSettlementHost
       url: params.response.url,
       status: params.response.status,
       remoteAddress: params.response.remoteIPAddress ?? null,
+      contentType: headerOf(params.response.headers, 'content-type'),
     });
     if (!record.redirected && record.declaredLength === 0) complete(record);
   });
@@ -209,6 +213,14 @@ function declaredContentLength(headers: Record<string, string>): number | null {
     if (name.toLowerCase() !== 'content-length') continue;
     const length = Number(value);
     return Number.isFinite(length) && length >= 0 ? length : null;
+  }
+  return null;
+}
+
+/** Case-insensitive single header of a CDP header bag; null when absent. */
+function headerOf(headers: Record<string, string>, wanted: string): string | null {
+  for (const [name, value] of Object.entries(headers)) {
+    if (name.toLowerCase() === wanted) return value;
   }
   return null;
 }

@@ -2231,6 +2231,8 @@ async function handleRequest(
         ) ||
         !Array.isArray(body.loginRoutes) ||
         body.loginRoutes.some((route) => typeof route !== 'string') ||
+        !Array.isArray(body.liveChannels) ||
+        body.liveChannels.some((prefix) => typeof prefix !== 'string' || !prefix.startsWith('/')) ||
         !Array.isArray(body.errorMarkers) ||
         body.errorMarkers.some((marker) => typeof marker !== 'string')
       ) {
@@ -2245,6 +2247,7 @@ async function handleRequest(
         routes: body.pages,
         loginRoutes: body.loginRoutes,
         errorMarkers: body.errorMarkers,
+        liveChannels: body.liveChannels,
         storageState: body.storageState,
         issueRecord: (obligationId, testId, payload) =>
           issueRecord(state, obligationId, 'page.observed', testId, payload, 'engine-observed').recordId,
@@ -2656,6 +2659,11 @@ async function handleExpectedSet(
           return false;
         }
       });
+    const rawLiveChannels = rawContext['liveChannels'];
+    const validLiveChannels =
+      rawLiveChannels === undefined ||
+      (Array.isArray(rawLiveChannels) &&
+        (rawLiveChannels as unknown[]).every((prefix) => typeof prefix === 'string' && prefix.startsWith('/')));
     const validTamperRisks =
       Array.isArray(rawTamperRisks) &&
       (rawTamperRisks as unknown[]).every((risk) => {
@@ -2668,12 +2676,13 @@ async function handleExpectedSet(
           typeof row['line'] === 'number' && Number.isInteger(row['line']) && row['line'] >= 1
         );
       });
-    if (!validPages || !validLoginRoutes || !validErrorMarkers || !validAppOrigins || !validTamperRisks) {
+    if (!validPages || !validLoginRoutes || !validErrorMarkers || !validAppOrigins || !validLiveChannels || !validTamperRisks) {
       throw new HttpError(
         400,
         'expected-set pageObservation requires pages (non-empty {id, path, anonymous?} rows), loginRoutes ' +
           "('/'-prefixed strings), errorMarkers (non-empty strings), appOrigins (valid origin " +
-          'strings), and tamperRisks ({testId: string|null, file, locationFile, line})',
+          'strings), liveChannels (optional \'/\'-prefixed prefixes), and tamperRisks ' +
+          '({testId: string|null, file, locationFile, line})',
       );
     }
     pageObservation = {
@@ -2685,6 +2694,7 @@ async function handleExpectedSet(
       loginRoutes: rawLoginRoutes as string[],
       errorMarkers: rawErrorMarkers as string[],
       appOrigins: rawAppOrigins as string[],
+      ...(rawLiveChannels === undefined ? {} : { liveChannels: rawLiveChannels as string[] }),
       tamperRisks: (rawTamperRisks as Array<Record<string, unknown>>).map((risk) => ({
         testId: risk['testId'] as string | null,
         file: risk['file'] as string,

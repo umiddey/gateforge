@@ -1128,7 +1128,7 @@ async function resolvePagesBlock(io: Io, selected: readonly string[], configExis
     const markers = markerAnswer === '' ? [] : markerAnswer.split(',').map((marker) => marker.trim()).filter(Boolean);
     const audienceRows = audiences.map((audience) => `    - name: ${JSON.stringify(audience.name)}\n      loginRoute: ${JSON.stringify(audience.loginRoute)}\n      ${'guard' in audience ? `guard: ${JSON.stringify(audience.guard)}` : `pathPrefix: ${JSON.stringify(audience.pathPrefix)}`}${'plane' in audience ? `\n      plane: ${audience.plane}` : ''}`);
     const audienceYaml = audienceRows.length === 0 ? '  audiences: []' : `  audiences:\n${audienceRows.join('\n')}`;
-    return `# Page routes are read from source; audience bindings are owner assertions.\npages:\n  router: ${routerAnswer}\n${audienceYaml}\n  errorMarkers: [${markers.map((marker) => JSON.stringify(marker)).join(', ')}]\n  params: {}\n  exclude: []\n  sweep: true\n`;
+    return `# Page routes are read from source; audience bindings are owner assertions.\n# liveChannels: same-origin path prefixes a page may keep open (long poll,\n# WebSocket, server-sent events) without failing page proof.\npages:\n  router: ${routerAnswer}\n${audienceYaml}\n  errorMarkers: [${markers.map((marker) => JSON.stringify(marker)).join(', ')}]\n  liveChannels: []\n  params: {}\n  exclude: []\n  sweep: true\n`;
   } finally {
     rl.close();
   }

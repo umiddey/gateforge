@@ -1218,6 +1218,20 @@ controller-held — derived from the audience declaration, registered with
 the witness, never supplied by the suite — so both proof channels grade it
 identically.
 
+A page may legitimately keep a connection open forever: a long poll, a
+WebSocket, or a server-sent-events stream. Declare those path prefixes
+under `pages.liveChannels` (each starting with `/`) and both channels
+treat a same-origin request under a declared prefix — plus any WebSocket
+upgrade on the app host and any `text/event-stream` response, as protocol
+facts — as a LIVE CHANNEL: it never counts as app data evidence, never
+holds the visit's settle wait, and never refuses the page by itself; the
+visit payload lists what it saw under `liveChannels` (count + paths).
+Nothing is guessed from names or traffic: an undeclared long poll is still
+an unfinished app data request and refuses the page with
+`PAGE_API_UNSETTLED` once the settle budget expires. Like the rest of the
+page configuration, the prefixes are controller-held and registered with
+the witness, so both proof channels apply the same rule.
+
 Per test, only a page's LATEST observation (`observationSequence`) counts.
 An early clean visit cannot hide a later refusal by the same test, and
 another passing test's latest clean visit still proves the page. A missing

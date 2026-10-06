@@ -4181,6 +4181,7 @@ async function runSupervisedTestGatesInner(
         loginRoutes: (config.pages?.audiences ?? []).map((audience) => audience.loginRoute),
         errorMarkers: config.pages?.errorMarkers ?? [],
         appOrigins: [new URL(io.env['GATEFORGE_APP_BASE_URL']).origin],
+        liveChannels: config.pages?.liveChannels ?? [],
         tamperRisks:
           catalog?.entries.flatMap((entry) => {
             const risk = entry.suppressionSignals.find((signal) =>
@@ -5039,6 +5040,7 @@ async function runSupervisedTestGatesInner(
           pages: routes,
           loginRoutes: [audience.loginRoute],
           errorMarkers: config.pages?.errorMarkers ?? [],
+          liveChannels: config.pages?.liveChannels ?? [],
           ...(storageState !== undefined ? { storageState } : {}),
         });
         writeLine(io.stderr, `page sweep visited ${String(sweep.visits.length)} page gap(s) for audience '${audienceName}'.`);
