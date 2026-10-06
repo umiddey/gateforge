@@ -1,6 +1,6 @@
 {
   "name": "@gate-forge/pack-alembic",
-  "version": "0.11.1",
+  "version": "0.12.0",
   "license": "Apache-2.0",
   "description": "Alembic migration obligations pack: static lineage verification, engine-run roundtrip on disposable database, data-preservation checks, and multi-developer merge safety.",
   "type": "module",
@@ -27,8 +27,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@gate-forge/core": "^0.11.1",
-    "@gate-forge/plugin-protocol": "^0.11.1",
+    "@gate-forge/core": "^0.12.0",
+    "@gate-forge/plugin-protocol": "^0.12.0",
     "zod": "^4.1.5"
   },
   "publishConfig": {
