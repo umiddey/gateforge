@@ -18,10 +18,47 @@ export interface ObservedPageVisit {
   }>;
   /**
    * True only when every tracked app data request of the visit settled
-   * (response collected or request failed without ambiguity). A visit
-   * graded while requests were in flight must never read as settled.
+   * (response collected or request failed without ambiguity), where a
+   * failure counts as settled only when it was a client-side cancel
+   * superseded by a completed same-method/full-URL request (see
+   * {@link apiRequestsSettled}). A visit graded while requests were in
+   * flight must never read as settled.
    */
   apiRequestsSettled: boolean;
+}
+
+/** One tracked app data request that failed without completing. */
+export interface ObservedApiRequestFailure {
+  method: string;
+  url: string;
+  errorText: string;
+}
+
+/** One tracked app data request that reached requestfinished. */
+export interface ObservedApiRequestCompletion {
+  method: string;
+  url: string;
+}
+
+/**
+ * Grades a visit's tracked app data request set as settled: no request is
+ * still outstanding, and every failure is a client-side cancel
+ * (`net::ERR_ABORTED`) that a completed request with the same method and
+ * the same full URL (origin+path+query) superseded within the same visit.
+ * Evaluated at grading time, so the superseding request may start before
+ * or after the abort. Any other failure text (connection refused, empty
+ * response, dead body, ...), or an unretried cancel, stays unsettled.
+ */
+export function apiRequestsSettled(input: {
+  outstandingCount: number;
+  failures: readonly ObservedApiRequestFailure[];
+  completions: readonly ObservedApiRequestCompletion[];
+}): boolean {
+  if (input.outstandingCount !== 0) return false;
+  const completed = new Set(input.completions.map(({ method, url }) => `${method} ${url}`));
+  return input.failures.every((failure) =>
+    failure.errorText === 'net::ERR_ABORTED' && completed.has(`${failure.method} ${failure.url}`),
+  );
 }
 
 export type PageRefusalReason =

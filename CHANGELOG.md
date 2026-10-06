@@ -93,7 +93,10 @@
   requests (fetch/XHR by resource type, plus `/api/` paths) and a quiet
   window after the last activity before grading, bounded by the shared
   engine budget. Before, a 500 arriving 1.2 s after the headers, or a 200
-  whose body died mid-flight, was graded clean.
+  whose body died mid-flight, was graded clean. A request the app itself
+  cancels (`net::ERR_ABORTED`) counts as settled only when the same method
+  and URL completed in the same visit; any other failure, or an unretried
+  cancel, refuses the page.
 
 - **The latest page observation per test decides.** Per test, only a
   page's latest observation (`observationSequence`) counts: an early

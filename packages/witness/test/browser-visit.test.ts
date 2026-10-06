@@ -12,6 +12,25 @@ else if (path === '/error') document.body.innerText = 'Something went wrong';
 else fetch(path === '/bad' ? '/api/bad' : path === '/delayed500' ? '/data500' : path === '/delayed200' ? '/data200' : path === '/aborted' ? '/api/aborted' : path === '/slowbody' ? '/data-slowbody' : path === '/deadbody' ? '/data-deadbody' : path === '/lateerror' ? '/databody' : '/api/ok').then((response) => { document.querySelector('main').innerText = String(response.status); if (path === '/lateerror') setTimeout(() => { throw new Error('late body crash'); }, 100); }).catch(() => {});
 </script></body>`;
 
+// The real SPA cancel shape: fire a data fetch, cancel it client-side with
+// an AbortController, then (optionally) re-issue the same request. The 50ms
+// delay before the abort is deliberate real time INSIDE THE PAGE: fake
+// timers in the test process cannot drive the page's JS or the browser's
+// network stack, and the abort must land after Chromium actually dispatched
+// the request (rule exception, same rationale as the server delays above).
+const cancelHtml = `<!doctype html><body><main>Loading</main><script>
+(async () => {
+  const p = location.pathname;
+  const controller = new AbortController();
+  fetch(p === '/cancelquery' ? '/api/x?a=1' : '/api/x', { signal: controller.signal }).catch(() => {});
+  setTimeout(() => {
+    controller.abort();
+    if (p === '/cancelonly') return;
+    fetch(p === '/cancelquery' ? '/api/x?a=2' : '/api/x').then((response) => { document.querySelector('main').textContent = 'Data ' + String(response.status); }).catch(() => {});
+  }, 50);
+})().catch(() => {});
+</script></body>`;
+
 describe('engine browser visit', () => {
   let close: (() => Promise<void>) | undefined;
   afterEach(async () => close?.());
@@ -223,6 +242,108 @@ describe('engine browser visit', () => {
       expect(late.visit.apiResponses.map(({ status }) => status)).toEqual([200]);
       expect(late.visit.exceptions).toEqual(['late body crash']);
       expect(late.verdict.loads.refusalReasons).toContain('PAGE_UNCAUGHT_EXCEPTION');
+    } finally {
+      await close();
+      close = undefined;
+    }
+  });
+
+  it('counts an app-cancelled request settled when a same-URL request completed', async () => {
+    // Real page-driven AbortController abort inside Chromium: fake timers
+    // cannot drive the page's JS or the browser network stack (rule
+    // exception, named at cancelHtml).
+    const app = createServer((request, response) => {
+      if (request.url === '/api/x') {
+        response.writeHead(200);
+        response.end('{}');
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'text/html' });
+      response.end(cancelHtml);
+    });
+    app.listen(0, [127, 0, 0, 1].join('.'));
+    await once(app, 'listening');
+    const address = app.address();
+    if (address === null || typeof address === 'string') throw new Error('app server did not bind');
+    const appBase = `http://${[127, 0, 0, 1].join('.')}:${String(address.port)}`;
+    const manager = new EngineBrowserManager({ launch: (options) => chromium.launch(options) });
+    const page = await manager.pageFor('cancel-retry-test');
+    close = async () => { await manager.closeAll(); await new Promise<void>((resolve) => app.close(() => resolve())); };
+    const pages = ['/cancelretry'].map((path) => ({ id: path, path }));
+    try {
+      const retried = await driveEngineVisit(page, appBase, pages[0]!, pages);
+      expect(retried.visit.apiRequestsSettled).toBe(true);
+      // The cancelled request's headers may or may not have been collected
+      // before the abort landed; the retry's 200 must be.
+      expect(retried.visit.apiResponses.map(({ status }) => status)).toContain(200);
+      expect(retried.verdict.loads.satisfied).toBe(true);
+      expect(retried.verdict.dataOk.satisfied).toBe(true);
+    } finally {
+      await close();
+      close = undefined;
+    }
+  });
+
+  it('refuses an app-cancelled request with no completing retry as unsettled', async () => {
+    // Real page-driven AbortController abort inside Chromium: fake timers
+    // cannot drive the page's JS or the browser network stack (rule
+    // exception, named at cancelHtml).
+    const app = createServer((request, response) => {
+      if (request.url === '/api/x') {
+        response.writeHead(200);
+        response.end('{}');
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'text/html' });
+      response.end(cancelHtml);
+    });
+    app.listen(0, [127, 0, 0, 1].join('.'));
+    await once(app, 'listening');
+    const address = app.address();
+    if (address === null || typeof address === 'string') throw new Error('app server did not bind');
+    const appBase = `http://${[127, 0, 0, 1].join('.')}:${String(address.port)}`;
+    const manager = new EngineBrowserManager({ launch: (options) => chromium.launch(options) });
+    const page = await manager.pageFor('cancel-only-test');
+    close = async () => { await manager.closeAll(); await new Promise<void>((resolve) => app.close(() => resolve())); };
+    const pages = ['/cancelonly'].map((path) => ({ id: path, path }));
+    try {
+      const cancelled = await driveEngineVisit(page, appBase, pages[0]!, pages);
+      expect(cancelled.visit.apiRequestsSettled).toBe(false);
+      expect(cancelled.verdict.loads.refusalReasons).toContain('PAGE_API_UNSETTLED');
+      expect(cancelled.verdict.dataOk.refusalReasons).toContain('PAGE_API_UNSETTLED');
+    } finally {
+      await close();
+      close = undefined;
+    }
+  });
+
+  it('refuses a cancelled request superseded only by a different URL as unsettled', async () => {
+    // Real page-driven AbortController abort inside Chromium: fake timers
+    // cannot drive the page's JS or the browser network stack (rule
+    // exception, named at cancelHtml).
+    const app = createServer((request, response) => {
+      if (request.url?.startsWith('/api/x?')) {
+        response.writeHead(200);
+        response.end('{}');
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'text/html' });
+      response.end(cancelHtml);
+    });
+    app.listen(0, [127, 0, 0, 1].join('.'));
+    await once(app, 'listening');
+    const address = app.address();
+    if (address === null || typeof address === 'string') throw new Error('app server did not bind');
+    const appBase = `http://${[127, 0, 0, 1].join('.')}:${String(address.port)}`;
+    const manager = new EngineBrowserManager({ launch: (options) => chromium.launch(options) });
+    const page = await manager.pageFor('cancel-query-test');
+    close = async () => { await manager.closeAll(); await new Promise<void>((resolve) => app.close(() => resolve())); };
+    const pages = ['/cancelquery'].map((path) => ({ id: path, path }));
+    try {
+      const mismatched = await driveEngineVisit(page, appBase, pages[0]!, pages);
+      expect(mismatched.visit.apiRequestsSettled).toBe(false);
+      expect(mismatched.verdict.loads.refusalReasons).toContain('PAGE_API_UNSETTLED');
+      expect(mismatched.verdict.dataOk.refusalReasons).toContain('PAGE_API_UNSETTLED');
     } finally {
       await close();
       close = undefined;

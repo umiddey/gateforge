@@ -1,6 +1,13 @@
 import type { Browser, BrowserContext, Page, Request } from 'playwright';
-import type { ObservedPageVisit, PageRoute, PageVisitVerdict } from './page-observation.js';
-import { gradePageVisit } from './page-observation.js';
+import {
+  apiRequestsSettled,
+  gradePageVisit,
+  type ObservedApiRequestCompletion,
+  type ObservedApiRequestFailure,
+  type ObservedPageVisit,
+  type PageRoute,
+  type PageVisitVerdict,
+} from './page-observation.js';
 import {
   ENGINE_PAGE_VISIT_ADDRESS_TIMEOUT_MS,
   ENGINE_PAGE_VISIT_API_SETTLE_TIMEOUT_MS,
@@ -33,8 +40,10 @@ interface PageWindow {
   outstanding: Set<Request>;
   /** Wakes a pending emission wait when an outstanding request settles. */
   settleNotify: (() => void) | undefined;
-  /** Sticky: some tracked request failed or never settled in this window. */
-  unsettled: boolean;
+  /** Tracked app data requests of this window that failed, with why. */
+  failedRequests: ObservedApiRequestFailure[];
+  /** Tracked app data requests of this window that reached completion. */
+  completedRequests: ObservedApiRequestCompletion[];
   /** Bounded response collections (address lookups) still in flight. */
   pendingResponses: Set<Promise<void>>;
   /** Last REAL DOM marker reading of this window's document. */
@@ -177,7 +186,11 @@ export async function observePageBrowser(options: PageObserverOptions): Promise<
           exceptions: [...window.exceptions],
           domMarkerHit,
           apiResponses: [...window.apiResponses],
-          apiRequestsSettled: window.outstanding.size === 0 && !window.unsettled,
+          apiRequestsSettled: apiRequestsSettled({
+            outstandingCount: window.outstanding.size,
+            failures: window.failedRequests,
+            completions: window.completedRequests,
+          }),
         };
         // Evidence is NOT cleared: repeated quiet emissions of the SAME
         // navigation preserve earlier errors and API statuses; only a new
@@ -219,7 +232,11 @@ export async function observePageBrowser(options: PageObserverOptions): Promise<
         // never a fabricated clean reading.
         domMarkerHit: window.domMarkerHit,
         apiResponses: [...window.apiResponses],
-        apiRequestsSettled: window.outstanding.size === 0 && !window.unsettled,
+        apiRequestsSettled: apiRequestsSettled({
+          outstandingCount: window.outstanding.size,
+          failures: window.failedRequests,
+          completions: window.completedRequests,
+        }),
       };
       const verdict = gradePageVisit({ pages: options.pages, loginRoutes: options.loginRoutes, visit });
       await options.onVisit(visit, verdict);
@@ -252,7 +269,8 @@ export async function observePageBrowser(options: PageObserverOptions): Promise<
         apiResponses: [],
         outstanding: new Set(),
         settleNotify: undefined,
-        unsettled: false,
+        failedRequests: [],
+        completedRequests: [],
         pendingResponses: new Set(),
         domMarkerHit: false,
         domGraded: false,
@@ -283,7 +301,8 @@ export async function observePageBrowser(options: PageObserverOptions): Promise<
           apiResponses: [],
           outstanding: new Set(),
           settleNotify: undefined,
-          unsettled: false,
+          failedRequests: [],
+          completedRequests: [],
           pendingResponses: new Set(),
           domMarkerHit: false,
           domGraded: false,
@@ -319,8 +338,11 @@ export async function observePageBrowser(options: PageObserverOptions): Promise<
       const window = state.requestWindows.get(request) ?? state.window;
       if (!window.outstanding.delete(request)) return;
       state.requestWindows.delete(request);
-      // A failed app data request can never produce a verifiable response.
-      window.unsettled = true;
+      // A failed app data request can never produce a verifiable response;
+      // whether it leaves the window unsettled is decided at grading time
+      // (a client-side cancel superseded by a completed same-URL request
+      // may still count as settled).
+      window.failedRequests.push({ method: request.method(), url: request.url(), errorText: request.failure()?.errorText ?? '' });
       window.dirty = true;
       if (window.outstanding.size === 0) window.settleNotify?.();
       settle(state);
@@ -332,6 +354,7 @@ export async function observePageBrowser(options: PageObserverOptions): Promise<
       if (window === undefined) return;
       state.requestWindows.delete(request);
       window.outstanding.delete(request);
+      window.completedRequests.push({ method: request.method(), url: request.url() });
       if (window.outstanding.size === 0) window.settleNotify?.();
       // Body completion lets body-driven JS/DOM/next fetches run; the same
       // quiet window restarts before any emission grades them.

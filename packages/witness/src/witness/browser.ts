@@ -33,7 +33,15 @@
 // one) — `@gate-forge/pack-playwright` is the layer that knows which
 // browser to launch. Nothing here imports Playwright at runtime.
 import type { Browser, BrowserContext, BrowserContextOptions, Frame, Locator, Page, Request, Response } from 'playwright';
-import { gradePageVisit, type ObservedPageVisit, type PageRoute, type PageVisitVerdict } from './page-observation.js';
+import {
+  apiRequestsSettled,
+  gradePageVisit,
+  type ObservedApiRequestCompletion,
+  type ObservedApiRequestFailure,
+  type ObservedPageVisit,
+  type PageRoute,
+  type PageVisitVerdict,
+} from './page-observation.js';
 import {
   ENGINE_PAGE_VISIT_STEP_TIMEOUT_MS,
   ENGINE_PAGE_VISIT_ADDRESS_TIMEOUT_MS,
@@ -76,7 +84,10 @@ export async function driveEngineVisit(
   const pendingResponses = new Set<Promise<void>>();
   /** App data requests (fetch/XHR or /api/) started but not yet settled. */
   const outstandingRequests = new Set<Request>();
-  let apiRequestsUnsettled = false;
+  /** Tracked app data requests that failed, with the browser failure text. */
+  const failedApiRequests: ObservedApiRequestFailure[] = [];
+  /** Tracked app data requests that reached requestfinished. */
+  const completedApiRequests: ObservedApiRequestCompletion[] = [];
   /** Bumped on every tracked event; wakes the drain/quiet wait. */
   let activityVersion = 0;
   let activityNotify: (() => void) | undefined;
@@ -110,14 +121,18 @@ export async function driveEngineVisit(
   };
   const onRequestFailed = (request: Request): void => {
     if (!outstandingRequests.delete(request)) return;
-    // A failed app data request can never produce a verifiable response.
-    apiRequestsUnsettled = true;
+    // A failed app data request can never produce a verifiable response;
+    // whether it leaves the visit unsettled is decided at grading time (a
+    // client-side cancel superseded by a completed same-URL request may
+    // still count as settled).
+    failedApiRequests.push({ method: request.method(), url: request.url(), errorText: request.failure()?.errorText ?? '' });
     noteActivity();
   };
   const onRequestFinished = (request: Request): void => {
     // The request lifecycle ends at body completion (or failure), never at
     // response headers: a 200 whose body later dies must stay unsettled.
     if (!outstandingRequests.delete(request)) return;
+    completedApiRequests.push({ method: request.method(), url: request.url() });
     noteActivity();
   };
   const onResponse = (response: Response): void => {
@@ -213,7 +228,11 @@ export async function driveEngineVisit(
       exceptions,
       domMarkerHit: (options.errorMarkers ?? []).some((marker) => body.includes(marker)),
       apiResponses,
-      apiRequestsSettled: outstandingRequests.size === 0 && !apiRequestsUnsettled,
+      apiRequestsSettled: apiRequestsSettled({
+        outstandingCount: outstandingRequests.size,
+        failures: failedApiRequests,
+        completions: completedApiRequests,
+      }),
     };
     return { visit, verdict: gradePageVisit({ pages, expectedPage: route, loginRoutes: options.loginRoutes, visit }) };
   } catch (error) {

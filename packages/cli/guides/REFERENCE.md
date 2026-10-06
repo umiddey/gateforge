@@ -1196,7 +1196,9 @@ Before grading, each channel waits for in-flight app data requests
 (fetch/XHR by resource type, plus `/api/` paths) and a quiet window after
 the last activity, bounded by the shared engine budget — a 500 arriving a
 second late, or a 200 whose body dies mid-flight, is no longer a clean
-page.
+page. A request the app itself cancels (`net::ERR_ABORTED`) counts as
+settled only when the same method and URL completed in the same visit; any
+other failure, or an unretried cancel, refuses the page.
 
 Per test, only a page's LATEST observation (`observationSequence`) counts.
 An early clean visit cannot hide a later refusal by the same test, and
