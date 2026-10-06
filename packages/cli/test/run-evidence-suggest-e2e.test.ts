@@ -224,8 +224,8 @@ describe('tests suggest --from-run', () => {
       ]);
       expect(get!.command).toBe(
         `gateforge tests mark --test '${ITEMS_KEY}' --kind observed-e2e ` +
-          `--obligation ${get!.obligationIds[0]!} --obligation ${get!.obligationIds[1]!} ` +
-          `--reason "observed in run ${RUN_ID}: GET /api/items -> 200"`,
+          `--obligation '${get!.obligationIds[0]!}' --obligation '${get!.obligationIds[1]!}' ` +
+          `--reason 'observed in run ${RUN_ID}: GET /api/items -> 200'`,
       );
 
       // Advisory sections: an unrouted app call and an ambiguous match.
@@ -250,7 +250,7 @@ describe('tests suggest --from-run', () => {
       const text = await runCli(repo, ['tests', 'suggest', '--from-run']);
       expect(text.code, `${text.stdout}\n${text.stderr}`).toBe(0);
       expect(text.stdout).toContain('GET /api/items -> 200');
-      expect(text.stdout).toContain(`--reason "observed in run ${RUN_ID}: GET /api/items -> 200"`);
+      expect(text.stdout).toContain(`--reason 'observed in run ${RUN_ID}: GET /api/items -> 200'`);
       expect(text.stdout).toContain('matched no endpoint');
       expect(text.stdout).toContain('/api/widgets');
       expect(text.stdout).toContain('ambiguous');

@@ -3,6 +3,7 @@
  * aggregation over observed run exchanges. E2E command behavior lives in
  * run-evidence-suggest-e2e.test.ts.
  */
+import { spawnSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 import type { TestCatalog } from '@gate-forge/core';
 import {
@@ -159,9 +160,9 @@ describe('suggestFromRunEvidence — obligation grouping and exact commands', ()
     expect(suggestion.command).toBe(
       "gateforge tests mark --test 'playwright:chromium:specs/items.spec.js:items page loads' " +
       '--kind observed-e2e ' +
-      '--obligation tenant.get-items:http:request-observed ' +
-      '--obligation tenant.get-items:http:response-status-ok ' +
-      `--reason "observed in run ${runId}: GET /api/items -> 200"`,
+      "--obligation 'tenant.get-items:http:request-observed' " +
+      "--obligation 'tenant.get-items:http:response-status-ok' " +
+      `--reason 'observed in run ${runId}: GET /api/items -> 200'`,
     );
   });
 
@@ -214,6 +215,40 @@ describe('suggestFromRunEvidence — obligation grouping and exact commands', ()
     expect(result.ambiguous[0]?.path).toBe('/api/x/7');
     expect(result.ambiguous[0]?.candidates).toEqual(['GET /api/x/{*}', 'GET /api/x/{}']);
     expect(result.considered).toBe(3);
+  });
+});
+
+describe('commandFor — the printed command survives a POSIX shell', () => {
+  /**
+   * Splits one printed gateforge command the way a shell would: the
+   * `gateforge` word is replaced by a printf that echoes every parsed
+   * argument, so the list below IS the argv a paste would produce.
+   */
+  function shellWords(command: string): string[] {
+    const run = spawnSync('bash', ['-c', command.replace(/^gateforge /, "printf '%s\\n' ")], { encoding: 'utf8' });
+    if (run.error !== undefined || run.status !== 0) throw new Error(`shell parse failed: ${String(run.stderr)}`);
+    return run.stdout.trimEnd().split('\n');
+  }
+
+  it("a key with a single quote and a path with shell metacharacters round-trip intact", () => {
+    const key = "playwright:chromium:specs/admin.spec.js:admin's invoice";
+    const runId = '4d813a14-807d-42e7-a6b4-3264f1645790';
+    const result = suggestFromRunEvidence({
+      runId,
+      routes: [route('tenant.inv', 'GET', '/api/invoices/{}')],
+      obligations: [{ id: 'tenant.inv:http:request-observed', resourceId: 'tenant.inv', contract: 'http:request-observed' }],
+      exchanges: [{ testId: 'items-1', method: 'GET', path: '/api/invoices/$1', status: 200 }],
+      satisfiedObligationIds: new Set(),
+      mappedObligationIds: new Set(),
+      testKeyOf: (testId) => (testId === 'items-1' ? key : null),
+    });
+    const command = result.suggestions[0]!.command;
+    expect(command).not.toBeNull();
+    const words = shellWords(command!);
+    // `--test` and its value stay two words; the key arrives intact.
+    expect(words[words.indexOf('--test') + 1]).toBe(key);
+    // The reason arrives as ONE argument, byte-identical (no `$1` expansion).
+    expect(words[words.indexOf('--reason') + 1]).toBe(`observed in run ${runId}: GET /api/invoices/$1 -> 200`);
   });
 });
 

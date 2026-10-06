@@ -38,7 +38,7 @@ import {
   TestDiscoveryError,
   type DiscoverResult,
 } from '@gate-forge/pack-playwright';
-import { parseArgs } from '../args.js';
+import { parseArgs, shellQuote } from '../args.js';
 import { resolveAdoptedBaseline } from '../adopted-baseline.js';
 import {
   businessRuleGuidanceLines,
@@ -387,19 +387,6 @@ function classifierBlockGuidance(
       `Read every block and the evidence behind it: gateforge explain ${shellQuote(candidate.id)}`,
     ],
   };
-}
-
-/**
- * Quotes one shell argument so generated commands can be copied safely.
- *
- * Args:
- *   value: the argument text.
- *
- * Returns:
- *   string: a POSIX single-quoted argument.
- */
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
 /**

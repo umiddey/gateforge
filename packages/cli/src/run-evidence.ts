@@ -25,6 +25,7 @@ import {
   type HttpMethod,
   type RouteMatchKind,
 } from '@gate-forge/http-contract';
+import { shellQuote } from './args.js';
 import { httpRoutesView } from './state.js';
 
 /** The observation contracts run evidence can speak for. */
@@ -401,11 +402,11 @@ function commandFor(
   evidence: readonly EvidenceRow[],
 ): string | null {
   const line = evidence.find((row) => row.testResolved !== null);
-  if (line === undefined || obligationIds.length === 0) return null;
+  if (line === undefined || line.testResolved === null || obligationIds.length === 0) return null;
   return (
-    `gateforge tests mark --test '${line.testResolved}' --kind observed-e2e ` +
-    obligationIds.map((id) => `--obligation ${id}`).join(' ') +
-    ` --reason "observed in run ${runId}: ${line.method} ${line.path} -> ${String(line.status)}"`
+    `gateforge tests mark --test ${shellQuote(line.testResolved)} --kind observed-e2e ` +
+    obligationIds.map((id) => `--obligation ${shellQuote(id)}`).join(' ') +
+    ` --reason ${shellQuote(`observed in run ${runId}: ${line.method} ${line.path} -> ${String(line.status)}`)}`
   );
 }
 

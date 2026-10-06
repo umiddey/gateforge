@@ -162,3 +162,19 @@ export function repeatableStringFlag(
   const values = raw.map(String).map((entry) => entry.trim()).filter((entry) => entry.length > 0);
   return values.length === 0 ? undefined : values;
 }
+
+/**
+ * Quotes one argument for a POSIX shell command line: wraps it in single
+ * quotes and replaces every embedded `'` with `'\''`, so a printed
+ * command survives any key, path, or reason text a test or route can
+ * carry (quotes, `$`, backticks, spaces).
+ *
+ * Args:
+ *   value: the raw argument text.
+ *
+ * Returns:
+ *   string: the shell-safe argument.
+ */
+export function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
