@@ -9,6 +9,8 @@
  * trace that supervision grades completeness from. The suite-side
  * `WitnessClient` deliberately has none of these methods.
  */
+import http from 'node:http';
+import https from 'node:https';
 import { VERIFIER_HEADER, RUN_HEADER, DEFAULT_REQUEST_TIMEOUT_MS, ENGINE_PAGE_VISIT_BUDGET_MS } from '../constants.js';
 import type {
   ExpectedSetRequest,
@@ -178,23 +180,15 @@ export class SupervisorClient {
    *   empty success).
    */
   async executionTrace(): Promise<ExecutionTraceResponse | null> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
-    let response: Response;
+    let response: { status: number; ok: boolean; bodyText: string };
     try {
-      response = await fetch(`${this.url}/runs/execution-trace`, {
-        method: 'GET',
-        headers: this.headers(),
-        signal: controller.signal,
-      });
+      response = await this.exchange('/runs/execution-trace', { method: 'GET', timeoutMs: this.timeoutMs });
     } catch {
       return null; // transport failure: the caller fails closed
-    } finally {
-      clearTimeout(timer);
     }
     if (!response.ok) return null;
     try {
-      return (await response.json()) as ExecutionTraceResponse;
+      return JSON.parse(response.bodyText) as ExecutionTraceResponse;
     } catch {
       return null;
     }
@@ -213,26 +207,70 @@ export class SupervisorClient {
    *   empty success).
    */
   async twinShapes(): Promise<TwinShapesResponse | null> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
-    let response: Response;
+    let response: { status: number; ok: boolean; bodyText: string };
     try {
-      response = await fetch(`${this.url}/runs/twin-shapes`, {
-        method: 'GET',
-        headers: this.headers(),
-        signal: controller.signal,
-      });
+      response = await this.exchange('/runs/twin-shapes', { method: 'GET', timeoutMs: this.timeoutMs });
     } catch {
       return null; // transport failure: the caller fails closed
-    } finally {
-      clearTimeout(timer);
     }
     if (!response.ok) return null;
     try {
-      return (await response.json()) as TwinShapesResponse;
+      return JSON.parse(response.bodyText) as TwinShapesResponse;
     } catch {
       return null;
     }
+  }
+
+  /**
+   * One HTTP exchange with ONLY this client's deadline. node:http(S)
+   * `request` carries no timeout of its own, so `init.timeoutMs` — the
+   * computed budget — drives the AbortSignal and is the single
+   * deadline. The previous global fetch could not honour it: undici
+   * fixes headersTimeout/bodyTimeout at 300 000 ms regardless of any
+   * option or signal, so every supervisor call longer than five
+   * minutes (a page sweep past a handful of pages) died at exactly
+   * 300 s with "fetch failed". Resolves with status + body text;
+   * rejects on any transport failure (abort, connect, reset).
+   */
+  private exchange(
+    path: string,
+    init: { method: 'GET' | 'POST'; timeoutMs: number; payload?: unknown },
+  ): Promise<{ status: number; ok: boolean; bodyText: string }> {
+    const target = new URL(`${this.url}${path}`);
+    const body = init.payload === undefined ? undefined : JSON.stringify(init.payload);
+    const headers: Record<string, string> = { ...this.headers() };
+    if (body !== undefined) headers['content-length'] = String(Buffer.byteLength(body));
+    const transport: typeof http = target.protocol === 'https:' ? https : http;
+    const { promise, resolve, reject } = Promise.withResolvers<{ status: number; ok: boolean; bodyText: string }>();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), init.timeoutMs);
+    const request = transport.request(
+      target,
+      { method: init.method, headers, signal: controller.signal },
+      (response) => {
+        const chunks: Buffer[] = [];
+        response.on('data', (chunk: Buffer) => chunks.push(chunk));
+        response.on('error', (error: Error) => {
+          clearTimeout(timer);
+          reject(error);
+        });
+        response.on('end', () => {
+          clearTimeout(timer);
+          const status = response.statusCode ?? 0;
+          resolve({
+            status,
+            ok: status >= 200 && status < 300,
+            bodyText: Buffer.concat(chunks).toString('utf8'),
+          });
+        });
+      },
+    );
+    request.on('error', (error: Error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    request.end(body);
+    return promise;
   }
 
   /** The supervisor headers (run token + verifier key). */
@@ -248,24 +286,15 @@ export class SupervisorClient {
 
   /** POST with supervisor headers; errors map to typed WitnessRequestError. */
   private async request<T>(path: string, payload: unknown, timeoutMs: number = this.timeoutMs): Promise<T> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    let response: Response;
+    let response: { status: number; ok: boolean; bodyText: string };
     try {
-      response = await fetch(`${this.url}${path}`, {
-        method: 'POST',
-        headers: this.headers(),
-        body: JSON.stringify(payload),
-        signal: controller.signal,
-      });
+      response = await this.exchange(path, { method: 'POST', timeoutMs, payload });
     } catch (error) {
-      clearTimeout(timer);
       throw new WitnessRequestError(0, `supervisor call to ${path} failed: ${(error as Error).message}`);
     }
-    clearTimeout(timer);
     let body: unknown;
     try {
-      body = await response.json();
+      body = JSON.parse(response.bodyText) as unknown;
     } catch {
       body = null;
     }
