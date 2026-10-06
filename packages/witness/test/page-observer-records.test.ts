@@ -16,15 +16,33 @@ const RUN_TOKEN = 'page-observer-records-run-token';
 const VERIFIER_KEY = 'page-observer-records-verifier-key';
 const APP_FINGERPRINT = 'orders-fixture-v1';
 const LOOPBACK = [127, 0, 0, 1].join('.');
+/** A page that exercises one GET and one POST app data call. */
+const DUAL_PAGE_HTML = `<!doctype html><html><body><main>Dual calls</main><script>
+fetch('/api/items').then((response) => response.json()).catch(() => {});
+fetch('/api/orders', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+  .then((response) => response.json())
+  .catch(() => {});
+</script></body></html>`;
+
 const app = createHttpServer((request, response) => {
   const path = new URL(request.url ?? '/', `http://${LOOPBACK}`).pathname;
+  if (path === '/api/items' || path === '/api/orders') {
+    response.writeHead(200, {
+      'content-type': 'application/json',
+      'x-gateforge-env-fingerprint': APP_FINGERPRINT,
+    });
+    response.end(JSON.stringify({ ok: true }));
+    return;
+  }
   response.writeHead(200, {
     'content-type': 'text/html',
     'x-gateforge-env-fingerprint': APP_FINGERPRINT,
   });
   response.end(path.startsWith('/broken')
     ? '<!doctype html><html><body><main>Something went wrong</main></body></html>'
-    : '<!doctype html><html><body><main>Orders are ready</main></body></html>');
+    : path.startsWith('/dual')
+      ? DUAL_PAGE_HTML
+      : '<!doctype html><html><body><main>Orders are ready</main></body></html>');
 });
 let appBaseUrl: string;
 let witness: WitnessHandle;
@@ -265,6 +283,33 @@ describe('page.observed record retention', () => {
       expect(records.map((record) => recordPayload(record)['apiRequestsSettled'])).toEqual([true, true, true, true]);
       const closed = await post('/sessions/close', { sessionId: session.sessionId, outcome: 'passed' }, true);
       expect(closed.status).toBe(200);
+    } finally {
+      await browser.close();
+    }
+  });
+
+  it('records the method of every API call the page made (GET and POST)', async () => {
+    await registerPageContext({ pages: [{ id: 'tenant.page-dual', path: '/dual' }] });
+    const session = await openSession('tests/orders-dual-methods');
+    const debuggingPort = await freePort();
+    const browser = await chromium.launch({ args: [`--remote-debugging-port=${debuggingPort}`] });
+    try {
+      expect((await registerObserver(session, debuggingPort)).status).toBe(200);
+      const page = await (await browser.newContext()).newPage();
+      await page.goto(`${appBaseUrl}/dual`);
+      await expect.poll(async () => (await getRecords()).filter((record) => record['kind'] === 'page.observed').length).toBe(2);
+      const records = (await getRecords()).filter((record) => record['kind'] === 'page.observed');
+      expect(records).toHaveLength(2);
+      for (const record of records) {
+        expect(record['testId']).toBe('tests/orders-dual-methods');
+        const apiStatuses = recordPayload(record)['apiStatuses'] as Array<Record<string, unknown>>;
+        expect(apiStatuses).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ method: 'GET', status: 200, url: expect.stringContaining('/api/items') }),
+            expect.objectContaining({ method: 'POST', status: 200, url: expect.stringContaining('/api/orders') }),
+          ]),
+        );
+      }
     } finally {
       await browser.close();
     }

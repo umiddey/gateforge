@@ -20,6 +20,7 @@ export interface ObservedPageVisit {
   exceptions: string[];
   domMarkerHit: boolean;
   apiResponses: Array<{
+    method: string;
     url: string;
     status: number;
     remoteAddress: string | null;

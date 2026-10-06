@@ -336,6 +336,7 @@ describe('page observations through a sealed test-gates run', () => {
           origin?: string;
           trust?: string;
           obligationId?: string;
+          payload?: unknown;
         }>;
         const pageRecords = records.filter((record) => record.kind === 'page.observed');
         expect(pageRecords).toHaveLength(2);
@@ -344,6 +345,12 @@ describe('page observations through a sealed test-gates run', () => {
           'page:data-ok',
           'page:loads',
         ]);
+        // Additive 0.13: every recorded API exchange carries its method.
+        const apiStatuses = pageRecords.flatMap(
+          (record) => (record.payload as { apiStatuses?: Array<Record<string, unknown>> } | undefined)?.apiStatuses ?? [],
+        );
+        expect(apiStatuses.length, JSON.stringify(pageRecords)).toBeGreaterThan(0);
+        expect(apiStatuses.every((entry) => entry['method'] === 'GET')).toBe(true);
 
         const check = await runCliProcess(repo.root, ['check', '--require-e2e', '--format', 'json'], env);
         const checked = parseReport(check.stdout, check);

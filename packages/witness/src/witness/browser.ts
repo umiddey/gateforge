@@ -165,6 +165,7 @@ export async function driveEngineVisit(
           return;
         }
         apiResponses.push({
+          method: exchange.method,
           url: headers.url,
           status: headers.status,
           remoteAddress: headers.remoteAddress,

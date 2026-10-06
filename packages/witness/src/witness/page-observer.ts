@@ -536,6 +536,7 @@ export async function observePageBrowser(options: PageObserverOptions): Promise<
           clearTimeout(timeout);
         }
         window.apiResponses.push({
+          method: response.request().method(),
           url,
           status: response.status(),
           remoteAddress,

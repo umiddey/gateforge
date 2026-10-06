@@ -118,7 +118,7 @@ export async function registerPageObserver(input: {
           navigations: visit.navigations,
           exceptions: visit.exceptions,
           domMarkerHit: visit.domMarkerHit,
-          apiStatuses: visit.apiResponses.map(({ url, status, remoteAddress, proxied }) => ({ url, status, remoteAddress, proxied })),
+          apiStatuses: visit.apiResponses.map(({ method, url, status, remoteAddress, proxied }) => ({ method, url, status, remoteAddress, proxied })),
           // One payload shared by both promise records; the sequence
           // increases on every observation of this registered session.
           apiRequestsSettled: visit.apiRequestsSettled,
@@ -297,7 +297,7 @@ export async function sweepPageVisits(input: {
       navigations: visit.navigations,
       exceptions: visit.exceptions,
       domMarkerHit: visit.domMarkerHit,
-      apiStatuses: visit.apiResponses.map(({ url, status, remoteAddress, proxied }) => ({ url, status, remoteAddress, proxied })),
+      apiStatuses: visit.apiResponses.map(({ method, url, status, remoteAddress, proxied }) => ({ method, url, status, remoteAddress, proxied })),
       // One payload reused for both contracts; the sequence increases
       // within this sweep.
       apiRequestsSettled: visit.apiRequestsSettled,

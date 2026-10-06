@@ -204,4 +204,60 @@ describe('referee page sweep', () => {
       cleanup = undefined;
     }
   });
+
+  it('swept records carry the method of every API call the page made', async () => {
+    const app = createServer((request, response) => {
+      if (request.url === '/api/items' || request.url === '/api/orders') {
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ ok: true }));
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'text/html' });
+      response.end(`<!doctype html><html><body><main>Ready</main><script>
+fetch('/api/items').then((r) => r.json()).catch(() => {});
+fetch('/api/orders', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }).then((r) => r.json()).catch(() => {});
+</script></body></html>`);
+    });
+    app.listen(0, [127, 0, 0, 1].join('.'));
+    await once(app, 'listening');
+    const address = app.address();
+    if (address === null || typeof address === 'string') throw new Error('app server did not bind');
+    const appBase = `http://${[127, 0, 0, 1].join('.')}:${String(address.port)}`;
+    const manager = new EngineBrowserManager({ launch: (options) => chromium.launch(options) });
+    cleanup = async () => { await manager.closeAll(); await new Promise<void>((resolve) => app.close(() => resolve())); };
+    const payloads: Array<{ channel?: unknown; apiStatuses?: Array<Record<string, unknown>> }> = [];
+    try {
+      const { visits } = await sweepPageVisits({
+        browser: manager,
+        sessionId: 'sweep-methods',
+        testId: 'referee',
+        appBase,
+        audience: 'tenant',
+        routes: [{ id: 'tenant.page-home', path: '/' }],
+        loginRoutes: [],
+        errorMarkers: [],
+        liveChannels: [],
+        issueRecord: (_obligationId, _testId, payload) => {
+          if (payload === null || typeof payload !== 'object') throw new Error('sweep record has no payload');
+          payloads.push(payload);
+          return String(payloads.length);
+        },
+      });
+      expect(visits[0]?.verdict.loads.satisfied).toBe(true);
+      expect(visits[0]?.verdict.dataOk.satisfied).toBe(true);
+      expect(payloads).toHaveLength(2);
+      for (const payload of payloads) {
+        expect(payload.channel).toBe('swept');
+        expect(payload.apiStatuses).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ method: 'GET', status: 200, url: expect.stringContaining('/api/items') }),
+            expect.objectContaining({ method: 'POST', status: 200, url: expect.stringContaining('/api/orders') }),
+          ]),
+        );
+      }
+    } finally {
+      await cleanup();
+      cleanup = undefined;
+    }
+  });
 });
