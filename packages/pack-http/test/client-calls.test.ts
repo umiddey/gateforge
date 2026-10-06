@@ -229,6 +229,30 @@ describe('detector integration (phase 3)', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('emits the query-stripped fact for a trailing query-suffix hole end to end', () => {
+    const dir = project({
+      'src/app.ts': [
+        `const qs = code ? \`?code=\${code}\` : '';`,
+        `apiClient.get(buildApiPath(\`/v1/buildings/\${buildingId}/meters\${qs}\`));`,
+      ].join('\n'),
+    });
+    try {
+      const outcome = createHttpDetector({ root: dir }).discover(['src'], {
+        root: dir,
+        sections: {
+          httpClients: {
+            clientSymbols: ['apiClient'],
+            urlBuilders: [{ name: 'buildApiPath', base: '/api' }],
+          },
+        },
+      });
+      expect(frontendFacts(outcome)).toEqual(['GET /api/v1/buildings/{}/meters']);
+      expect(outcome.unresolved).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('instance baseURL joining (phase 3 dogfood)', () => {
