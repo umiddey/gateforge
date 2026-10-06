@@ -35,6 +35,33 @@
   reassignment, a template or non-literal value, extra arguments, or a
   string/path script) is still reported at its own line.
 
+- **A page may keep a live connection open (`pages.liveChannels`).** A page
+  whose app holds a long poll, a WebSocket, or a server-sent-events stream
+  open forever used to burn the whole visit settle budget and refuse the
+  page with `PAGE_API_UNSETTLED`. Declaring the stream's path prefix under
+  the new controller-held `pages.liveChannels` configuration (same rule in
+  both proof channels) makes such a request a live channel: it never counts
+  as app data evidence, never holds the settle wait, and never refuses the
+  page by itself; the visit payload lists what stayed open (`liveChannels`,
+  count + paths). WebSocket upgrades on the app host and `text/event-stream`
+  responses are live channels by protocol, with no declaration needed. An
+  undeclared open request still refuses the page exactly as before.
+
+- **A rejected audience session stops that audience's page sweep.** When an
+  audience with a session lands on one of its declared login routes on the
+  first visited page (the usual rotating-refresh-token case: the suite's run
+  consumed the session the file carried), that page is graded as today and
+  every remaining page of the same audience is refused without visiting it,
+  with the new `PAGE_AUDIENCE_SESSION_INVALID` reason. The records still
+  issue, the sweep payload says each page was not visited and why, and one
+  log line asks for a session file the suite does not consume. Session-less
+  audiences are unaffected.
+
+- **The page sweep reports progress per page.** Each visited page emits one
+  line as its visit finishes — `page 3/12 tenant /orders -> proven (1234
+  ms)` — so a killed sweep keeps the lines it already earned instead of
+  staying silent for minutes. `--progress off` asks for none.
+
 ## 0.13.0
 
 - **Pages-family adoption for already-adopted repositories (0.13.0).**
