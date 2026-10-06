@@ -1092,27 +1092,41 @@ async function resolveHistoryRetention(io: Io): Promise<number | 'off' | undefin
 async function resolvePagesBlock(io: Io, selected: readonly string[], configExists: boolean): Promise<string | undefined> {
   if (!selected.includes('gateforge.pack-react-router') || configExists) return undefined;
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
-    writeLine(io.stdout, "tip: configure pages.router, pages.audiences (name|loginRoute|guard), and pages.errorMarkers in .gateforge.yml; router pages are not guessed in a non-interactive init");
+    writeLine(io.stdout, "tip: configure pages.router, pages.audiences (name|loginRoute|guard, optional explicit plane), and pages.errorMarkers in .gateforge.yml; router pages are not guessed in a non-interactive init");
     return undefined;
   }
   writeLine(io.stdout, 'Page reader: choose react-router or manual; audiences are owner declarations, never inferred.');
+  writeLine(io.stdout, 'Each audience may declare its DATA plane explicitly: plane: tenant | master | global (employee\u2192tenant, admin\u2192master, public\u2192global). A plane is the data the pages serve \u2014 it is not a user role, and an audience name is only a plane when it is exactly one of those three words.');
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   try {
     const routerAnswer = (await rl.question('pages.router [react-router/manual]: ')).trim().toLowerCase();
     if (routerAnswer !== 'react-router' && routerAnswer !== 'manual') throw new UsageError("init: pages.router must be 'react-router' or 'manual'");
-    const audienceAnswer = (await rl.question('pages.audiences (comma-separated name|loginRoute|guard:Component or name|loginRoute|path:/prefix; blank for none): ')).trim();
+    const audienceAnswer = (await rl.question('pages.audiences (comma-separated name|loginRoute|guard:Component or name|loginRoute|path:/prefix, each optionally |plane:tenant|master|global; blank for none): ')).trim();
     const audiences = audienceAnswer === '' ? [] : audienceAnswer.split(',').map((row) => {
-      const [name, loginRoute, binding] = row.trim().split('|');
+      const [name, loginRoute, binding, planeSegment] = row.trim().split('|');
       if (!name || !loginRoute || !binding) throw new UsageError('init: each page audience requires name|loginRoute|guard:Component or name|loginRoute|path:/prefix');
       const separator = binding.indexOf(':');
       const key = binding.slice(0, separator);
       const value = binding.slice(separator + 1);
       if (!value || (key !== 'guard' && key !== 'path')) throw new UsageError(`init: invalid audience binding '${binding}'`);
-      return { name, loginRoute, [key === 'guard' ? 'guard' : 'pathPrefix']: value };
+      let plane: string | undefined;
+      if (planeSegment !== undefined) {
+        if (!planeSegment.startsWith('plane:')) throw new UsageError(`init: invalid audience segment '${planeSegment}' (only an optional |plane:tenant|master|global may follow the binding)`);
+        plane = planeSegment.slice('plane:'.length);
+        if (plane !== 'tenant' && plane !== 'master' && plane !== 'global') {
+          throw new UsageError(`init: audience plane must be tenant, master, or global, got '${plane}'`);
+        }
+      }
+      return {
+        name,
+        loginRoute,
+        ...(key === 'guard' ? { guard: value } : { pathPrefix: value }),
+        ...(plane === undefined ? {} : { plane }),
+      };
     });
     const markerAnswer = (await rl.question('pages.errorMarkers (comma-separated exact error-screen text; blank for none): ')).trim();
     const markers = markerAnswer === '' ? [] : markerAnswer.split(',').map((marker) => marker.trim()).filter(Boolean);
-    const audienceRows = audiences.map((audience) => `    - name: ${JSON.stringify(audience.name)}\n      loginRoute: ${JSON.stringify(audience.loginRoute)}\n      ${'guard' in audience ? `guard: ${JSON.stringify(audience.guard)}` : `pathPrefix: ${JSON.stringify(audience.pathPrefix)}`}`);
+    const audienceRows = audiences.map((audience) => `    - name: ${JSON.stringify(audience.name)}\n      loginRoute: ${JSON.stringify(audience.loginRoute)}\n      ${'guard' in audience ? `guard: ${JSON.stringify(audience.guard)}` : `pathPrefix: ${JSON.stringify(audience.pathPrefix)}`}${'plane' in audience ? `\n      plane: ${audience.plane}` : ''}`);
     const audienceYaml = audienceRows.length === 0 ? '  audiences: []' : `  audiences:\n${audienceRows.join('\n')}`;
     return `# Page routes are read from source; audience bindings are owner assertions.\npages:\n  router: ${routerAnswer}\n${audienceYaml}\n  errorMarkers: [${markers.map((marker) => JSON.stringify(marker)).join(', ')}]\n  params: {}\n  exclude: []\n  sweep: true\n`;
   } finally {

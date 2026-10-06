@@ -48,7 +48,9 @@ commands:
                                          pre-commit hook + CI wiring)
   enforce [--ci github|gitlab] [--witnessed]  wire the blocking pre-commit + CI gate into an initialized repo (idempotent);
                                            --witnessed also writes the witnessed 'gateforge run' job template
-  adopt                                   adopt enforcement: seed the baseline from current debt (the one bulk-add) + wire the gate
+  adopt [--family pages [--confirm]]      adopt enforcement: seed the baseline from current debt (the one bulk-add) + wire the gate;
+                                          --family pages previews the pages-family migration of an ALREADY-adopted repo,
+                                          --confirm records it (one atomic receipt write)
   discover [--json]                      run detectors and dump the resource graph
   classify [--json] [--write-snapshot P] inspect effective classifications + typed blocks
   classify plane <src> <plane> --reason T [--confirm]
@@ -88,7 +90,8 @@ commands:
                                          trusted binary/policy ownership, snapshot mode, standard/managed boundary
   enforcement pin --pin-file PATH [--confirm]  write the STAGED revision's approved policy digest into an env file
                                          OUTSIDE the repo (mode 0600); preview by default (NOT --env-file: node owns it)
-  baseline update <fp...>                shrink the baseline to a strict subset (invariant 4)
+  baseline update <fp...>                shrink the baseline to a strict subset (invariant 4);
+                                         [--classification-blocked <id>]... / [--family-pages <fp>]... shrink the receipt's adopted layers
   baseline diff <before> <after>         compare adopted obligations by ID without printing fingerprints
   waive <resourceId:contract>            write an expiring, owner-approved waiver for one obligation
         --owner N --approver N           (GF-15: all fields mandatory; justification URL required;

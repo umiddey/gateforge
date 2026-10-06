@@ -752,6 +752,7 @@ export const GateforgeConfigSchema = z
         audiences: z.array(z.object({
           name: z.string().min(1),
           loginRoute: z.string().startsWith('/'),
+          plane: z.enum(['tenant', 'master', 'global']).optional(),
           guard: z.string().min(1).optional(),
           pathPrefix: z.string().startsWith('/').optional(),
           session: z.string().min(1).optional(),

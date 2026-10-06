@@ -10,13 +10,15 @@
  * schema-violating record throws — the gate must never guess whether an
  * unreadable adoption record does or does not sanction the baseline.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { compareStrings } from '../graph/util.js';
 import { GateforgeBaselineError } from './index.js';
 import {
+  AdoptionFamilySchema,
   AdoptionRecordSchema,
   ClassificationBlockedIdsSchema,
+  type AdoptionFamily,
   type AdoptionRecord,
 } from '../schemas/adoption.js';
 
@@ -62,18 +64,42 @@ export function loadAdoptionRecord(path: string): AdoptionRecord | null {
  * needed. Serialized sorted 2-space JSON with a trailing newline
  * (reviewable in diffs, like the baseline document).
  *
+ * The receipt is the ONE sanction record a repository cannot regenerate,
+ * so the write is validated BEFORE any filesystem mutation and then
+ * ATOMIC: the serialized bytes go to a same-directory temporary file and
+ * `rename` over the destination. A crash or a failed write can never
+ * leave the receipt truncated or half-written — the previous receipt
+ * stays intact and in force, and the temporary file is removed on any
+ * failure (cleanup errors never mask the write error).
+ *
  * Args:
  *   path: destination file path.
- *   record: the validated adoption record.
+ *   record: the adoption record to persist.
  *
  * Throws:
- *   GateforgeBaselineError: when the file cannot be written.
+ *   GateforgeBaselineError: when the record fails validation or the file
+ *   cannot be written (the previous receipt, if any, is untouched).
  */
 export function writeAdoptionRecord(path: string, record: AdoptionRecord): void {
+  let serialized: string;
+  try {
+    serialized = `${JSON.stringify(AdoptionRecordSchema.parse(record), null, 2)}\n`;
+  } catch (error) {
+    throw new GateforgeBaselineError(
+      `adoption record '${path}' failed validation before write: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  const temporary = `${path}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`;
   try {
     mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, `${JSON.stringify(record, null, 2)}\n`, 'utf8');
+    writeFileSync(temporary, serialized, 'utf8');
+    renameSync(temporary, path);
   } catch (error) {
+    try {
+      rmSync(temporary, { force: true });
+    } catch {
+      // A failed cleanup must never mask the write failure itself.
+    }
     throw new GateforgeBaselineError(
       `adoption record '${path}' could not be written: ${error instanceof Error ? error.message : String(error)}`,
     );
@@ -175,5 +201,132 @@ export function shrinkClassificationBlocked(
     validated.length > 0
       ? { ...current, classificationBlocked: validated }
       : { ...current, classificationBlocked: [] };
+  return AdoptionRecordSchema.parse(next);
+}
+
+/**
+ * Builds one family's permanent marker (0.13): the named, dated,
+ * commit-referenced slice a post-adoption migration records in the
+ * EXISTING receipt. `fingerprintsById` must already contain EVERY
+ * initial family obligation id — proven obligations included — keyed by
+ * obligation id with its pin-#2 fingerprint; `forgiven` names the
+ * sanctioned subset (only what was missing/unproven). Input order is
+ * irrelevant: the marker is normalized to sorted keys and a sorted,
+ * duplicate-free `forgiven` list, so the receipt bytes are deterministic
+ * (and with them the trusted-policy digest that binds the marker).
+ *
+ * Args:
+ *   input.adoptedAt: the family adoption instant (run's injected clock).
+ *   input.gitSha: HEAD sha of the adopting commit, or null outside git.
+ *   input.fingerprintsById: every initial family obligation id → fingerprint.
+ *   input.forgiven: the sanctioned (missing/unproven) subset to forgive.
+ *
+ * Returns:
+ *   AdoptionFamily: the validated marker for the receipt's `families` map.
+ *
+ * Throws:
+ *   GateforgeBaselineError: when a forgiven fingerprint is not one of the
+ *   recorded ones, a fingerprint is malformed, or an id is empty (fail
+ *   closed — a marker that forgives beyond its own record is never built).
+ */
+export function adoptFamily(input: {
+  adoptedAt: string;
+  gitSha: string | null;
+  fingerprintsById: Record<string, string>;
+  forgiven: readonly string[];
+}): AdoptionFamily {
+  const seen: Record<string, true> = {};
+  const unique: string[] = [];
+  for (const fingerprint of input.forgiven) {
+    if (fingerprint in seen) continue;
+    seen[fingerprint] = true;
+    unique.push(fingerprint);
+  }
+  unique.sort(compareStrings);
+  const recorded: Record<string, string> = {};
+  for (const id of Object.keys(input.fingerprintsById).sort(compareStrings)) {
+    recorded[id] = input.fingerprintsById[id]!;
+  }
+  const candidate = {
+    schemaVersion: 1 as const,
+    adoptedAt: input.adoptedAt,
+    gitSha: input.gitSha,
+    fingerprintsById: recorded,
+    forgiven: unique,
+  };
+  const result = AdoptionFamilySchema.safeParse(candidate);
+  if (!result.success) {
+    const issues = result.error.issues
+      .map((issue) => `${issue.path.join('.') || '<family>'}: ${issue.message}`)
+      .join('; ');
+    throw new GateforgeBaselineError(`adoption family marker failed validation: ${issues}`);
+  }
+  return result.data;
+}
+
+/**
+ * A family's ONLY mutation after adoption (the shrink path, mirroring
+ * `updateBaseline`'s GF-07/08 semantics and the classification set's):
+ * replaces the named family's `forgiven` list with the given
+ * fingerprints, which must be a STRICT SUBSET of the current ones —
+ * every fingerprint kept must exist today AND at least one must be
+ * removed. The marker itself is retained untouched (adoptedAt, gitSha,
+ * every recorded fingerprint), so a repeat migration can never re-arm
+ * and a resolved debt can never re-enter: the sanctioned set can only
+ * shrink.
+ *
+ * Args:
+ *   current: the adopted record on disk.
+ *   name: the family to shrink (only `pages` exists today).
+ *   fingerprints: the fingerprints to KEEP (duplicates are an error, as
+ *     in `updateBaseline`; an empty list keeps none).
+ *
+ * Returns:
+ *   AdoptionRecord: the next record — identical to `current` except for
+ *   the named family's shrunk `forgiven` list.
+ *
+ * Throws:
+ *   GateforgeBaselineError: when the record carries no such family
+ *   marker, on duplicate input, on schema-invalid fingerprints, or on a
+ *   non-strict-subset update (naming the unknown or added fingerprints).
+ */
+export function shrinkFamilyForgiven(
+  current: AdoptionRecord,
+  name: string,
+  fingerprints: readonly string[],
+): AdoptionRecord {
+  const family = current.families?.[name];
+  if (family === undefined) {
+    throw new GateforgeBaselineError(
+      `family shrink rejected: the adoption record carries no '${name}' family marker ` +
+        '(the family is adopted exactly once, by `gateforge adopt --family <name> --confirm`) — ' +
+        'there is nothing to shrink',
+    );
+  }
+  const seen: Record<string, true> = {};
+  const unique: string[] = [];
+  for (const fingerprint of fingerprints) {
+    if (fingerprint in seen) continue;
+    seen[fingerprint] = true;
+    unique.push(fingerprint);
+  }
+  if (unique.length !== fingerprints.length) {
+    throw new GateforgeBaselineError(`family '${name}' shrink input contains duplicate fingerprints`);
+  }
+  const known: Record<string, true> = {};
+  for (const fingerprint of family.forgiven) known[fingerprint] = true;
+  const unknown = unique.filter((fingerprint) => !(fingerprint in known));
+  if (unique.length >= family.forgiven.length || unknown.length > 0) {
+    throw new GateforgeBaselineError(
+      `family '${name}' shrink rejected: not a strict subset of the forgiven set ` +
+        '(the family set is shrink-only) — unknown or added fingerprint(s): ' +
+        `${(unknown.length > 0 ? unknown : unique).join(', ') || '<none>'}`,
+    );
+  }
+  const families: Record<string, AdoptionFamily> = {};
+  for (const key of Object.keys(current.families ?? {}).sort(compareStrings)) {
+    families[key] = key === name ? { ...family, forgiven: unique.sort(compareStrings) } : current.families![key]!;
+  }
+  const next: AdoptionRecord = { ...current, families };
   return AdoptionRecordSchema.parse(next);
 }

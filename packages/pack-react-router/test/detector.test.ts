@@ -31,4 +31,40 @@ describe('React Router reader', () => {
   expect(manual.resources).toHaveLength(1);
   expect(manual.resources[0]?.attributes).toMatchObject({ path: '/customers', audience: 'tenant', params: [] });
  });
+ it('preserves page identity when route source locations change, but not when the route changes', () => {
+  const source = `<Route path="/orders" element={<TenantGuard><Orders /></TenantGuard>} />`;
+  const root = fixture(source);
+  const detector = createPageDetector({ root });
+  const context = { sections: { pages: { audiences: [{ name: 'tenant', guard: 'TenantGuard' }] } } };
+  const before = detector.discover(['src'], context).resources[0]!;
+  writeFileSync(join(root, 'src/routes.tsx'), `\n\n${source}`);
+  const after = detector.discover(['src'], context).resources[0]!;
+  expect(after.id).toBe(before.id);
+  expect(after.location.line).toBe(3);
+  writeFileSync(join(root, 'src/routes.tsx'), source.replace('/orders', '/customers'));
+  expect(detector.discover(['src'], context).resources[0]!.id).not.toBe(before.id);
+  mkdirSync(join(root, '.gateforge'));
+  writeFileSync(join(root, '.gateforge/pages.yml'), `pages:\n  - path: /orders\n    audience: tenant\n    source: src/routes.tsx:3\n`);
+  const manual = detector.discover(['src'], { sections: { pages: { router: 'manual' } } }).resources[0]!;
+  expect(manual.id).toBe(before.id);
+  writeFileSync(join(root, '.gateforge/pages.yml'), `pages:\n  - path: /orders\n    audience: master\n    source: src/routes.tsx:3\n`);
+  expect(detector.discover(['src'], { sections: { pages: { router: 'manual' } } }).resources[0]!.id).not.toBe(before.id);
+ });
+ it('keeps login audiences distinct while resolving their explicitly declared data planes', () => {
+  const root = fixture(`<><Route path="/orders" element={<TenantGuard />} /><Route path="/employee/orders" element={<EmployeeGuard />} /><Route path="/admin/orders" element={<AdminGuard />} /><Route path="/login" element={<Login />} /></>`);
+  const audiences = [
+   { name: 'tenant', guard: 'TenantGuard', plane: 'tenant' },
+   { name: 'employee', guard: 'EmployeeGuard', plane: 'tenant' },
+   { name: 'admin', guard: 'AdminGuard', plane: 'master' },
+   { name: 'public', pathPrefix: '/login', plane: 'global' },
+  ];
+  const result = createPageDetector({ root }).discover(['src'], { sections: { pages: { audiences } } });
+  expect(result.resources.map(resource => [resource.attributes.audience, resource.attributes.plane])).toEqual([
+   ['tenant', 'tenant'], ['employee', 'tenant'], ['admin', 'master'], ['public', 'global'],
+  ]);
+  mkdirSync(join(root, '.gateforge'));
+  writeFileSync(join(root, '.gateforge/pages.yml'), `pages:\n  - path: /employee/orders\n    audience: employee\n    source: src/routes.tsx:1\n`);
+  const manual = createPageDetector({ root }).discover(['src'], { sections: { pages: { router: 'manual', audiences } } });
+  expect(manual.resources[0]?.attributes).toMatchObject({ audience: 'employee', plane: 'tenant' });
+ });
 });

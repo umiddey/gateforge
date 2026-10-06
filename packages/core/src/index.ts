@@ -1290,13 +1290,21 @@ export { GateforgeBaselineError } from './baselines/index.js';
 export { adoptBaseline } from './baselines/index.js';
 
 /** The adoption record (phase 8 C): the loud, one-time bulk-add receipt. */
-export { AdoptionRecordSchema, ClassificationBlockedIdsSchema } from './schemas/adoption.js';
+export { AdoptionRecordSchema, AdoptionFamilySchema, ClassificationBlockedIdsSchema } from './schemas/adoption.js';
 /** Inferred adoption-record type. */
-export type { AdoptionRecord } from './schemas/adoption.js';
+export type { AdoptionRecord, AdoptionFamily } from './schemas/adoption.js';
 /** Loads `.gateforge/baselines/adoption.json` (null = pre-adoption). */
 export { loadAdoptionRecord, ADOPTION_RECORD_FILENAME } from './baselines/adoption.js';
 /** Writes the adoption record, creating parent directories as needed. */
 export { writeAdoptionRecord } from './baselines/adoption.js';
+/**
+ * Adopted families (0.13): `adoptFamily` builds one family's permanent
+ * marker for the receipt's `families` map (the sanctioned slice a
+ * post-adoption migration records); `shrinkFamilyForgiven` is the
+ * family's ONLY post-adoption mutation — the strict-subset shrink that
+ * retains the marker.
+ */
+export { adoptFamily, shrinkFamilyForgiven } from './baselines/adoption.js';
 /**
  * The classification layer of the adoption (two-layer adoption):
  * `adoptClassificationBlocked` normalizes the captured ids for the

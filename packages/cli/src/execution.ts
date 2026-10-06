@@ -54,6 +54,7 @@ import {
   type TracedTestInput,
 } from '@gate-forge/core';
 import { QUARANTINE_DIR } from '@gate-forge/core';
+import { ADOPTION_RECORD_FILENAME } from '@gate-forge/core';
 import { obligationFingerprint } from './evaluate.js';
 import { TEST_MAP_RELATIVE } from './mapping.js';
 import { sourcesByResourceId } from './pipeline.js';
@@ -132,11 +133,12 @@ export function trustedPolicyDigestEntries(
     /**
      * Repo-relative files that exist on disk and must belong to the
      * approved revision: the pack configs (a candidate that narrows
-     * `clientScanRoots` deletes obligations) and the generated gate
-     * wiring under `.gateforge/hooks/` + `.gateforge/ci/`. A file that
-     * does not exist is NOT listed and contributes NO entry and NO
-     * absence marker, so a repository with neither keeps a
-     * byte-identical digest.
+     * `clientScanRoots` deletes obligations), the generated gate wiring
+     * under `.gateforge/hooks/` + `.gateforge/ci/`, and the adoption
+     * receipt (a candidate that edits its own adopted-family forgiveness
+     * cannot approve the edit). A file that does not exist is NOT listed
+     * and contributes NO entry and NO absence marker, so a repository
+     * with neither keeps a byte-identical digest.
      */
     pinnedFiles?: readonly string[];
   },
@@ -326,6 +328,22 @@ export function trustedPolicyDigestEntriesForConfig(
   // were pinned. Since 0.11.0 the pack answers need no entry of their own:
   // they live in documents already pinned above.
   const pinnedFiles = generatedWiringFiles(cwd);
+  // The adoption receipt is security-sensitive policy (0.13): it carries
+  // the adopted family markers and each family's sanctioned `forgiven`
+  // fingerprints, which the evaluator forgives from the receipt alone —
+  // a candidate that edits its own forgiveness must not be able to
+  // approve the edit. PRESENT-ONLY (no absence marker), exactly like the
+  // generated wiring: a pre-adoption repository keeps a byte-identical
+  // digest, and the receipt enters the digest the moment `gateforge
+  // adopt` (or a family migration) writes it.
+  const baselinesDir = config.baselines.split('/').slice(0, -1).join('/');
+  const adoptionRecordPath =
+    baselinesDir === ''
+      ? ADOPTION_RECORD_FILENAME
+      : `${baselinesDir}/${ADOPTION_RECORD_FILENAME}`;
+  if (existsSync(join(cwd, ...adoptionRecordPath.split('/')))) {
+    pinnedFiles.push(adoptionRecordPath);
+  }
   return trustedPolicyDigestEntries(cwd, {
     config: '.gateforge.yml',
     policies: config.policies,

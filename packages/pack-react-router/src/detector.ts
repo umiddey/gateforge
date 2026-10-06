@@ -37,16 +37,17 @@ export function createPageDetector(options: { root?: string } = {}): PageDetecto
   const resources: PageResource[] = [], unresolved: PageDetector['discover'] extends (...args: never[]) => infer R ? R extends { unresolved: infer U } ? U : never : never = [];
   const findings: Array<{code:string;detail:string;locations:Array<{file:string;line:number;col:number}>}> = [];
   const scannedPaths: string[] = [];
-  const pageConfig = context?.sections?.pages as { router?: string; exclude?: string[]; audiences?: Array<{ name: string; guard?: string; pathPrefix?: string }> } | undefined;
+  const pageConfig = context?.sections?.pages as { router?: string; exclude?: string[]; audiences?: Array<{ name: string; guard?: string; pathPrefix?: string; plane?: 'tenant' | 'master' | 'global' }> } | undefined;
   const audiences = pageConfig?.audiences ?? [];
   const add = (path: string, file: string, line: number, guard: string | undefined, redirect: boolean, catchall: boolean): void => {
    if (catchall || redirect || pageConfig?.exclude?.includes(path)) return;
-   const audience = audiences.find(a => (a.guard && a.guard === guard) || (a.pathPrefix && (path === a.pathPrefix || path.startsWith(`${a.pathPrefix.replace(/\/$/, '')}/`))))?.name ?? 'unknown';
+   const audienceConfig = audiences.find(a => (a.guard && a.guard === guard) || (a.pathPrefix && (path === a.pathPrefix || path.startsWith(`${a.pathPrefix.replace(/\/$/, '')}/`))));
+   const audience = audienceConfig?.name ?? 'unknown';
    const slug = path.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'index';
-   const hash = createHash('sha256').update(`${file}:${line}:${path}`).digest('hex').slice(0, 8);
+   const hash = createHash('sha256').update(`${audience}:${path}`).digest('hex').slice(0, 8);
    const location = { file, line, col: 0 };
    const resourceName = `page-${slug}-${hash}`;
-   const plane = ['tenant', 'master', 'global'].includes(audience) ? audience as 'tenant' | 'master' | 'global' : undefined;
+   const plane = audienceConfig?.plane ?? (['tenant', 'master', 'global'].includes(audience) ? audience as 'tenant' | 'master' | 'global' : undefined);
    const attributes = { path, params: params(path), audience, source: `${file}:${line}`, resourceName, ...(plane === undefined ? {} : { plane }) };
    resources.push({ schemaVersion: 1, id: `${audience}.${resourceName}`, kind: 'ui.page', source: file, location, detectorVersion: '0.13.0', attributes });
   };
@@ -67,9 +68,9 @@ export function createPageDetector(options: { root?: string } = {}): PageDetecto
       if (sourceFile.startsWith('/') || sourceFile.split('/').includes('..') || !Number.isInteger(sourceLine) || sourceLine < 1) throw new Error(`invalid source location '${page.source}'`);
       if (pageConfig.exclude?.includes(page.path)) continue;
       const slug = page.path.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'index';
-      const hash = createHash('sha256').update(`${sourceFile}:${sourceLine}:${page.path}`).digest('hex').slice(0, 8);
+      const hash = createHash('sha256').update(`${page.audience}:${page.path}`).digest('hex').slice(0, 8);
       const resourceName = `page-${slug}-${hash}`;
-      const plane = ['tenant', 'master', 'global'].includes(page.audience) ? page.audience as 'tenant' | 'master' | 'global' : undefined;
+      const plane = audiences.find(a => a.name === page.audience)?.plane ?? (['tenant', 'master', 'global'].includes(page.audience) ? page.audience as 'tenant' | 'master' | 'global' : undefined);
       const attributes = { path: page.path, params: params(page.path), audience: page.audience, source: page.source, resourceName, ...(plane === undefined ? {} : { plane }) };
       resources.push({ schemaVersion: 1, id: `${page.audience}.${resourceName}`, kind: 'ui.page', source: sourceFile, location: { file: sourceFile, line: sourceLine, col: 0 }, detectorVersion: '0.13.0', attributes });
      }

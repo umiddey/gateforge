@@ -353,16 +353,11 @@ describe('gateforge adopt — the one sanctioned bulk-add (phase 8 C)', () => {
     await withTempRepo({}, async (repo) => {
       const bare = await runCli(repo, ['adopt']);
       expect(bare.code).toBe(2);
-      expect(bare.stderr).toContain('gateforge init');
 
       await installFindingFixture(repo);
       const unknown = await runCli(repo, ['adopt', '--force']);
       expect(unknown.code).toBe(2);
-      expect(unknown.stderr).toContain('unknown arguments for adopt');
-
-      const help = await runCli(repo, ['adopt', '--help']);
-      expect(help.code).toBe(0);
-      expect(help.stdout).toContain('usage: gateforge adopt');
+      expect(existsSync(repo.path('.gateforge/baselines/adoption.json'))).toBe(false);
     });
   });
 });

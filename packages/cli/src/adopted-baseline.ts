@@ -53,7 +53,19 @@ export function resolveAdoptedBaseline(
   const baselinePath = resolveRepoPath(cwd, baselinesPath);
   const adoption = loadAdoptionRecord(join(dirname(baselinePath), ADOPTION_RECORD_FILENAME));
   if (adoption === null) return null;
+  // Adopted families (0.13 pages rollout): a family's `forgiven`
+  // fingerprints are sanctioned by the RECEIPT alone — the migration that
+  // records them never touches the baseline document — so they fold into
+  // the forgiveness set HERE, gated on the same receipt whose existence
+  // sanctions the document. The fold cannot widen anything: `forgiven` is
+  // the shrink-only subset recorded at family adoption, every entry was a
+  // then-current page fingerprint, and the marker is permanent (a repeat
+  // migration adds nothing). A receipt without the family field predates
+  // families and forgives nothing family-shaped (fail closed).
   const fingerprints = new Set(loadBaseline(baselinePath).fingerprints);
+  for (const family of Object.values(adoption.families ?? {})) {
+    for (const fingerprint of family.forgiven) fingerprints.add(fingerprint);
+  }
   const obligationFingerprintsById =
     adoption.obligationFingerprintsById === undefined
       ? undefined

@@ -6,7 +6,7 @@
  * blocking-entry fingerprint (baseline identity for non-obligation red)
  * and the adoption-record persistence (loud receipt, fail-closed load).
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -15,15 +15,18 @@ import {
   GateforgeBaselineError,
   adoptBaseline,
   adoptClassificationBlocked,
+  adoptFamily,
   blockingEntryFingerprint,
   canUpdate,
   loadAdoptionRecord,
   loadBaseline,
   sha256Canonical,
   shrinkClassificationBlocked,
+  shrinkFamilyForgiven,
   updateBaseline,
   writeAdoptionRecord,
   writeBaseline,
+  type AdoptionFamily,
   type AdoptionRecord,
   type Baseline,
   type BlockingEntry,
@@ -279,5 +282,204 @@ describe('shrinkClassificationBlocked — the classification set is shrink-only'
     expect(() => shrinkClassificationBlocked({ ...adopted, classificationBlocked: undefined }, ['raw.a'])).toThrow(
       GateforgeBaselineError,
     );
+  });
+});
+
+/** A validated pre-family receipt the family tests revise. */
+const RECEIPT: AdoptionRecord = AdoptionRecordSchema.parse({
+  schemaVersion: 1,
+  adoptedAt: '2026-09-11T00:00:00.000Z',
+  gitSha: null,
+  adopted: 12,
+  proven: 3,
+});
+
+describe('writeAdoptionRecord — the atomic receipt write', () => {
+  it('an invalid record is refused BEFORE the filesystem is touched (old receipt intact, no temp left)', () => {
+    const dir = tempDir();
+    const path = join(dir, 'adoption.json');
+    writeAdoptionRecord(path, RECEIPT);
+    const before = readFileSync(path, 'utf8');
+    expect(() =>
+      writeAdoptionRecord(path, { ...RECEIPT, adoptedAt: 'not-an-instant' } as AdoptionRecord),
+    ).toThrow(GateforgeBaselineError);
+    expect(readFileSync(path, 'utf8')).toBe(before);
+    expect(readdirSync(dir).filter((name) => name.startsWith('adoption.json.tmp-'))).toEqual([]);
+  });
+
+  it('a valid rewrite replaces the receipt in place (round-trip)', () => {
+    const dir = tempDir();
+    const path = join(dir, 'adoption.json');
+    writeAdoptionRecord(path, RECEIPT);
+    const next = AdoptionRecordSchema.parse({ ...RECEIPT, adopted: 13 });
+    writeAdoptionRecord(path, next);
+    expect(loadAdoptionRecord(path)).toEqual(next);
+    expect(readdirSync(dir).filter((name) => name.startsWith('adoption.json.tmp-'))).toEqual([]);
+  });
+});
+
+describe('adoptFamily — the permanent family marker (0.13)', () => {
+  const recorded = { 'a.page-1:page:loads': fp('page-1-loads'), 'a.page-1:page:data-ok': fp('page-1-data') };
+
+  it('builds a sorted, validated marker (input order irrelevant)', () => {
+    const family = adoptFamily({
+      adoptedAt: '2026-09-11T00:00:00.000Z',
+      gitSha: null,
+      fingerprintsById: { 'a.page-1:page:data-ok': fp('page-1-data'), 'a.page-1:page:loads': fp('page-1-loads') },
+      forgiven: [fp('page-1-data')],
+    });
+    expect(family).toEqual({
+      schemaVersion: 1,
+      adoptedAt: '2026-09-11T00:00:00.000Z',
+      gitSha: null,
+      fingerprintsById: recorded,
+      forgiven: [fp('page-1-data')],
+    });
+    expect(Object.keys(family.fingerprintsById)).toEqual([
+      'a.page-1:page:data-ok',
+      'a.page-1:page:loads',
+    ]); // sorted keys, deterministic bytes
+  });
+
+  it('collapses duplicate forgiven fingerprints and sorts them', () => {
+    const family = adoptFamily({
+      adoptedAt: '2026-09-11T00:00:00.000Z',
+      gitSha: null,
+      fingerprintsById: recorded,
+      forgiven: [fp('page-1-loads'), fp('page-1-data'), fp('page-1-loads')],
+    });
+    expect(family.forgiven).toEqual([fp('page-1-data'), fp('page-1-loads')].sort());
+  });
+
+  it('accepts an empty family (zero pages) and an empty forgiven set', () => {
+    const family = adoptFamily({
+      adoptedAt: '2026-09-11T00:00:00.000Z',
+      gitSha: null,
+      fingerprintsById: {},
+      forgiven: [],
+    });
+    expect(family.fingerprintsById).toEqual({});
+    expect(family.forgiven).toEqual([]);
+  });
+
+  it('rejects a forgiven fingerprint that is not one of the recorded ones', () => {
+    expect(() =>
+      adoptFamily({
+        adoptedAt: '2026-09-11T00:00:00.000Z',
+        gitSha: null,
+        fingerprintsById: recorded,
+        forgiven: [fp('never-recorded')],
+      }),
+    ).toThrow(GateforgeBaselineError);
+  });
+
+  it('round-trips inside a receipt through the writer and loader', () => {
+    const dir = tempDir();
+    const path = join(dir, 'adoption.json');
+    const family = adoptFamily({
+      adoptedAt: '2026-09-11T00:00:00.000Z',
+      gitSha: null,
+      fingerprintsById: recorded,
+      forgiven: [fp('page-1-data')],
+    });
+    writeAdoptionRecord(path, { ...RECEIPT, families: { pages: family } });
+    expect(loadAdoptionRecord(path)?.families?.pages).toEqual(family);
+  });
+
+  it('a receipt WITHOUT families loads unchanged (backward compatible)', () => {
+    const dir = tempDir();
+    const path = join(dir, 'adoption.json');
+    writeAdoptionRecord(path, RECEIPT);
+    expect(loadAdoptionRecord(path)).toEqual(RECEIPT);
+    expect(loadAdoptionRecord(path)?.families).toBeUndefined();
+  });
+
+  it('rejects unsorted fingerprintsById keys and a malformed fingerprint (fail closed on shape)', () => {
+    const dir = tempDir();
+    const bad = (document: unknown): string => {
+      const path = join(dir, `${Math.random().toString(36).slice(2)}.json`);
+      writeFileSync(path, JSON.stringify(document), 'utf8');
+      return path;
+    };
+    expect(() =>
+      loadAdoptionRecord(
+        bad({
+          ...RECEIPT,
+          families: {
+            pages: {
+              schemaVersion: 1,
+              adoptedAt: '2026-09-11T00:00:00.000Z',
+              gitSha: null,
+              fingerprintsById: { 'b:x': fp('x'), 'a:y': fp('y') },
+              forgiven: [],
+            },
+          },
+        }),
+      ),
+    ).toThrow(GateforgeBaselineError);
+    expect(() =>
+      loadAdoptionRecord(
+        bad({
+          ...RECEIPT,
+          families: {
+            pages: {
+              schemaVersion: 1,
+              adoptedAt: '2026-09-11T00:00:00.000Z',
+              gitSha: null,
+              fingerprintsById: { 'a:x': 'nothex' },
+              forgiven: [],
+            },
+          },
+        }),
+      ),
+    ).toThrow(GateforgeBaselineError);
+  });
+});
+
+describe('shrinkFamilyForgiven — the family set is shrink-only, the marker retained', () => {
+  const family = (): AdoptionFamily =>
+    adoptFamily({
+      adoptedAt: '2026-09-11T00:00:00.000Z',
+      gitSha: null,
+      fingerprintsById: {
+        'a.page-1:page:data-ok': fp('page-1-data'),
+        'a.page-1:page:loads': fp('page-1-loads'),
+      },
+      forgiven: [fp('page-1-data'), fp('page-1-loads')],
+    });
+  const adoptedRecord = (): AdoptionRecord => ({ ...RECEIPT, families: { pages: family() } });
+
+  it('GF-08 mirrored: shrinking to a strict subset passes and stays sorted', () => {
+    const next = shrinkFamilyForgiven(adoptedRecord(), 'pages', [fp('page-1-loads')]);
+    expect(next.families?.pages?.forgiven).toEqual([fp('page-1-loads')]);
+  });
+
+  it('shrinking to empty keeps the marker (adoptedAt, gitSha, recorded ids)', () => {
+    const next = shrinkFamilyForgiven(adoptedRecord(), 'pages', []);
+    expect(next.families?.pages?.forgiven).toEqual([]);
+    expect(next.families?.pages?.adoptedAt).toBe('2026-09-11T00:00:00.000Z');
+    expect(Object.keys(next.families?.pages?.fingerprintsById ?? {}).length).toBe(2);
+  });
+
+  it('GF-07 mirrored: re-listing the full set (no removal) is rejected', () => {
+    expect(() => shrinkFamilyForgiven(adoptedRecord(), 'pages', [fp('page-1-data'), fp('page-1-loads')])).toThrow(
+      GateforgeBaselineError,
+    );
+  });
+
+  it('a fingerprint the family never forgave is rejected (laundering fails closed)', () => {
+    expect(() => shrinkFamilyForgiven(adoptedRecord(), 'pages', [fp('unknown')])).toThrow(
+      GateforgeBaselineError,
+    );
+  });
+
+  it('rejects duplicate input fingerprints', () => {
+    expect(() => shrinkFamilyForgiven(adoptedRecord(), 'pages', [fp('page-1-loads'), fp('page-1-loads')])).toThrow(
+      GateforgeBaselineError,
+    );
+  });
+
+  it('a receipt WITHOUT the family marker has nothing to shrink', () => {
+    expect(() => shrinkFamilyForgiven(RECEIPT, 'pages', [])).toThrow(GateforgeBaselineError);
   });
 });

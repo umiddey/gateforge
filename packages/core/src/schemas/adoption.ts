@@ -29,6 +29,89 @@ import { SchemaVersionField } from './common.js';
  */
 export const ClassificationBlockedIdsSchema = z.array(z.string().min(1));
 
+/** One 64-char lowercase sha256 fingerprint (pin #2 obligation identity). */
+const FamilyFingerprintSchema = z.string().regex(/^[0-9a-f]{64}$/);
+
+/**
+ * One adopted family's permanent marker (0.13 pages rollout). A family
+ * is a NAMED, dated, commit-referenced adoption SLICE inside the same
+ * receipt: a post-adoption migration (`gateforge adopt --family pages`)
+ * must never reopen the one bulk-add, so its sanction is a strictly
+ * family-scoped receipt field instead of a second receipt file or a
+ * baseline-document edit. The field is OPTIONAL for backward
+ * compatibility exactly like `classificationBlocked`: a receipt without
+ * it predates families and is simply not adopted for any of them (fail
+ * closed — nothing family-shaped is forgiven without the recorded set).
+ *
+ * Shape: `fingerprintsById` records EVERY initial family obligation id
+ * with its pin-#2 fingerprint at adoption time — proven obligations
+ * included, so the marker explains the family's full starting point and
+ * a later break of a never-forgiven page still grades against a
+ * fingerprint the receipt can name. `forgiven` is the sanctioned subset
+ * (what was actually missing/unproven and NOT already carried by the
+ * baseline document — the plain initial adopt records the family with an
+ * EMPTY `forgiven`, because its page debt rides the baseline bulk-add
+ * under the ordinary shrink contract) — the ONLY part the evaluator
+ * forgives, and the ONLY part `baseline update --family-pages`
+ * may shrink. Both are sorted/duplicate-free; every forgiven fingerprint
+ * must be one of the recorded ones. The marker itself (dates, ids,
+ * recorded fingerprints) is permanent: shrinking rewrites `forgiven`
+ * only, so a repeat migration can never re-arm, and a resolved debt can
+ * never re-enter.
+ */
+export const AdoptionFamilySchema = z
+  .object({
+    /** Family marker shape version, independent of the receipt's. */
+    schemaVersion: z.literal(1),
+    /** Family adoption instant, ISO-8601, from the run's injected clock. */
+    adoptedAt: z.iso.datetime(),
+    /** HEAD sha of the adopting commit, or null outside a git repo. */
+    gitSha: z
+      .string()
+      .regex(/^[0-9a-f]{40}$/, 'gitSha must be a 40-char lowercase sha1 hex')
+      .nullable(),
+    /** EVERY initial family obligation id → its pin-#2 fingerprint (proven included). */
+    fingerprintsById: z.record(z.string().min(1), FamilyFingerprintSchema),
+    /** The sanctioned subset actually forgiven — sorted, unique, recorded. */
+    forgiven: z.array(FamilyFingerprintSchema),
+  })
+  .strict()
+  .superRefine((family, ctx) => {
+    const ids = Object.keys(family.fingerprintsById);
+    for (let index = 1; index < ids.length; index += 1) {
+      if (!(ids[index - 1]! < ids[index]!)) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['fingerprintsById'],
+          message:
+            'fingerprintsById keys must be sorted; expected \'' + ids[index] +
+            '\' after \'' + ids[index - 1] + '\'',
+        });
+        break;
+      }
+    }
+    const recorded = new Set(Object.values(family.fingerprintsById));
+    for (let index = 0; index < family.forgiven.length; index += 1) {
+      const fingerprint = family.forgiven[index]!;
+      if (index > 0 && fingerprint === family.forgiven[index - 1]) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['forgiven', index],
+          message: `duplicate forgiven fingerprint '${fingerprint}'`,
+        });
+        break;
+      }
+      if (!recorded.has(fingerprint)) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['forgiven', index],
+          message: `forgiven fingerprint '${fingerprint}' is not one of the recorded family fingerprints`,
+        });
+        break;
+      }
+    }
+  });
+
 /** The adoption record: who forgave how much, when, on what commit. */
 export const AdoptionRecordSchema = z
   .object({
@@ -63,9 +146,32 @@ export const AdoptionRecordSchema = z
       .optional(),
     /** Source files for indexed obligations, used only to explain baseline drift. */
     obligationSourcesById: z.record(z.string().min(1), z.array(z.string().min(1))).optional(),
+    /**
+     * Adopted families (0.13): the named, dated, commit-referenced
+     * family markers ({@link AdoptionFamilySchema}). OPTIONAL for
+     * backward compatibility (a receipt without the field predates
+     * families and is not adopted for any of them). The map keys are
+     * family names; only a family this engine explicitly sanctions is
+     * ever written (`pages`), and a family marker is permanent: the
+     * shrink path rewrites the family's `forgiven` list only.
+     */
+    families: z.record(z.string().min(1), AdoptionFamilySchema).optional(),
   })
   .strict()
   .superRefine((record, ctx) => {
+    const familyNames = Object.keys(record.families ?? {});
+    for (let index = 1; index < familyNames.length; index += 1) {
+      if (!(familyNames[index - 1]! < familyNames[index]!)) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['families'],
+          message:
+            'families keys must be sorted; expected \'' + familyNames[index] +
+            '\' after \'' + familyNames[index - 1] + '\'',
+        });
+        break;
+      }
+    }
     const ids = record.classificationBlocked;
     if (ids === undefined) return;
     const sorted = [...ids].sort();
@@ -95,3 +201,6 @@ export const AdoptionRecordSchema = z
 
 /** Inferred adoption-record shape. */
 export type AdoptionRecord = z.infer<typeof AdoptionRecordSchema>;
+
+/** Inferred family-marker shape. */
+export type AdoptionFamily = z.infer<typeof AdoptionFamilySchema>;
