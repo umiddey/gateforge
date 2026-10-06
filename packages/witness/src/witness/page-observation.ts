@@ -16,6 +16,12 @@ export interface ObservedPageVisit {
     remoteAddress: string | null;
     proxied: boolean;
   }>;
+  /**
+   * True only when every tracked app data request of the visit settled
+   * (response collected or request failed without ambiguity). A visit
+   * graded while requests were in flight must never read as settled.
+   */
+  apiRequestsSettled: boolean;
 }
 
 export type PageRefusalReason =
@@ -24,7 +30,9 @@ export type PageRefusalReason =
   | 'PAGE_UNCAUGHT_EXCEPTION'
   | 'PAGE_ERROR_MARKER'
   | 'PAGE_API_ERROR'
-  | 'PAGE_LOCALLY_FULFILLED';
+  | 'PAGE_LOCALLY_FULFILLED'
+  | 'PAGE_API_UNSETTLED'
+  | 'PAGE_APP_ORIGIN_MISMATCH';
 
 export interface PageVisitVerdict {
   pageId: string | null;
@@ -53,28 +61,62 @@ export function matchPageRoute(routePath: string, rawUrl: string): boolean {
   );
 }
 
-/** Grade one settled visit using only witness-collected browser observations. */
+/**
+ * Grade one settled visit using only witness-collected browser observations.
+ *
+ * `expectedPage` grades the visit against the one configured page the driver
+ * deliberately requested: the settled URL must be that page, so a redirect to
+ * a login route or to any other page refuses the expected page under its own
+ * id instead of matching an incidental route. Without it the visit is
+ * attributed to the last opened declared page, where a directly opened
+ * declared login page counts as a legitimate public page while a bounced
+ * protected navigation never does.
+ */
 export function gradePageVisit(input: {
   pages: readonly PageRoute[];
+  expectedPage?: PageRoute;
   loginRoutes?: readonly string[];
   visit: ObservedPageVisit;
 }): PageVisitVerdict {
   const { visit } = input;
-  const navigatedPaths = [...visit.navigations, visit.url].map(pathname).filter((value): value is string => value !== null);
+  const urls = [...visit.navigations, visit.url];
+  const navigatedPaths = urls.map(pathname).filter((value): value is string => value !== null);
   const loginPaths = (input.loginRoutes ?? []).map(pathname).filter((value): value is string => value !== null);
-  const bounced = loginPaths.some((loginPath) => navigatedPaths.includes(loginPath));
+  const observedLogin = loginPaths.some((loginPath) => navigatedPaths.includes(loginPath));
   let page: PageRoute | undefined;
-  for (const url of [...visit.navigations, visit.url].reverse()) {
-    if (loginPaths.includes(pathname(url) ?? '')) continue;
-    page = input.pages.find(({ path }) => matchPageRoute(path, url));
-    if (page !== undefined) break;
+  if (input.expectedPage !== undefined) {
+    page = input.expectedPage;
+  } else {
+    for (const url of [...urls].reverse()) {
+      if (loginPaths.includes(pathname(url) ?? '')) continue;
+      page = input.pages.find(({ path }) => matchPageRoute(path, url));
+      if (page !== undefined) break;
+    }
+    // A declared login page reached without any other requested page is a
+    // legitimate public page; after a bounced protected navigation it is not.
+    if (page === undefined && navigatedPaths.length > 0 && navigatedPaths.every((value) => loginPaths.includes(value))) {
+      for (const url of [...urls].reverse()) {
+        page = input.pages.find(({ path }) => matchPageRoute(path, url));
+        if (page !== undefined) break;
+      }
+    }
   }
+  const routeMatched = page !== undefined && matchPageRoute(page.path, visit.url);
+  const pageIsLoginRoute = page !== undefined && loginPaths.includes(pathname(page.path) ?? '');
+  const bounced = observedLogin && !pageIsLoginRoute;
   const loadsReasons: PageRefusalReason[] = [];
-  if (page === undefined) loadsReasons.push('PAGE_ROUTE_UNMATCHED');
+  if (!routeMatched) loadsReasons.push('PAGE_ROUTE_UNMATCHED');
   if (bounced) loadsReasons.push('PAGE_BOUNCED_TO_LOGIN');
   if (visit.exceptions.length > 0) loadsReasons.push('PAGE_UNCAUGHT_EXCEPTION');
   if (visit.domMarkerHit) loadsReasons.push('PAGE_ERROR_MARKER');
   const dataReasons: PageRefusalReason[] = [];
+  // An observation whose app request set did not settle (a request failed
+  // or a bounded wait expired) is unverifiable: both promises refuse with
+  // the typed unsettled reason, never a fabricated JS exception.
+  if (visit.apiRequestsSettled !== true) {
+    loadsReasons.push('PAGE_API_UNSETTLED');
+    dataReasons.push('PAGE_API_UNSETTLED');
+  }
   for (const response of visit.apiResponses) {
     if (response.remoteAddress === null || !response.proxied) {
       loadsReasons.push('PAGE_LOCALLY_FULFILLED');

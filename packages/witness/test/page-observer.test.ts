@@ -103,4 +103,391 @@ describe('real CDP page observer', () => {
       await context.close();
     }
   });
+
+  it('waits for a delayed API 500 beyond the quiet window before emitting', async () => {
+    // Real wall-clock delay: the 500 must land AFTER the observer's real
+    // quiet window against real Chromium; fake timers cannot drive the
+    // browser's network stack (rule exception, named here).
+    const app = createServer((request, response) => {
+      if (request.url === '/api/data') {
+        setTimeout(() => {
+          response.writeHead(500, { 'content-type': 'application/json' });
+          response.end('{"error":"server error"}');
+        }, 1_200);
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'text/html' });
+      response.end('<!doctype html><html><body><main id="app"></main><script>fetch("/api/data").catch(() => {});</script></body></html>');
+    });
+    app.listen(0, '127.0.0.1');
+    await once(app, 'listening');
+    const appAddress = app.address();
+    if (appAddress === null || typeof appAddress === 'string') throw new Error('app server did not bind');
+    const appOrigin = `http://127.0.0.1:${appAddress.port}`;
+    const debugPort = await freePort();
+    const browser = await chromium.launch({ args: [`--remote-debugging-port=${debugPort}`] });
+    stop = async () => { await browser.close(); await new Promise<void>((resolve) => app.close(() => resolve())); };
+    const visits: Array<{ observed: ObservedPageVisit; verdict: PageVisitVerdict }> = [];
+    const observer = await observePageBrowser({
+      debuggingPort: debugPort,
+      pages: [{ id: 'tenant.page-orders', path: '/orders' }],
+      loginRoutes: ['/login'],
+      errorMarkers: [],
+      appOrigins: [appOrigin],
+      isProxiedExchange: (url) => new URL(url).pathname === '/api/data',
+      quietMs: 300,
+      onVisit: (observed, verdict) => {
+        visits.push({ observed, verdict });
+      },
+    });
+    try {
+      const page = await browser.newPage();
+      await page.goto(`${appOrigin}/orders`);
+      // Exactly ONE emission, carrying the late 500 — never a clean record
+      // while the request was in flight.
+      await expect.poll(() => visits.length, { timeout: 5_000 }).toBe(1);
+      expect(visits[0]!.observed.apiResponses.map(({ status }) => status)).toEqual([500]);
+      expect(visits[0]!.observed.apiRequestsSettled).toBe(true);
+      expect(visits[0]!.verdict.loads.satisfied).toBe(true);
+      expect(visits[0]!.verdict.dataOk.satisfied).toBe(false);
+      expect(visits[0]!.verdict.dataOk.refusalReasons).toContain('PAGE_API_ERROR');
+    } finally {
+      await observer.close();
+    }
+  });
+
+  it('does not falsely refuse a delayed API 200', async () => {
+    // Real wall-clock delay: same rationale as the delayed-500 regression.
+    const app = createServer((request, response) => {
+      if (request.url === '/api/data') {
+        setTimeout(() => { response.writeHead(200); response.end('{}'); }, 1_200);
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'text/html' });
+      response.end('<!doctype html><html><body><main id="app"></main><script>fetch("/api/data").catch(() => {});</script></body></html>');
+    });
+    app.listen(0, '127.0.0.1');
+    await once(app, 'listening');
+    const appAddress = app.address();
+    if (appAddress === null || typeof appAddress === 'string') throw new Error('app server did not bind');
+    const appOrigin = `http://127.0.0.1:${appAddress.port}`;
+    const debugPort = await freePort();
+    const browser = await chromium.launch({ args: [`--remote-debugging-port=${debugPort}`] });
+    stop = async () => { await browser.close(); await new Promise<void>((resolve) => app.close(() => resolve())); };
+    const visits: Array<{ observed: ObservedPageVisit; verdict: PageVisitVerdict }> = [];
+    const observer = await observePageBrowser({
+      debuggingPort: debugPort,
+      pages: [{ id: 'tenant.page-orders', path: '/orders' }],
+      loginRoutes: ['/login'],
+      errorMarkers: [],
+      appOrigins: [appOrigin],
+      isProxiedExchange: (url) => new URL(url).pathname === '/api/data',
+      quietMs: 300,
+      onVisit: (observed, verdict) => {
+        visits.push({ observed, verdict });
+      },
+    });
+    try {
+      const page = await browser.newPage();
+      await page.goto(`${appOrigin}/orders`);
+      await expect.poll(() => visits.length, { timeout: 5_000 }).toBe(1);
+      expect(visits[0]!.observed.apiResponses.map(({ status }) => status)).toEqual([200]);
+      expect(visits[0]!.observed.apiRequestsSettled).toBe(true);
+      expect(visits[0]!.verdict.loads.satisfied).toBe(true);
+      expect(visits[0]!.verdict.dataOk.satisfied).toBe(true);
+    } finally {
+      await observer.close();
+    }
+  });
+
+  it('refuses a delayed 500 on a non-/api fetch as an API error too', async () => {
+    // Real wall-clock delay: same rationale as the delayed-500 regression.
+    // The fetch URL carries no /api/ prefix — classification must come from
+    // the request resource type.
+    const app = createServer((request, response) => {
+      if (request.url === '/data') {
+        setTimeout(() => { response.writeHead(500); response.end('{}'); }, 1_200);
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'text/html' });
+      response.end('<!doctype html><html><body><main id="app"></main><script>fetch("/data").catch(() => {});</script></body></html>');
+    });
+    app.listen(0, '127.0.0.1');
+    await once(app, 'listening');
+    const appAddress = app.address();
+    if (appAddress === null || typeof appAddress === 'string') throw new Error('app server did not bind');
+    const appOrigin = `http://127.0.0.1:${appAddress.port}`;
+    const debugPort = await freePort();
+    const browser = await chromium.launch({ args: [`--remote-debugging-port=${debugPort}`] });
+    stop = async () => { await browser.close(); await new Promise<void>((resolve) => app.close(() => resolve())); };
+    const visits: Array<{ observed: ObservedPageVisit; verdict: PageVisitVerdict }> = [];
+    const observer = await observePageBrowser({
+      debuggingPort: debugPort,
+      pages: [{ id: 'tenant.page-orders', path: '/orders' }],
+      loginRoutes: ['/login'],
+      errorMarkers: [],
+      appOrigins: [appOrigin],
+      isProxiedExchange: (url) => new URL(url).pathname === '/data',
+      quietMs: 300,
+      onVisit: (observed, verdict) => {
+        visits.push({ observed, verdict });
+      },
+    });
+    try {
+      const page = await browser.newPage();
+      await page.goto(`${appOrigin}/orders`);
+      await expect.poll(() => visits.length, { timeout: 5_000 }).toBe(1);
+      expect(visits[0]!.observed.apiResponses.map(({ status }) => status)).toEqual([500]);
+      expect(visits[0]!.observed.apiRequestsSettled).toBe(true);
+      expect(visits[0]!.verdict.loads.satisfied).toBe(true);
+      expect(visits[0]!.verdict.dataOk.refusalReasons).toContain('PAGE_API_ERROR');
+    } finally {
+      await observer.close();
+    }
+  });
+
+  it('refuses a failed API request as unsettled', async () => {
+    const app = createServer((request, response) => {
+      response.writeHead(200, { 'content-type': 'text/html' });
+      response.end('<!doctype html><html><body><main id="app"></main><script>fetch("/api/data").catch(() => {});</script></body></html>');
+    });
+    app.listen(0, '127.0.0.1');
+    await once(app, 'listening');
+    const appAddress = app.address();
+    if (appAddress === null || typeof appAddress === 'string') throw new Error('app server did not bind');
+    const appOrigin = `http://127.0.0.1:${appAddress.port}`;
+    const debugPort = await freePort();
+    const browser = await chromium.launch({ args: [`--remote-debugging-port=${debugPort}`] });
+    stop = async () => { await browser.close(); await new Promise<void>((resolve) => app.close(() => resolve())); };
+    const visits: Array<{ observed: ObservedPageVisit; verdict: PageVisitVerdict }> = [];
+    const observer = await observePageBrowser({
+      debuggingPort: debugPort,
+      pages: [{ id: 'tenant.page-orders', path: '/orders' }],
+      loginRoutes: ['/login'],
+      errorMarkers: [],
+      appOrigins: [appOrigin],
+      isProxiedExchange: () => true,
+      quietMs: 300,
+      onVisit: (observed, verdict) => {
+        visits.push({ observed, verdict });
+      },
+    });
+    try {
+      const page = await browser.newPage();
+      await page.route('**/api/data', (route) => route.abort());
+      await page.goto(`${appOrigin}/orders`);
+      await expect.poll(() => visits.length, { timeout: 5_000 }).toBe(1);
+      expect(visits[0]!.observed.apiRequestsSettled).toBe(false);
+      expect(visits[0]!.observed.apiResponses).toEqual([]);
+      expect(visits[0]!.verdict.loads.refusalReasons).toContain('PAGE_API_UNSETTLED');
+      expect(visits[0]!.verdict.dataOk.refusalReasons).toContain('PAGE_API_UNSETTLED');
+    } finally {
+      await observer.close();
+    }
+  });
+
+  it('preserves evidence across repeated quiet emissions of the same navigation', async () => {
+    const app = createServer((request, response) => {
+      if (request.url === '/api/data') { response.writeHead(200); response.end('{}'); return; }
+      response.writeHead(200, { 'content-type': 'text/html' });
+      response.end(`<!doctype html><html><body><main id="app"></main><script>
+fetch("/api/data").catch(() => {});
+setTimeout(() => { throw new Error("late crash"); }, 1200);
+</script></body></html>`);
+    });
+    app.listen(0, '127.0.0.1');
+    await once(app, 'listening');
+    const appAddress = app.address();
+    if (appAddress === null || typeof appAddress === 'string') throw new Error('app server did not bind');
+    const appOrigin = `http://127.0.0.1:${appAddress.port}`;
+    const debugPort = await freePort();
+    const browser = await chromium.launch({ args: [`--remote-debugging-port=${debugPort}`] });
+    stop = async () => { await browser.close(); await new Promise<void>((resolve) => app.close(() => resolve())); };
+    const visits: Array<{ observed: ObservedPageVisit; verdict: PageVisitVerdict }> = [];
+    const observer = await observePageBrowser({
+      debuggingPort: debugPort,
+      pages: [{ id: 'tenant.page-orders', path: '/orders' }],
+      loginRoutes: ['/login'],
+      errorMarkers: [],
+      appOrigins: [appOrigin],
+      isProxiedExchange: (url) => new URL(url).pathname === '/api/data',
+      quietMs: 300,
+      onVisit: (observed, verdict) => {
+        visits.push({ observed, verdict });
+      },
+    });
+    try {
+      const page = await browser.newPage();
+      await page.goto(`${appOrigin}/orders`);
+      // First emission is clean and settled; the later page error must be
+      // carried by a SECOND emission that PRESERVES the earlier evidence.
+      await expect.poll(() => visits.length, { timeout: 5_000 }).toBe(2);
+      expect(visits[0]!.observed.exceptions).toEqual([]);
+      expect(visits[0]!.observed.apiResponses.map(({ status }) => status)).toEqual([200]);
+      expect(visits[0]!.observed.apiRequestsSettled).toBe(true);
+      expect(visits[1]!.observed.exceptions).toEqual(['late crash']);
+      expect(visits[1]!.observed.apiResponses.map(({ status }) => status)).toEqual([200]);
+      expect(visits[1]!.observed.navigations).toEqual([`${appOrigin}/orders`]);
+      expect(visits[1]!.verdict.loads.refusalReasons).toContain('PAGE_UNCAUGHT_EXCEPTION');
+      expect(visits[1]!.verdict.loads.refusalReasons).not.toContain('PAGE_API_UNSETTLED');
+    } finally {
+      await observer.close();
+    }
+  });
+
+  it('starts a fresh observation window at a new navigation without losing the old one', async () => {
+    // Real wall-clock delay for the customers 500: same rationale as the
+    // delayed-500 regression.
+    const app = createServer((request, response) => {
+      if (request.url === '/api/orders') { response.writeHead(200); response.end('[]'); return; }
+      if (request.url === '/api/customers') {
+        setTimeout(() => { response.writeHead(500); response.end('{}'); }, 1_200);
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'text/html' });
+      response.end(`<!doctype html><html><body><main id="app"></main><script>
+fetch(location.pathname === "/customers" ? "/api/customers" : "/api/orders").catch(() => {});
+</script></body></html>`);
+    });
+    app.listen(0, '127.0.0.1');
+    await once(app, 'listening');
+    const appAddress = app.address();
+    if (appAddress === null || typeof appAddress === 'string') throw new Error('app server did not bind');
+    const appOrigin = `http://127.0.0.1:${appAddress.port}`;
+    const debugPort = await freePort();
+    const browser = await chromium.launch({ args: [`--remote-debugging-port=${debugPort}`] });
+    stop = async () => { await browser.close(); await new Promise<void>((resolve) => app.close(() => resolve())); };
+    const visits: Array<{ url: string; observed: ObservedPageVisit; verdict: PageVisitVerdict }> = [];
+    const observer = await observePageBrowser({
+      debuggingPort: debugPort,
+      pages: [{ id: 'tenant.page-orders', path: '/orders' }, { id: 'tenant.page-customers', path: '/customers' }],
+      loginRoutes: ['/login'],
+      errorMarkers: [],
+      appOrigins: [appOrigin],
+      isProxiedExchange: (url) => ['/api/orders', '/api/customers'].includes(new URL(url).pathname),
+      quietMs: 300,
+      onVisit: (observed, verdict) => {
+        visits.push({ url: new URL(observed.url).pathname, observed, verdict });
+      },
+    });
+    try {
+      const page = await browser.newPage();
+      await page.goto(`${appOrigin}/orders`);
+      await expect.poll(() => visits.length, { timeout: 5_000 }).toBe(1);
+      expect(visits[0]!.url).toBe('/orders');
+      expect(visits[0]!.observed.apiResponses.map(({ status }) => status)).toEqual([200]);
+      // The genuinely new navigation opens a FRESH window: no historical
+      // route retention can attribute the customers visit to orders, and
+      // the emitted orders window is not re-issued.
+      await page.goto(`${appOrigin}/customers`);
+      await expect.poll(() => visits.length, { timeout: 5_000 }).toBe(2);
+      expect(visits[1]!.url).toBe('/customers');
+      expect(visits[1]!.observed.navigations).toEqual([`${appOrigin}/customers`]);
+      expect(visits[1]!.observed.apiResponses.map(({ status }) => status)).toEqual([500]);
+      expect(visits[1]!.observed.apiRequestsSettled).toBe(true);
+      expect(visits[1]!.verdict.loads.satisfied).toBe(true);
+      expect(visits[1]!.verdict.dataOk.refusalReasons).toContain('PAGE_API_ERROR');
+    } finally {
+      await observer.close();
+    }
+  });
+
+  it('keeps a 200 whose body completes late settled and satisfying', async () => {
+    // Real wall-clock delay: headers flush at once, the body completes only
+    // after the quiet window; fake timers cannot drive the browser's
+    // network stack (rule exception, named here).
+    const app = createServer((request, response) => {
+      if (request.url === '/api/body') {
+        response.writeHead(200);
+        response.flushHeaders();
+        setTimeout(() => response.end('{}'), 1_200);
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'text/html' });
+      response.end('<!doctype html><html><body><main id="app"></main><script>fetch("/api/body").catch(() => {});</script></body></html>');
+    });
+    app.listen(0, '127.0.0.1');
+    await once(app, 'listening');
+    const appAddress = app.address();
+    if (appAddress === null || typeof appAddress === 'string') throw new Error('app server did not bind');
+    const appOrigin = `http://127.0.0.1:${appAddress.port}`;
+    const debugPort = await freePort();
+    const browser = await chromium.launch({ args: [`--remote-debugging-port=${debugPort}`] });
+    stop = async () => { await browser.close(); await new Promise<void>((resolve) => app.close(() => resolve())); };
+    const visits: Array<{ observed: ObservedPageVisit; verdict: PageVisitVerdict }> = [];
+    const observer = await observePageBrowser({
+      debuggingPort: debugPort,
+      pages: [{ id: 'tenant.page-orders', path: '/orders' }],
+      loginRoutes: ['/login'],
+      errorMarkers: [],
+      appOrigins: [appOrigin],
+      isProxiedExchange: (url) => new URL(url).pathname === '/api/body',
+      quietMs: 300,
+      onVisit: (observed, verdict) => {
+        visits.push({ observed, verdict });
+      },
+    });
+    try {
+      const page = await browser.newPage();
+      await page.goto(`${appOrigin}/orders`);
+      await expect.poll(() => visits.length, { timeout: 5_000 }).toBe(1);
+      expect(visits[0]!.observed.apiResponses.map(({ status }) => status)).toEqual([200]);
+      expect(visits[0]!.observed.apiRequestsSettled).toBe(true);
+      expect(visits[0]!.verdict.loads.satisfied).toBe(true);
+      expect(visits[0]!.verdict.dataOk.satisfied).toBe(true);
+    } finally {
+      await observer.close();
+    }
+  });
+
+  it('refuses a 200 whose body never completes as unsettled', async () => {
+    // Real wall-clock + real socket teardown: the 200 headers flush at once
+    // and the connection dies before the body completes; only the platform
+    // can produce this failure shape (rule exception, named here).
+    const app = createServer((request, response) => {
+      if (request.url === '/api/body') {
+        response.writeHead(200);
+        response.flushHeaders();
+        setTimeout(() => { response.socket?.destroy(); }, 1_200);
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'text/html' });
+      response.end('<!doctype html><html><body><main id="app"></main><script>fetch("/api/body").catch(() => {});</script></body></html>');
+    });
+    app.listen(0, '127.0.0.1');
+    await once(app, 'listening');
+    const appAddress = app.address();
+    if (appAddress === null || typeof appAddress === 'string') throw new Error('app server did not bind');
+    const appOrigin = `http://127.0.0.1:${appAddress.port}`;
+    const debugPort = await freePort();
+    const browser = await chromium.launch({ args: [`--remote-debugging-port=${debugPort}`] });
+    stop = async () => { await browser.close(); await new Promise<void>((resolve) => app.close(() => resolve())); };
+    const visits: Array<{ observed: ObservedPageVisit; verdict: PageVisitVerdict }> = [];
+    const observer = await observePageBrowser({
+      debuggingPort: debugPort,
+      pages: [{ id: 'tenant.page-orders', path: '/orders' }],
+      loginRoutes: ['/login'],
+      errorMarkers: [],
+      appOrigins: [appOrigin],
+      isProxiedExchange: (url) => new URL(url).pathname === '/api/body',
+      quietMs: 300,
+      onVisit: (observed, verdict) => {
+        visits.push({ observed, verdict });
+      },
+    });
+    try {
+      const page = await browser.newPage();
+      await page.goto(`${appOrigin}/orders`);
+      // Headers were collected ([200]) but the request never finished: the
+      // observation stays unsettled and can never grade clean.
+      await expect.poll(() => visits.length, { timeout: 5_000 }).toBe(1);
+      expect(visits[0]!.observed.apiResponses.map(({ status }) => status)).toEqual([200]);
+      expect(visits[0]!.observed.apiRequestsSettled).toBe(false);
+      expect(visits[0]!.verdict.loads.refusalReasons).toContain('PAGE_API_UNSETTLED');
+      expect(visits[0]!.verdict.dataOk.satisfied).toBe(false);
+      expect(visits[0]!.verdict.dataOk.refusalReasons).toContain('PAGE_API_UNSETTLED');
+    } finally {
+      await observer.close();
+    }
+  });
 });

@@ -21,14 +21,14 @@ describe('referee page sweep', () => {
     const appBase = `http://${[127, 0, 0, 1].join('.')}:${String(address.port)}`;
     const manager = new EngineBrowserManager({ launch: (options) => chromium.launch(options) });
     cleanup = async () => { await manager.closeAll(); await new Promise<void>((resolve) => app.close(() => resolve())); };
-    const records: Array<{ obligationId: string; testId: string; payload: { channel?: unknown } }> = [];
+    const records: Array<{ obligationId: string; testId: string; payload: { channel?: unknown; apiRequestsSettled?: unknown; observationSequence?: unknown } }> = [];
     try {
       const visits = await sweepPageVisits({
         browser: manager,
         sessionId: 'sweep-test',
         testId: 'referee',
         appBase,
-        routes: [{ id: 'tenant.page-home', path: '/' }],
+        routes: [{ id: 'tenant.page-home', path: '/' }, { id: 'tenant.page-other', path: '/other' }],
         loginRoutes: [],
         errorMarkers: [],
         storageState: {
@@ -51,11 +51,18 @@ describe('referee page sweep', () => {
         },
       });
       expect(visits[0]?.verdict.loads.satisfied).toBe(true);
-      expect(records.map((record) => record.payload.channel)).toEqual(['swept', 'swept']);
+      expect(visits[1]?.verdict.loads.satisfied).toBe(true);
+      expect(records.map((record) => record.payload.channel)).toEqual(['swept', 'swept', 'swept', 'swept']);
       expect(records.map((record) => record.obligationId)).toEqual([
         'tenant.page-home:page:loads',
         'tenant.page-home:page:data-ok',
+        'tenant.page-other:page:loads',
+        'tenant.page-other:page:data-ok',
       ]);
+      // One payload per route visit, shared by both promise records; the
+      // sequence increases within the sweep and settled is stamped honestly.
+      expect(records.map((record) => record.payload.observationSequence)).toEqual([0, 0, 1, 1]);
+      expect(records.every((record) => record.payload.apiRequestsSettled === true)).toBe(true);
     } finally {
       await cleanup();
       cleanup = undefined;

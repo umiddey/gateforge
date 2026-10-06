@@ -228,6 +228,18 @@ export const WITNESS_URL_FILE = 'witness-url.json';
 /** Default per-witness-call timeout (pin #7: 5s). */
 export const DEFAULT_REQUEST_TIMEOUT_MS = 5000;
 
+/** Bounded phases of one engine page visit; sweep RPCs budget each visited route. */
+export const ENGINE_PAGE_VISIT_STEP_TIMEOUT_MS = 15_000;
+export const ENGINE_PAGE_VISIT_ADDRESS_TIMEOUT_MS = 1_000;
+export const ENGINE_PAGE_VISIT_SETTLE_MS = 300;
+/** Bounded wait for in-flight app data requests before a visit is graded. */
+export const ENGINE_PAGE_VISIT_API_SETTLE_TIMEOUT_MS = ENGINE_PAGE_VISIT_STEP_TIMEOUT_MS;
+export const ENGINE_PAGE_VISIT_BUDGET_MS =
+  2 * ENGINE_PAGE_VISIT_STEP_TIMEOUT_MS +
+  ENGINE_PAGE_VISIT_ADDRESS_TIMEOUT_MS +
+  ENGINE_PAGE_VISIT_SETTLE_MS +
+  ENGINE_PAGE_VISIT_API_SETTLE_TIMEOUT_MS;
+
 /** The loopback hostname the witness, proxy, and fixture servers bind. */
 export const LOOPBACK_HOSTNAME = '127.0.0.1';
 
