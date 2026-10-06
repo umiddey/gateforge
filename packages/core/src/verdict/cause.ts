@@ -7,12 +7,13 @@
  * a connected test whose required observations are absent
  * (EVIDENCE_NOT_COLLECTED — including the crud session-channel rules:
  * direct mutation outside the supervised channel, no visible result, no
- * session-bound anchor), an obligation no test is connected to
- * (TEST_MAPPING_MISSING), and the §3.6 exact-value echo violation
- * (EVIDENCE_VALUE_MISMATCH). Remaining causes are populated by the
- * phases that build their subsystems (catalog/mapping: Phase 2-3;
- * execution results: Phase 4); an unmapped blocking verdict carries a
- * null cause rather than a guess.
+ * session-bound anchor — and, since 0.13, a MISSING page promise, whose
+ * action names the witnessed page visit / post-suite sweep), an
+ * obligation no test is connected to (TEST_MAPPING_MISSING), and the
+ * §3.6 exact-value echo violation (EVIDENCE_VALUE_MISMATCH). Remaining
+ * causes are populated by the phases that build their subsystems
+ * (catalog/mapping: Phase 2-3; execution results: Phase 4); an unmapped
+ * blocking verdict carries a null cause rather than a guess.
  *
  * The mapping matches the verifier reasons verbatim — those strings are
  * engine-owned (single grading sites, kept in lockstep by tests), never
@@ -60,6 +61,19 @@ const EVIDENCE_NOT_COLLECTED_PATTERNS: readonly string[] = [
  * session-channel verifier).
  */
 const EVIDENCE_VALUE_MISMATCH_PATTERN = 'exact-value echo violation (EVIDENCE_VALUE_MISMATCH)';
+
+/**
+ * The page-promise evidence action (0.13): a missing `page:loads`/
+ * `page:data-ok` is a visit nobody witnessed — the actionable fix is a
+ * witnessed page visit through a browser test or the engine's own
+ * post-suite sweep, never "drop the pack" (the proof channel exists and
+ * is available). Kept beside the other verbatim grading-site strings;
+ * the page missing-reason text lives in exactly one grading site
+ * (`gradePageObligation`).
+ */
+const PAGE_EVIDENCE_NEXT_ACTION =
+  'Run a witnessed page visit (a browser test through the Gateforge Playwright fixture) or let ' +
+  "the engine's post-suite sweep visit the route; mappings (`tests mark`) are intent, not proof.";
 
 /**
  * A crud session exchange that cannot be attributed because the host
@@ -132,6 +146,20 @@ export function causeForVerdict(params: {
   const implemented = capability?.contracts.includes(params.contract) ?? false;
   if (capability === null || capability.availability.status === 'unavailable' || !implemented) {
     return nextActionFor('VERIFIER_UNSUPPORTED');
+  }
+  // The page namespace implements exactly `page:loads`/`page:data-ok`
+  // (any other `page:*` contract is unimplemented and already returned
+  // VERIFIER_UNSUPPORTED above). A MISSING page promise is absent
+  // evidence — a witnessed page visit or the engine's post-suite sweep
+  // has not produced a clean record — never an unsupported verifier, so
+  // it maps to EVIDENCE_NOT_COLLECTED with the page-specific action.
+  // Other page verdicts (a witness REFUSAL, for one) keep the generic
+  // mapping below: their reasons are precise and need no guessed cause.
+  if (
+    (params.contract === 'page:loads' || params.contract === 'page:data-ok') &&
+    params.verdict === 'missing'
+  ) {
+    return { cause: 'EVIDENCE_NOT_COLLECTED', nextAction: PAGE_EVIDENCE_NEXT_ACTION };
   }
   const reason = params.reason ?? '';
   if (reason.includes(EVIDENCE_VALUE_MISMATCH_PATTERN)) {

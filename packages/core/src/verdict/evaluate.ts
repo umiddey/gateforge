@@ -1028,6 +1028,34 @@ registerContractCapabilities(PERSISTENCE_CAPABILITY);
 registerContractCapabilities(CRUD_CAPABILITY);
 
 /**
+ * Capability metadata for the page namespace (0.13): the two page
+ * promises are proven through witnessed page visits — the witness's own
+ * Chromium CDP drive of a passing test's page (channel `observed`) or
+ * the engine's independent post-suite sweep of routes without clean
+ * test proof (channel `swept`). The registry lists EXACTLY
+ * `page:loads`/`page:data-ok`: any other `page:*` contract stays
+ * unimplemented, so it keeps mapping to VERIFIER_UNSUPPORTED — the
+ * capability never pretends a proof channel exists for a contract the
+ * page grader does not grade. Adapter-free by design: page grading
+ * needs no business classification, so the capability record carries no
+ * classifier requirement either.
+ */
+const PAGE_CAPABILITY: ContractCapability = {
+  namespace: 'page',
+  contracts: ['page:loads', 'page:data-ok'],
+  unavailableContracts: [],
+  observer:
+    'the witness CDP drive: settled, route-matched visits recorded by the independent witness ' +
+    'browser (channel observed, from a passing test) or the engine\'s own post-suite sweep of ' +
+    'routes without clean test proof (channel swept) — both graded by the same route, redirect, ' +
+    'crash, error-marker and API-response rules; suite-submitted page records never substitute',
+  testKinds: ['browser-e2e', 'observed-e2e'],
+  availability: { status: 'available' },
+};
+
+registerContractCapabilities(PAGE_CAPABILITY);
+
+/**
  * The built-in persistence grader: dispatches between the three evidence
  * channels an obligation's claim may be proven through.
  *
@@ -2095,6 +2123,38 @@ function gradeAlembicObligation(obligation: Obligation, context: VerdictContext)
   };
 }
 
+/**
+ * One test's LATEST well-formed page observation (0.13 chronology).
+ */
+interface PageObservation {
+  readonly testId: string;
+  readonly sequence: number;
+  readonly record: RecordLike;
+  /** True when two records share this top sequence but disagree on payload. */
+  readonly contradictory: boolean;
+}
+
+/**
+ * Grades `page:loads` / `page:data-ok` obligations from engine-issued
+ * page.observed records. Chronology rule (0.13): observations from the
+ * SAME test resolve to only their LATEST `observationSequence`, so an
+ * early clean visit cannot survive a later refusal by the same test,
+ * while a different passing test's latest clean record still satisfies.
+ * The sequence must be a nonnegative integer and the payload must carry
+ * `apiRequestsSettled: true` before a record can satisfy. The engine
+ * stamps both onto every payload, but they fail differently: a missing
+ * or malformed sequence makes the record INADMISSIBLE — it can neither
+ * satisfy nor carry a refusal — while a valid-sequence record whose
+ * settled flag is missing or false still participates in the latest
+ * selection and is REFUSED with typed `PAGE_API_UNSETTLED`.
+ * Unsettled or refused latest records remain refusals, never proof.
+ * Grouping is by testId with a max-sequence reduction and sorted test
+ * iteration, so input array order never affects the outcome and no
+ * clock is read. Duplicates at one test's top sequence are admitted
+ * only when their payloads are canonically identical (the engine reuses
+ * ONE payload for both page promises); a contradiction fails that test
+ * closed.
+ */
 function gradePageObligation(obligation: Obligation, records: readonly unknown[]): VerdictOutcome {
   const verdictKey = obligation.contract === 'page:loads' ? 'loads' : 'dataOk';
   const pageRecords = records
@@ -2108,23 +2168,64 @@ function gradePageObligation(obligation: Obligation, records: readonly unknown[]
       trustOf(record) === 'witnessed' &&
       payloadOf(record)?.['routeId'] === obligation.resourceId,
     );
+  const latestByTest = new Map<string, PageObservation>();
   for (const record of pageRecords) {
-    const pageVerdict = payloadOf(record)?.[verdictKey];
+    const testId = typeof record.testId === 'string' ? record.testId : null;
+    const rawSequence = payloadOf(record)?.['observationSequence'];
+    const sequence =
+      typeof rawSequence === 'number' && Number.isInteger(rawSequence) && rawSequence >= 0
+        ? rawSequence
+        : null;
+    if (testId === null || sequence === null) continue;
+    const current = latestByTest.get(testId);
+    if (current === undefined || current.sequence < sequence) {
+      latestByTest.set(testId, { testId, sequence, record, contradictory: false });
+      continue;
+    }
+    if (current.sequence !== sequence || current.contradictory) continue;
+    const fresh = payloadOf(record);
+    const held = payloadOf(current.record);
+    // Canonical payload equality is the deterministic "prove identical"
+    // check: a payload with no JSON representation never proves it.
+    const differs =
+      !isJsonValue(fresh) || !isJsonValue(held) ||
+      canonicalJson(fresh) !== canonicalJson(held);
+    if (differs) latestByTest.set(testId, { ...current, contradictory: true });
+  }
+  const observations = [...latestByTest.values()].sort((a, b) => compareStrings(a.testId, b.testId));
+  let satisfiedId: string | null = null;
+  for (const observation of observations) {
+    if (observation.contradictory) continue;
+    const payload = payloadOf(observation.record);
+    if (payload === undefined || payload['apiRequestsSettled'] !== true) continue;
+    const pageVerdict = payload[verdictKey];
     if (!isPlainObject(pageVerdict) || pageVerdict['satisfied'] !== true ||
       !Array.isArray(pageVerdict['refusalReasons']) || pageVerdict['refusalReasons'].length !== 0) continue;
-    if (typeof record.recordId !== 'string') continue;
-    return { verdict: 'satisfied', reason: null, recordIds: [record.recordId] };
+    if (typeof observation.record.recordId !== 'string') continue;
+    satisfiedId = observation.record.recordId;
+    break;
   }
-  const refused = pageRecords[0];
+  if (satisfiedId !== null) {
+    return { verdict: 'satisfied', reason: null, recordIds: [satisfiedId] };
+  }
+  const refused = observations[0];
   if (refused !== undefined) {
-    const pageVerdict = payloadOf(refused)?.[verdictKey];
+    const payload = payloadOf(refused.record);
+    const pageVerdict = payload?.[verdictKey];
     const reasons = isPlainObject(pageVerdict) && Array.isArray(pageVerdict['refusalReasons'])
       ? pageVerdict['refusalReasons'].filter((reason): reason is string => typeof reason === 'string')
       : [];
+    if (payload?.['apiRequestsSettled'] !== true) reasons.push('PAGE_API_UNSETTLED');
+    if (refused.contradictory) {
+      reasons.push(
+        `PAGE_OBSERVATION_CONFLICT (test '${refused.testId}' carries different payloads at ` +
+        `observation sequence ${refused.sequence})`,
+      );
+    }
     return {
       verdict: 'invalid',
       reason: reasons.length > 0 ? `witness refused page observation: ${reasons.join(', ')}` : 'witness page observation was not clean',
-      recordIds: typeof refused.recordId === 'string' ? [refused.recordId] : [],
+      recordIds: typeof refused.record.recordId === 'string' ? [refused.record.recordId] : [],
     };
   }
   return {
@@ -2135,87 +2236,28 @@ function gradePageObligation(obligation: Obligation, records: readonly unknown[]
 }
 
 /**
- * Evaluates ONE obligation against the run's claims, records, waivers,
- * classification, and injected clock (pin #9). Pure and deterministic:
- * identical inputs produce identical outcomes.
+ * The waiver evaluation shared by the ordinary lane and the adapter-free
+ * page lane: exact (resourceId, fingerprint) scope only (D4). Precedence:
+ * unexpired non-stale → waived; expired → invalid (D4); stale owner →
+ * stale (GF-17). Sorted for determinism. The reason strings are part of
+ * the pinned verdict contract — never reworded at one call site.
  *
  * Args:
- *   obligation: the obligation under evaluation (validated schema shape).
- *   context: claims, records, waivers, classification, and `now`.
+ *   verified: the schema-validated obligation under evaluation.
+ *   waivers: the run's waivers (with the engine-only stale-owner flag).
+ *   now: the parsed injected run instant.
  *
  * Returns:
- *   VerdictOutcome: {verdict, reason, recordIds} — reason is null only
- *   for `satisfied`; recordIds is always a sorted array.
- *
- * Throws:
- *   GateforgeVerdictError: when the obligation or `now` violates the
- *   engine-internal contract (evidence problems NEVER throw — they
- *   produce `invalid`/`missing` verdicts).
+ *   VerdictOutcome | null: the waiver's outcome, or null when no waiver
+ *   speaks for this obligation (grading continues).
  */
-export function evaluateObligation(
-  obligation: Obligation,
-  context: VerdictContext,
-): VerdictOutcome {
-  const parsedObligation = ObligationSchema.safeParse(obligation);
-  if (!parsedObligation.success) {
-    throw new GateforgeVerdictError(
-      `obligation failed schema validation: ${parsedObligation.error.issues
-        .map((issue) => `${issue.path.join('.')}: ${issue.message}`)
-        .join('; ')}`,
-    );
-  }
-  const verified = parsedObligation.data;
-  if (verified.contract.startsWith('alembic:')) {
-    return gradeAlembicObligation(verified, context);
-  }
-  if (verified.contract === 'page:loads' || verified.contract === 'page:data-ok') {
-    return gradePageObligation(verified, context.records ?? []);
-  }
-  const now = parseInstant(context.now);
-
-  // 1. Unclassified resources block (invariant 1); unresolved resources
-  //    never reach this evaluator (the policy engine emits blocking
-  //    entries because they cannot carry obligations).
-  if (context.classification === null || context.classification === undefined) {
-    return {
-      verdict: 'unclassified',
-      reason:
-        `resource '${verified.resourceId}' has no classification; obligations cannot bind ` +
-        'evidence until it is classified (invariant 1)',
-      recordIds: [],
-    };
-  }
-  const parsedClassification = ClassificationSchema.safeParse(context.classification);
-  if (!parsedClassification.success) {
-    return {
-      verdict: 'unclassified',
-      reason:
-        `classification for resource '${verified.resourceId}' failed validation: ` +
-        `${parsedClassification.error.issues
-          .map((issue) => `${issue.path.join('.')}: ${issue.message}`)
-          .join('; ')}`,
-      recordIds: [],
-    };
-  }
-  const classification = parsedClassification.data;
-
-  // 2. Internal resources carry no CRUD obligations; their claims are
-  //    invalid (ADR 0001, matching the policy engine's convention).
-  if (classification.exposure === 'internal') {
-    return {
-      verdict: 'invalid',
-      reason:
-        `resource '${verified.resourceId}' is internal; internal resources carry no CRUD ` +
-        'obligations and their claims are invalid (ADR 0001)',
-      recordIds: [],
-    };
-  }
-
-  // 3. Waivers: exact (resourceId, fingerprint) scope only (D4).
-  //    Precedence: unexpired non-stale → waived; expired → invalid (D4);
-  //    stale owner → stale (GF-17). Sorted for determinism.
+function waiverOutcome(
+  verified: Obligation,
+  waivers: VerdictContext['waivers'],
+  now: Date,
+): VerdictOutcome | null {
   const fp = fingerprintObligation(verified);
-  const matching = context.waivers
+  const matching = waivers
     .map((entry) => {
       // Strip the engine-only flag before strict validation; a waiver
       // entry the schema rejects can never match exactly, so it degrades.
@@ -2272,6 +2314,103 @@ export function evaluateObligation(
       recordIds: [],
     };
   }
+  return null;
+}
+
+/**
+ * Evaluates ONE obligation against the run's claims, records, waivers,
+ * classification, and injected clock (pin #9). Pure and deterministic:
+ * identical inputs produce identical outcomes.
+ *
+ * Args:
+ *   obligation: the obligation under evaluation (validated schema shape).
+ *   context: claims, records, waivers, classification, and `now`.
+ *
+ * Returns:
+ *   VerdictOutcome: {verdict, reason, recordIds} — reason is null only
+ *   for `satisfied`; recordIds is always a sorted array.
+ *
+ * Throws:
+ *   GateforgeVerdictError: when the obligation or `now` violates the
+ *   engine-internal contract (evidence problems NEVER throw — they
+ *   produce `invalid`/`missing` verdicts).
+ */
+export function evaluateObligation(
+  obligation: Obligation,
+  context: VerdictContext,
+): VerdictOutcome {
+  const parsedObligation = ObligationSchema.safeParse(obligation);
+  if (!parsedObligation.success) {
+    throw new GateforgeVerdictError(
+      `obligation failed schema validation: ${parsedObligation.error.issues
+        .map((issue) => `${issue.path.join('.')}: ${issue.message}`)
+        .join('; ')}`,
+    );
+  }
+  const verified = parsedObligation.data;
+  if (verified.contract.startsWith('alembic:')) {
+    return gradeAlembicObligation(verified, context);
+  }
+  if (verified.contract === 'page:loads' || verified.contract === 'page:data-ok') {
+    // Adapter-free page lane: page promises grade on witnessed page
+    // visits alone — no classification/exposure gate (the page reader's
+    // contract). A WAIVER is owner intent about the obligation itself,
+    // though, so it applies here exactly as on the ordinary lane: same
+    // exact scope, expiry, and stale-owner rules, decided BEFORE the
+    // evidence grade. A revoked waiver simply stops speaking, and the
+    // page grades on its evidence again — it never turns into adopted
+    // debt through the waiver path.
+    const waiver = waiverOutcome(verified, context.waivers, parseInstant(context.now));
+    if (waiver !== null) return waiver;
+    return gradePageObligation(verified, context.records ?? []);
+  }
+  const now = parseInstant(context.now);
+
+  // 1. Unclassified resources block (invariant 1); unresolved resources
+  //    never reach this evaluator (the policy engine emits blocking
+  //    entries because they cannot carry obligations).
+  if (context.classification === null || context.classification === undefined) {
+    return {
+      verdict: 'unclassified',
+      reason:
+        `resource '${verified.resourceId}' has no classification; obligations cannot bind ` +
+        'evidence until it is classified (invariant 1)',
+      recordIds: [],
+    };
+  }
+  const parsedClassification = ClassificationSchema.safeParse(context.classification);
+  if (!parsedClassification.success) {
+    return {
+      verdict: 'unclassified',
+      reason:
+        `classification for resource '${verified.resourceId}' failed validation: ` +
+        `${parsedClassification.error.issues
+          .map((issue) => `${issue.path.join('.')}: ${issue.message}`)
+          .join('; ')}`,
+      recordIds: [],
+    };
+  }
+  const classification = parsedClassification.data;
+
+  // 2. Internal resources carry no CRUD obligations; their claims are
+  //    invalid (ADR 0001, matching the policy engine's convention).
+  if (classification.exposure === 'internal') {
+    return {
+      verdict: 'invalid',
+      reason:
+        `resource '${verified.resourceId}' is internal; internal resources carry no CRUD ` +
+        'obligations and their claims are invalid (ADR 0001)',
+      recordIds: [],
+    };
+  }
+
+  // 3. Waivers: exact (resourceId, fingerprint) scope only (D4).
+  //    Precedence: unexpired non-stale → waived; expired → invalid (D4);
+  //    stale owner → stale (GF-17). Sorted for determinism. The rule
+  //    lives in ONE helper ({@link waiverOutcome}) shared with the
+  //    adapter-free page lane, so both lanes can never drift.
+  const waiver = waiverOutcome(verified, context.waivers, now);
+  if (waiver !== null) return waiver;
 
   // 4. Claims on this obligation, deterministically ordered.
   const claims = context.claims

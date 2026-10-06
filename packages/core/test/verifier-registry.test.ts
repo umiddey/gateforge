@@ -1597,6 +1597,7 @@ describe('contract capability metadata (plan 2026-09-13 Phase 0 item 3, ADR 0005
       'auth',
       'crud',
       'http',
+      'page',
       'persistence',
       'task',
       'validation',
@@ -1658,6 +1659,30 @@ describe('contract capability metadata (plan 2026-09-13 Phase 0 item 3, ADR 0005
     expect(crud?.testKinds).toEqual(['browser-e2e']);
     expect(crud?.observer).toContain('ENGINE-OWNED browser');
     expect(crud?.observer).toContain('suite-submitted UI records');
+  });
+
+  it('page: exactly the two page promises, proven by witnessed visits or the engine sweep', () => {
+    const page = capabilityFor('page:loads');
+    expect(page?.namespace).toBe('page');
+    expect(page?.availability.status).toBe('available');
+    // EXACTLY the two page contracts: any other `page:*` name stays
+    // unimplemented, so it keeps the unsupported cause — the capability
+    // never pretends a proof channel exists for a contract the page
+    // grader does not grade.
+    expect(page?.contracts).toEqual(['page:loads', 'page:data-ok']);
+    expect(page?.unavailableContracts).toEqual([]);
+    expect(page?.testKinds).toEqual(['browser-e2e', 'observed-e2e']);
+    expect(page?.observer).toContain('witness');
+    expect(page?.observer).toContain('sweep');
+    // The strict preflight agrees: an available, implemented contract
+    // produces no capability gap.
+    expect(capabilityGap('page:loads')).toBeNull();
+    expect(capabilityGap('page:data-ok')).toBeNull();
+    expect(capabilityGap('page:never')?.cause).toBe('VERIFIER_UNSUPPORTED');
+    expect(strictCapabilityGaps([{ id: 'p:page:loads', contract: 'page:loads' }])).toEqual([]);
+  });
+
+  it('domain namespaces keep their channels, availability, and exact contract lists', () => {
     for (const [namespace, channel, available, contracts] of [
       [
         'auth',
@@ -1815,6 +1840,48 @@ describe('cause mapping (plan 2026-09-13 §5.4)', () => {
       expect(mapped.nextAction).toBeNull();
     }
   });
+  it('a missing page promise maps to EVIDENCE_NOT_COLLECTED with the page visit/sweep action', () => {
+    const mapped = causeForVerdict({
+      obligationId: 'tenant.page-orders:page:loads',
+      contract: 'page:loads',
+      verdict: 'missing',
+      reason: "no clean witness-observed page visit from a passing test exists for 'tenant.page-orders'",
+    });
+    expect(mapped.cause).toBe('EVIDENCE_NOT_COLLECTED');
+    expect(mapped.nextAction).toContain('witnessed page visit');
+    expect(mapped.nextAction).toContain('sweep');
+    expect(mapped.nextAction).not.toBe(CAUSE_NEXT_ACTIONS['VERIFIER_UNSUPPORTED']);
+    const dataOk = causeForVerdict({
+      obligationId: 'tenant.page-orders:page:data-ok',
+      contract: 'page:data-ok',
+      verdict: 'missing',
+      reason: "no clean witness-observed page visit from a passing test exists for 'tenant.page-orders'",
+    });
+    expect(dataOk.cause).toBe('EVIDENCE_NOT_COLLECTED');
+  });
+
+  it('an unknown page:* contract keeps VERIFIER_UNSUPPORTED (no pretended proof channel)', () => {
+    const mapped = causeForVerdict({
+      obligationId: 'tenant.page-orders:page:never',
+      contract: 'page:never',
+      verdict: 'missing',
+      reason: 'no clean witness-observed page visit from a passing test exists',
+    });
+    expect(mapped.cause).toBe('VERIFIER_UNSUPPORTED');
+    expect(mapped.nextAction).toBe(CAUSE_NEXT_ACTIONS['VERIFIER_UNSUPPORTED']);
+  });
+
+  it('a refused page observation keeps its precise reason unmapped (no guessed cause)', () => {
+    const mapped = causeForVerdict({
+      obligationId: 'tenant.page-orders:page:loads',
+      contract: 'page:loads',
+      verdict: 'invalid',
+      reason: 'witness refused page observation: PAGE_BOUNCED_TO_LOGIN',
+    });
+    expect(mapped.cause).toBeNull();
+    expect(mapped.nextAction).toBeNull();
+  });
+
   it('crud precise reasons remain unmapped while the browser channel is available', () => {
     const crud = causeForVerdict({
       obligationId: 'tenant.accounts:crud:update',
