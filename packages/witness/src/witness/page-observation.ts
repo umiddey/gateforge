@@ -3,6 +3,14 @@
 export interface PageRoute {
   id: string;
   path: string;
+  /**
+   * True only when the page's audience declares NO login (no `session` in
+   * the `.gateforge.yml` `pages.audiences` entry): on such a page an app
+   * data answer of exactly 401 IS the expected not-logged-in answer and
+   * does not refuse `dataOk`. Controller-held — derived from the config
+   * audience table, never supplied by the suite.
+   */
+  anonymous?: boolean;
 }
 
 export interface ObservedPageVisit {
@@ -158,7 +166,17 @@ export function gradePageVisit(input: {
     if (response.remoteAddress === null || !response.proxied) {
       loadsReasons.push('PAGE_LOCALLY_FULFILLED');
       dataReasons.push('PAGE_LOCALLY_FULFILLED');
-    } else if (response.status >= 400) dataReasons.push('PAGE_API_ERROR');
+    } else if (
+      response.status >= 400 &&
+      // Owner decision (0.13): on a page whose audience has NO login
+      // configured, an app data answer of exactly 401 IS the expected
+      // not-logged-in answer. Every other >= 400 status, and 401 on a
+      // page whose audience HAS a login, still refuses — as does a 401
+      // on an unresolved page (`page` undefined fails closed).
+      !(response.status === 401 && page?.anonymous === true)
+    ) {
+      dataReasons.push('PAGE_API_ERROR');
+    }
   }
   return {
     pageId: page?.id ?? null,

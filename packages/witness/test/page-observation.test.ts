@@ -82,6 +82,52 @@ describe('page observation grading', () => {
   });
 });
 
+describe('anonymous pages of audiences without a login', () => {
+  const base = 'http://127.0.0.1';
+  const anonymousPages = [{ id: 'global.page-terms', path: '/terms', anonymous: true }];
+  const api401 = { url: `${base}/api/me`, status: 401, remoteAddress: '127.0.0.1', proxied: true };
+
+  it('accepts exactly 401 as the expected not-logged-in answer', () => {
+    const resolved = gradePageVisit({
+      pages: anonymousPages,
+      visit: { ...clean, url: `${base}/terms`, apiResponses: [{ ...api401 }] },
+    });
+    expect(resolved.pageId).toBe('global.page-terms');
+    expect(resolved.loads.satisfied).toBe(true);
+    expect(resolved.dataOk.satisfied).toBe(true);
+    expect(resolved.dataOk.refusalReasons).toEqual([]);
+    const expected = gradePageVisit({
+      pages: anonymousPages,
+      expectedPage: anonymousPages[0],
+      visit: { ...clean, url: `${base}/terms`, apiResponses: [{ ...api401 }] },
+    });
+    expect(expected.pageId).toBe('global.page-terms');
+    expect(expected.dataOk.satisfied).toBe(true);
+    expect(expected.dataOk.refusalReasons).toEqual([]);
+  });
+
+  it('still refuses a 403 and every other error status on an anonymous page', () => {
+    for (const status of [403, 500]) {
+      const verdict = gradePageVisit({
+        pages: anonymousPages,
+        visit: { ...clean, url: `${base}/terms`, apiResponses: [{ ...api401, status }] },
+      });
+      expect(verdict.dataOk.satisfied).toBe(false);
+      expect(verdict.dataOk.refusalReasons).toContain('PAGE_API_ERROR');
+    }
+  });
+
+  it('still refuses a 401 on a page whose audience has a login', () => {
+    const verdict = gradePageVisit({
+      pages: [{ id: 'tenant.page-secret', path: '/terms' }],
+      visit: { ...clean, url: `${base}/terms`, apiResponses: [{ ...api401 }] },
+    });
+    expect(verdict.pageId).toBe('tenant.page-secret');
+    expect(verdict.dataOk.satisfied).toBe(false);
+    expect(verdict.dataOk.refusalReasons).toEqual(['PAGE_API_ERROR']);
+  });
+});
+
 describe('public login pages and expected-page grading', () => {
   const loginPages = [...pages, { id: 'global.page-login', path: '/login' }];
   const secretPage = { id: 'tenant.page-secret', path: '/secret' };

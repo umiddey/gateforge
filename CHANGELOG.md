@@ -146,6 +146,17 @@
   hand the witness its own route table or point it at another server and
   get witnessed proof.
 
+- **A 401 on pages of an audience without a login counts as the expected
+  not-logged-in answer.** On a page whose `pages.audiences` declaration has
+  no `session:` (no login configured — e.g. a public `global` audience),
+  an app data call answering exactly 401 no longer refuses `page:data-ok`;
+  403 and every other error status still refuse there, and on audiences
+  WITH a login a 401 still refuses. The anonymity bit is controller-held —
+  derived from the audience declaration and registered with the witness on
+  the same verifier-authenticated path as the route table, never supplied
+  by the suite — so the observed and swept channels (and core grading,
+  which trusts the witness verdict) apply the same rule.
+
 - **`gateforge next` resolves the witness verifier key ring like `check`.**
   The key file and keyring locations now feed `next`'s durable-attestation
   verification, not only the `GATEFORGE_WITNESS_VERIFIER_KEY` variable.

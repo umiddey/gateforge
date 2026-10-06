@@ -95,7 +95,7 @@ async function openSession(testId: string): Promise<SessionCredential> {
  * opens — the expected set is a pre-run fact).
  */
 async function registerPageContext(context: {
-  pages: Array<{ id: string; path: string }>;
+  pages: Array<{ id: string; path: string; anonymous?: boolean }>;
   loginRoutes?: string[];
   errorMarkers?: string[];
   appOrigins?: string[];
@@ -161,7 +161,9 @@ describe('page.observed record retention', () => {
     { outcome: 'passed', retained: true },
     { outcome: 'failed', retained: false },
   ])('retains proof only when the test $outcome', async ({ outcome, retained }) => {
-    await registerPageContext({ pages: [{ id: 'tenant.page-orders', path: '/orders/:id' }] });
+    // The controller flag rides the registered route table: an audience
+    // without a configured login marks its pages anonymous (401-friendly).
+    await registerPageContext({ pages: [{ id: 'tenant.page-orders', path: '/orders/:id', anonymous: true }] });
     const session = await openSession(`tests/orders-${outcome}`);
     const debuggingPort = await freePort();
     const browser = await chromium.launch({ args: [`--remote-debugging-port=${debuggingPort}`] });

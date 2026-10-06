@@ -2226,7 +2226,8 @@ async function handleRequest(
         body.pages.some((page) =>
           !isPlainObject(page) ||
           typeof page['id'] !== 'string' || page['id'].length === 0 ||
-          typeof page['path'] !== 'string' || !page['path'].startsWith('/'),
+          typeof page['path'] !== 'string' || !page['path'].startsWith('/') ||
+          !(page['anonymous'] === undefined || typeof page['anonymous'] === 'boolean'),
         ) ||
         !Array.isArray(body.loginRoutes) ||
         body.loginRoutes.some((route) => typeof route !== 'string') ||
@@ -2635,7 +2636,9 @@ async function handleExpectedSet(
         ((page as Record<string, unknown>)['id'] as string).length > 0 &&
         !((page as Record<string, unknown>)['id'] as string).includes(':') &&
         typeof (page as Record<string, unknown>)['path'] === 'string' &&
-        ((page as Record<string, unknown>)['path'] as string).startsWith('/'),
+        ((page as Record<string, unknown>)['path'] as string).startsWith('/') &&
+        ((page as Record<string, unknown>)['anonymous'] === undefined ||
+          typeof (page as Record<string, unknown>)['anonymous'] === 'boolean'),
       );
     const validLoginRoutes =
       Array.isArray(rawLoginRoutes) &&
@@ -2668,7 +2671,7 @@ async function handleExpectedSet(
     if (!validPages || !validLoginRoutes || !validErrorMarkers || !validAppOrigins || !validTamperRisks) {
       throw new HttpError(
         400,
-        'expected-set pageObservation requires pages (non-empty {id, path} rows), loginRoutes ' +
+        'expected-set pageObservation requires pages (non-empty {id, path, anonymous?} rows), loginRoutes ' +
           "('/'-prefixed strings), errorMarkers (non-empty strings), appOrigins (valid origin " +
           'strings), and tamperRisks ({testId: string|null, file, locationFile, line})',
       );
@@ -2677,6 +2680,7 @@ async function handleExpectedSet(
       pages: (rawPages as Array<Record<string, unknown>>).map((page) => ({
         id: page['id'] as string,
         path: page['path'] as string,
+        ...(page['anonymous'] === undefined ? {} : { anonymous: page['anonymous'] as boolean }),
       })),
       loginRoutes: rawLoginRoutes as string[],
       errorMarkers: rawErrorMarkers as string[],

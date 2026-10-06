@@ -220,6 +220,61 @@ describe('real CDP page observer', () => {
     }
   });
 
+  it('accepts a 401 on an anonymous page and refuses a login audience page', async () => {
+    // Real wall-clock quiet window against real Chromium; fake timers cannot
+    // drive the browser's network stack (rule exception, named here).
+    const app = createServer((request, response) => {
+      if (request.url === '/api/me') { response.writeHead(401, { 'content-type': 'application/json' }); response.end('{"error":"not logged in"}'); return; }
+      response.writeHead(200, { 'content-type': 'text/html' });
+      response.end('<!doctype html><html><body><main id="app"></main><script>fetch("/api/me").catch(() => {});</script></body></html>');
+    });
+    app.listen(0, '127.0.0.1');
+    await once(app, 'listening');
+    const appAddress = app.address();
+    if (appAddress === null || typeof appAddress === 'string') throw new Error('app server did not bind');
+    const appOrigin = `http://127.0.0.1:${appAddress.port}`;
+    const debugPort = await freePort();
+    const browser = await chromium.launch({ args: [`--remote-debugging-port=${debugPort}`] });
+    stop = async () => { await browser.close(); await new Promise<void>((resolve) => app.close(() => resolve())); };
+    const visits: Array<{ url: string; observed: ObservedPageVisit; verdict: PageVisitVerdict }> = [];
+    const observer = await observePageBrowser({
+      debuggingPort: debugPort,
+      pages: [
+        { id: 'global.page-terms', path: '/terms', anonymous: true },
+        { id: 'tenant.page-member', path: '/member' },
+      ],
+      loginRoutes: [],
+      errorMarkers: [],
+      appOrigins: [appOrigin],
+      isProxiedExchange: (url) => new URL(url).pathname === '/api/me',
+      quietMs: 300,
+      onVisit: (observed, verdict) => {
+        visits.push({ url: new URL(observed.url).pathname, observed, verdict });
+      },
+    });
+    try {
+      const page = await browser.newPage();
+      const expectVisit = async (path: string) => {
+        const count = visits.length;
+        await page.goto(`${appOrigin}${path}`);
+        await expect.poll(() => visits.length > count, { timeout: 5_000 }).toBe(true);
+        return visits[visits.length - 1]!;
+      };
+      // Observed channel: the visit resolves to its page from the
+      // controller table, so the flag comes from the RESOLVED page.
+      const anonymous = await expectVisit('/terms');
+      expect(anonymous.verdict.pageId).toBe('global.page-terms');
+      expect(anonymous.verdict.dataOk.satisfied).toBe(true);
+      expect(anonymous.verdict.dataOk.refusalReasons).toEqual([]);
+      const refused = await expectVisit('/member');
+      expect(refused.verdict.pageId).toBe('tenant.page-member');
+      expect(refused.verdict.dataOk.satisfied).toBe(false);
+      expect(refused.verdict.dataOk.refusalReasons).toEqual(['PAGE_API_ERROR']);
+    } finally {
+      await observer.close();
+    }
+  });
+
   it('refuses a delayed 500 on a non-/api fetch as an API error too', async () => {
     // Real wall-clock delay: same rationale as the delayed-500 regression.
     // The fetch URL carries no /api/ prefix — classification must come from

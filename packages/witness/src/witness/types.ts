@@ -603,8 +603,12 @@ export interface ExpectedTestRegistration {
  * THIS context or issues no page proof at all.
  */
 export interface PageObservationContext {
-  /** The declared page route table (`{id, path}`). */
-  pages: Array<{ id: string; path: string }>;
+  /**
+   * The declared page route table (`{id, path}`); `anonymous: true` marks
+   * a page whose audience declares no login — exactly-401 app answers are
+   * the expected not-logged-in answer there.
+   */
+  pages: Array<{ id: string; path: string; anonymous?: boolean }>;
   /** Declared login routes (clean declared login visits stay clean). */
   loginRoutes: string[];
   /** Error-screen markers. */
@@ -1194,7 +1198,7 @@ export interface SessionPageObserverRequest {
 /** Supervisor request for the post-suite referee page-gap sweep. */
 export interface PageSweepRequest {
   audience: string;
-  pages: Array<{ id: string; path: string }>;
+  pages: Array<{ id: string; path: string; anonymous?: boolean }>;
   loginRoutes: string[];
   errorMarkers: string[];
   storageState?: unknown;

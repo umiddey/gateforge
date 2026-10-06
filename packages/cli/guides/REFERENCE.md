@@ -1209,6 +1209,15 @@ upgraded. A failed page-observation flush never fails the app's own test:
 it is logged and the page proof stays missing, and the flush call's
 timeout derives from the shared engine budget.
 
+On pages of an audience without a login (no `session:` in its
+`pages.audiences` declaration), an app data answer of exactly 401 counts as
+the expected not-logged-in answer and does not refuse `page:data-ok`; 403
+and every other error status still refuse, and on audiences with a login a
+401 still refuses. Like the rest of the route table, the flag is
+controller-held — derived from the audience declaration, registered with
+the witness, never supplied by the suite — so both proof channels grade it
+identically.
+
 Per test, only a page's LATEST observation (`observationSequence`) counts.
 An early clean visit cannot hide a later refusal by the same test, and
 another passing test's latest clean visit still proves the page. A missing

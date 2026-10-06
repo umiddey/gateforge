@@ -384,8 +384,47 @@ describe('engine browser visit', () => {
       expect(unread.visit.apiResponses.map(({ status }) => status)).toEqual([401]);
       expect(unread.verdict.loads.satisfied).toBe(true);
       expect(unread.verdict.dataOk.satisfied).toBe(false);
-      // The 401 is still an API error under the < 400 rule — and ONLY that.
+      // The 401 is still an API error while the page's audience has a login
+      // (no anonymous flag) — and ONLY that.
       expect(unread.verdict.dataOk.refusalReasons).toEqual(['PAGE_API_ERROR']);
+    } finally {
+      await close();
+      close = undefined;
+    }
+  });
+
+  it('accepts a 401 on an anonymous audience page and refuses a login page', async () => {
+    const app = createServer((request, response) => {
+      if (request.url === '/api/unread401') {
+        response.writeHead(401, { 'content-type': 'text/plain' });
+        response.end('denied');
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'text/html' });
+      response.end(html);
+    });
+    app.listen(0, [127, 0, 0, 1].join('.'));
+    await once(app, 'listening');
+    const address = app.address();
+    if (address === null || typeof address === 'string') throw new Error('app server did not bind');
+    const appBase = `http://${[127, 0, 0, 1].join('.')}:${String(address.port)}`;
+    const manager = new EngineBrowserManager({ launch: (options) => chromium.launch(options) });
+    const page = await manager.pageFor('anonymous-401-test');
+    close = async () => { await manager.closeAll(); await new Promise<void>((resolve) => app.close(() => resolve())); };
+    const pages = [
+      { id: 'global.page-public', path: '/unread401', anonymous: true },
+      { id: 'tenant.page-member', path: '/unread401' },
+    ];
+    try {
+      // Swept channel: the referee drives each route directly, so the flag
+      // arrives on the EXPECTED page. Exactly 401 is the expected
+      // not-logged-in answer only on the session-less audience's page.
+      const anonymous = await driveEngineVisit(page, appBase, pages[0]!, pages);
+      expect(anonymous.verdict.dataOk.satisfied).toBe(true);
+      expect(anonymous.verdict.dataOk.refusalReasons).toEqual([]);
+      const refused = await driveEngineVisit(page, appBase, pages[1]!, pages);
+      expect(refused.verdict.dataOk.satisfied).toBe(false);
+      expect(refused.verdict.dataOk.refusalReasons).toEqual(['PAGE_API_ERROR']);
     } finally {
       await close();
       close = undefined;

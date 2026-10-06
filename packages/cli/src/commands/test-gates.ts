@@ -4157,11 +4157,23 @@ async function runSupervisedTestGatesInner(
   // only an enablement bit — never the grading configuration.
   let pageObservation: PageObservationContext | null = null;
   if (runnerName === 'playwright' && io.env['GATEFORGE_APP_BASE_URL'] !== undefined) {
+    const pageAudiences = config.pages?.audiences ?? [];
     const pages = pipeline.graph.resources.flatMap((resource) => {
       const path = resource.attributes['path'];
-      return resource.kind === 'ui.page' && resource.id !== null && typeof path === 'string'
-        ? [{ id: resource.id, path }]
-        : [];
+      const audience = resource.attributes['audience'];
+      if (!(resource.kind === 'ui.page' && resource.id !== null && typeof path === 'string')) return [];
+      const configured = typeof audience === 'string'
+        ? pageAudiences.find((entry) => entry.name === audience)
+        : undefined;
+      return [{
+        id: resource.id,
+        path,
+        // An audience whose declaration has no login (`session`) makes its
+        // pages anonymous: an exactly-401 app answer is the expected
+        // not-logged-in answer there. Controller-held, like the route
+        // table; an audience missing from the config fails closed.
+        ...(configured !== undefined && configured.session === undefined ? { anonymous: true } : {}),
+      }];
     });
     if (pages.length > 0) {
       pageObservation = {
@@ -4937,8 +4949,19 @@ async function runSupervisedTestGatesInner(
       const pageResources = pipeline.graph.resources.flatMap((resource) => {
         const pagePath = resource.attributes['path'];
         const audience = resource.attributes['audience'];
+        const configured = typeof audience === 'string'
+          ? config.pages?.audiences.find((entry) => entry.name === audience)
+          : undefined;
         return resource.kind === 'ui.page' && resource.id !== null && typeof pagePath === 'string' && typeof audience === 'string'
-          ? [{ id: resource.id, path: pagePath, audience }]
+          ? [{
+              id: resource.id,
+              path: pagePath,
+              audience,
+              // Same controller-held anonymity bit the observed channel
+              // grades: an audience with no configured login makes an
+              // exactly-401 app answer the expected not-logged-in answer.
+              ...(configured !== undefined && configured.session === undefined ? { anonymous: true } : {}),
+            }]
           : [];
       });
       const response = await fetch(`${effectiveWitnessUrl}/records`, { headers: { [RUN_HEADER]: runToken } });
@@ -4973,7 +4996,7 @@ async function runSupervisedTestGatesInner(
         if (cleanPageObligations.has(`${page.id}:page:loads`) &&
           cleanPageObligations.has(`${page.id}:page:data-ok`)) cleanPageIds.add(page.id);
       }
-      const routesByAudience = new Map<string, Array<{ id: string; path: string }>>();
+      const routesByAudience = new Map<string, Array<{ id: string; path: string; anonymous?: boolean }>>();
       for (const page of pageResources) {
         if (cleanPageIds.has(page.id) || config.pages?.exclude?.includes(page.path)) continue;
         const resolved = bindPageRouteParams(
