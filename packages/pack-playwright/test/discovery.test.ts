@@ -297,6 +297,23 @@ describe('static discovery', () => {
         signal.detail.startsWith('PAGE_OBSERVATION_TAMPER_RISK:'),
       )).toBe(true);
     }
+    const root = makeTempDir();
+    writeTree(root, {
+      'e2e/page.spec.ts': [
+        "import { test } from 'playwright/test';",
+        "test('opens orders', async ({ page }) => {",
+        "  await page.route('**/*', route => route.fulfill({ status: 200 }));",
+        '});',
+        '',
+      ].join('\n'),
+    });
+    const result = scanTestFiles({ cwd: root, include: ['e2e/**/*.ts'], exclude: [] });
+    const test = rowFor(result.entries, 'e2e/page.spec.ts');
+    expect(test.facts.fileRouteInterception).toMatchObject({ file: 'e2e/page.spec.ts', line: 3 });
+    const tamperRisk = inferenceOf(test).mockSignals.find((signal) =>
+      signal.detail.startsWith('PAGE_OBSERVATION_TAMPER_RISK:'),
+    );
+    expect(tamperRisk?.detail).toContain('e2e/page.spec.ts:3');
   });
 
   it("a mocked/mock/mocks FOLDER segment mocks its specs (0.9.2)", () => {

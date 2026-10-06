@@ -36,8 +36,20 @@ describe('page observation grading', () => {
     expect(verdict.dataOk.refusalReasons).toContain('PAGE_API_ERROR');
   });
 
-  it('refuses locally fulfilled or unproxied API responses', () => {
-    const verdict = gradePageVisit({ pages, visit: { ...clean, apiResponses: [{ ...clean.apiResponses[0]!, remoteAddress: null, proxied: false }] } });
-    expect(verdict.dataOk.refusalReasons).toContain('PAGE_LOCALLY_FULFILLED');
+  it('refuses app responses without a remote address or matching proxy exchange', () => {
+    const apiResponse = clean.apiResponses[0]!;
+    const locallyFulfilled = gradePageVisit({
+      pages,
+      visit: { ...clean, apiResponses: [{ ...apiResponse, remoteAddress: null, proxied: true }] },
+    });
+    expect(locallyFulfilled.loads.refusalReasons).toContain('PAGE_LOCALLY_FULFILLED');
+    expect(locallyFulfilled.dataOk.refusalReasons).toContain('PAGE_LOCALLY_FULFILLED');
+
+    const unproxied = gradePageVisit({
+      pages,
+      visit: { ...clean, apiResponses: [{ ...apiResponse, remoteAddress: '127.0.0.1', proxied: false }] },
+    });
+    expect(unproxied.loads.refusalReasons).toContain('PAGE_LOCALLY_FULFILLED');
+    expect(unproxied.dataOk.refusalReasons).toContain('PAGE_LOCALLY_FULFILLED');
   });
 });

@@ -19,10 +19,14 @@ interface PageState {
   exceptions: string[];
   apiResponses: ObservedPageVisit['apiResponses'];
   settleTimer: ReturnType<typeof setTimeout> | undefined;
+  settlePromise: Promise<void> | undefined;
+  settleResolve: (() => void) | undefined;
+  pendingResponses: Set<Promise<void>>;
   generation: number;
 }
 
 export interface PageObserver {
+  flush(): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -45,9 +49,21 @@ export async function observePageBrowser(options: PageObserverOptions): Promise<
     }
   };
   const settle = (state: PageState): void => {
+    if (closed) return;
     clearTimeout(state.settleTimer);
+    state.settleResolve?.();
     const generation = ++state.generation;
+    let resolveSettlement!: () => void;
+    let rejectSettlement!: (error: unknown) => void;
+    const settlement = new Promise<void>((resolve, reject) => {
+      resolveSettlement = resolve;
+      rejectSettlement = reject;
+    });
+    void settlement.catch(() => undefined);
+    state.settlePromise = settlement;
+    state.settleResolve = resolveSettlement;
     state.settleTimer = setTimeout(() => {
+      state.settleTimer = undefined;
       void (async () => {
         if (closed || state.generation !== generation || state.page.url() === 'about:blank') return;
         let url = state.page.url();
@@ -59,6 +75,7 @@ export async function observePageBrowser(options: PageObserverOptions): Promise<
         } catch {
           // A destroyed/closing page has no readable settled DOM; page errors remain in the record.
         }
+        if (closed || state.generation !== generation) return;
         const visit: ObservedPageVisit = {
           url,
           navigations: [...state.navigations],
@@ -66,17 +83,42 @@ export async function observePageBrowser(options: PageObserverOptions): Promise<
           domMarkerHit,
           apiResponses: [...state.apiResponses],
         };
-        const verdict = gradePageVisit({ pages: options.pages, loginRoutes: options.loginRoutes, visit });
-        await options.onVisit(visit, verdict);
         state.navigations = [];
         state.exceptions = [];
         state.apiResponses = [];
-      })();
+        const verdict = gradePageVisit({ pages: options.pages, loginRoutes: options.loginRoutes, visit });
+        await options.onVisit(visit, verdict);
+      })().then(resolveSettlement, rejectSettlement).finally(() => {
+        if (state.generation === generation) {
+          state.settlePromise = undefined;
+          state.settleResolve = undefined;
+        }
+      });
     }, options.quietMs ?? 300);
+  };
+  const flush = async (): Promise<void> => {
+    for (;;) {
+      const pending = [...states.values()].flatMap((state) => [
+        ...(state.settlePromise === undefined ? [] : [state.settlePromise]),
+        ...state.pendingResponses,
+      ]);
+      if (pending.length === 0) return;
+      await Promise.all(pending);
+    }
   };
   const watch = (page: Page): void => {
     if (states.has(page)) return;
-    const state: PageState = { page, navigations: [], exceptions: [], apiResponses: [], settleTimer: undefined, generation: 0 };
+    const state: PageState = {
+      page,
+      navigations: [],
+      exceptions: [],
+      apiResponses: [],
+      settleTimer: undefined,
+      settlePromise: undefined,
+      settleResolve: undefined,
+      pendingResponses: new Set(),
+      generation: 0,
+    };
     states.set(page, state);
     page.on('framenavigated', (frame) => {
       if (frame === page.mainFrame()) {
@@ -91,7 +133,7 @@ export async function observePageBrowser(options: PageObserverOptions): Promise<
     page.on('response', (response) => {
       const url = response.url();
       if (!isAppOrigin(url) || !new URL(url).pathname.startsWith('/api/')) return;
-      void (async () => {
+      const pending = (async () => {
         let remoteAddress: string | null = null;
         try {
           remoteAddress = (await response.serverAddr())?.ipAddress ?? null;
@@ -106,6 +148,11 @@ export async function observePageBrowser(options: PageObserverOptions): Promise<
         });
         settle(state);
       })();
+      state.pendingResponses.add(pending);
+      void pending.then(
+        () => state.pendingResponses.delete(pending),
+        () => state.pendingResponses.delete(pending),
+      );
     });
     settle(state);
   };
@@ -121,11 +168,17 @@ export async function observePageBrowser(options: PageObserverOptions): Promise<
   discoverPages();
   const discoveryTimer = setInterval(discoverPages, 100);
   return {
+    flush,
     async close(): Promise<void> {
-      closed = true;
+      if (closed) return;
       clearInterval(discoveryTimer);
-      for (const state of states.values()) clearTimeout(state.settleTimer);
-      await browser.close();
+      try {
+        await flush();
+      } finally {
+        closed = true;
+        for (const state of states.values()) clearTimeout(state.settleTimer);
+        await browser.close();
+      }
     },
   };
 }

@@ -1161,6 +1161,13 @@ export interface SessionPageObserverRequest {
   appOrigins: string[];
 }
 
+/** `POST /sessions/page-observer/flush`: finalizes quiet visits before the fixture closes Chromium. */
+export interface SessionPageObserverFlushRequest {
+  sessionId: string;
+  sessionToken: string;
+  testId: string;
+}
+
 /** The transport handed to `read` (GET-only, engine-mediated). */
 export interface AdapterContext {
   /**

@@ -4275,10 +4275,20 @@ async function runSupervisedTestGatesInner(
           : [{
               testId: entry.parameterIdentity,
               file: entry.file,
-              titlePath: entry.titlePath,
+              locationFile: risk.location.file,
               line: risk.location.line,
             }];
       }) ?? [];
+      const reportedTamperLocations = new Set<string>();
+      for (const risk of tamperRisks) {
+        const key = `${risk.file}\u0000${risk.locationFile}\u0000${risk.line}`;
+        if (reportedTamperLocations.has(key)) continue;
+        reportedTamperLocations.add(key);
+        writeLine(
+          io.stderr,
+          `PAGE_OBSERVATION_TAMPER_RISK: page records refused for tests in ${risk.file}; browser API mutation at ${risk.locationFile}:${risk.line}.`,
+        );
+      }
       suiteEnv['GATEFORGE_PAGE_OBSERVATION_CONFIG'] = JSON.stringify({
         pages,
         loginRoutes: (config.pages?.audiences ?? []).map((audience) => audience.loginRoute),

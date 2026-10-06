@@ -32,6 +32,7 @@ import type {
   SessionPageOriginRequest,
   SessionPageOriginResponse,
   SessionPageObserverRequest,
+  SessionPageObserverFlushRequest,
   SessionResolveRequest,
   SessionResolveResponse,
 } from '../witness/types.js';
@@ -202,6 +203,11 @@ export class WitnessClient {
   /** POST /sessions/page-observer registers the fixture-launched browser with the witness. */
   async registerPageObserver(request: SessionPageObserverRequest): Promise<{ registered: true }> {
     return this.request<{ registered: true }>('/sessions/page-observer', request);
+  }
+
+  /** POST /sessions/page-observer/flush persists every quiet visit before the runner closes Chromium. */
+  async flushPageObserver(request: SessionPageObserverFlushRequest): Promise<{ flushed: true }> {
+    return this.request<{ flushed: true }>('/sessions/page-observer/flush', request);
   }
 
   /**

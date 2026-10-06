@@ -232,6 +232,7 @@ export const test = base.extend<EvidenceFixtures>({
     if (session === null) {
       throw new Error(`No supervisor-issued witness session for ${testInfo.testId}.`);
     }
+    let pageObserverRegistered = false;
     const debuggingPort = browserDebuggingPorts.get(browser);
     const pageObservationConfig = process.env['GATEFORGE_PAGE_OBSERVATION_CONFIG'];
     if (debuggingPort !== undefined && pageObservationConfig !== undefined) {
@@ -240,15 +241,14 @@ export const test = base.extend<EvidenceFixtures>({
         loginRoutes: string[];
         errorMarkers: string[];
         appOrigins: string[];
-        tamperRisks: Array<{ testId: string | null; file: string; titlePath: string[]; line: number }>;
+        tamperRisks: Array<{ testId: string | null; file: string; locationFile: string; line: number }>;
       };
       const file = relative(process.cwd(), testInfo.file).replaceAll('\\', '/');
-      const tamperRisk = configured.tamperRisks.find((risk) =>
-        (risk.testId !== null && risk.testId === testInfo.testId) ||
-        (risk.file === file && risk.titlePath.join('\u0000') === testInfo.titlePath.join('\u0000')),
+      const tamperRisk = configured.tamperRisks.find(
+        (risk) => (risk.testId !== null && risk.testId === testInfo.testId) || risk.file === file,
       );
       if (tamperRisk !== undefined) {
-        console.error(`PAGE_OBSERVATION_TAMPER_RISK: page records refused at ${tamperRisk.file}:${tamperRisk.line}`);
+        console.error(`PAGE_OBSERVATION_TAMPER_RISK: page records refused at ${tamperRisk.locationFile}:${tamperRisk.line}`);
       } else if (Array.isArray(configured.pages) && configured.pages.length > 0) {
         await witness.registerPageObserver({
           sessionId: session.sessionId,
@@ -260,8 +260,17 @@ export const test = base.extend<EvidenceFixtures>({
           errorMarkers: configured.errorMarkers,
           appOrigins: configured.appOrigins,
         });
+        pageObserverRegistered = true;
       }
     }
+    const flushPageObserver = async (): Promise<void> => {
+      if (!pageObserverRegistered) return;
+      await witness.flushPageObserver({
+        sessionId: session.sessionId,
+        sessionToken: session.sessionToken,
+        testId: session.testId,
+      });
+    };
     if (session.proxyUrl !== null) {
       // The reporter rides along so a page that loads ANOTHER origin
       // (a suite base URL Gateforge was never told about) reaches the
@@ -271,11 +280,19 @@ export const test = base.extend<EvidenceFixtures>({
       try {
         await use(page);
       } finally {
-        await reporter.settled();
+        try {
+          await reporter.settled();
+        } finally {
+          await flushPageObserver();
+        }
       }
       return;
     }
-    await use(page);
+    try {
+      await use(page);
+    } finally {
+      await flushPageObserver();
+    }
   },
   surface: async ({}, use): Promise<void> => {
     await use(undefined);

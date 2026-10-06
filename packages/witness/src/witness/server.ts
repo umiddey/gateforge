@@ -254,6 +254,7 @@ import type {
   SessionReleaseRequest,
   SessionResolveRequest,
   SessionPageObserverRequest,
+  SessionPageObserverFlushRequest,
   TestSession,
   TwinShapeReport,
   TwinShapesResponse,
@@ -613,7 +614,7 @@ interface WitnessState {
    * path.
    */
   sessionPageOrigins: Map<string, SessionPageOriginReport>;
-  pageObservers: Map<string, { close(): Promise<void> }>;
+  pageObservers: Map<string, { flush(): Promise<void>; close(): Promise<void> }>;
   pageObservationRecords: Map<string, string[]>;
   /**
    * Trusted run context bound via `POST /run-context` (plan §11.4): the
@@ -2356,6 +2357,17 @@ async function handleRequest(
         if (error instanceof PageObserverRegistrationError) throw new HttpError(error.status, error.message);
         throw error;
       }
+      return;
+    }
+    if (req.method === 'POST' && path === '/sessions/page-observer/flush') {
+      const body = (await readBody(req)) as SessionPageObserverFlushRequest;
+      const session = requireOpenSession(state, body as unknown as Record<string, unknown>);
+      if (body.testId !== session.testId) throw new HttpError(403, 'page observer flush test identity does not match its session');
+      const observer = state.pageObservers.get(session.sessionId);
+      if (observer === undefined) throw new HttpError(409, 'page observer is not registered for this session');
+      await observer.flush();
+      session.activity += 1;
+      sendJson(res, 200, { flushed: true as const });
       return;
     }
     if (req.method === 'POST' && path === '/sessions/intervals/open') {

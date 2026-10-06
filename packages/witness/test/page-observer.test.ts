@@ -4,7 +4,7 @@ import { once } from 'node:events';
 import { chromium } from 'playwright';
 import { afterEach, describe, expect, it } from 'vitest';
 import { observePageBrowser } from '../src/witness/page-observer.js';
-import type { PageVisitVerdict } from '../src/witness/page-observation.js';
+import type { ObservedPageVisit, PageVisitVerdict } from '../src/witness/page-observation.js';
 
 const html = `<!doctype html><html><body><main id="app"></main><script>
 const p = location.pathname;
@@ -13,7 +13,7 @@ async function render() {
   if (p === '/login') { document.querySelector('#app').textContent = 'Login'; return; }
   if (p === '/crash') { setTimeout(() => { throw new Error('render crashed'); }, 0); return; }
   if (p === '/broken') { document.querySelector('#app').textContent = 'Something went wrong'; return; }
-  const api = p === '/bad' ? '/api/bad' : p === '/local' ? '/api/local' : '/api/orders';
+  const api = p === '/bad' ? '/api/bad' : p === '/local' ? '/api/local' : p === '/unproxied' ? '/api/unproxied' : '/api/orders';
   const response = await fetch(api);
   document.querySelector('#app').textContent = 'Orders ' + response.status;
 }
@@ -49,7 +49,7 @@ describe('real CDP page observer', () => {
     const debugPort = await freePort();
     const browser = await chromium.launch({ args: [`--remote-debugging-port=${debugPort}`] });
     stop = async () => { await browser.close(); await new Promise<void>((resolve) => app.close(() => resolve())); };
-    const visits: Array<{ url: string; verdict: PageVisitVerdict }> = [];
+    const visits: Array<{ url: string; observed: ObservedPageVisit; verdict: PageVisitVerdict }> = [];
     const observer = await observePageBrowser({
       debuggingPort: debugPort,
       pages: [
@@ -58,14 +58,15 @@ describe('real CDP page observer', () => {
         { id: 'tenant.page-crash', path: '/crash' },
         { id: 'tenant.page-broken', path: '/broken' },
         { id: 'tenant.page-local', path: '/local' },
+        { id: 'tenant.page-unproxied', path: '/unproxied' },
       ],
       loginRoutes: ['/login'],
       errorMarkers: ['Something went wrong'],
       appOrigins: [appOrigin],
-      isProxiedExchange: (url) => !new URL(url).pathname.endsWith('/local'),
+      isProxiedExchange: (url) => !['/api/local', '/api/unproxied'].includes(new URL(url).pathname),
       quietMs: 300,
       onVisit: (visit, verdict) => {
-        visits.push({ url: new URL(visit.url).pathname, verdict });
+        visits.push({ url: new URL(visit.url).pathname, observed: visit, verdict });
       },
     });
     const context = await browser.newContext();
@@ -84,9 +85,17 @@ describe('real CDP page observer', () => {
       expect((await expectVisit('/broken')).verdict.loads.refusalReasons).toContain('PAGE_ERROR_MARKER');
       expect((await expectVisit('/bad')).verdict.dataOk.refusalReasons).toContain('PAGE_API_ERROR');
       await page.route('**/api/local', (route) => route.fulfill({ status: 200, body: '{}' }));
-      const locallyFulfilled = (await expectVisit('/local')).verdict;
-      expect(locallyFulfilled.loads.refusalReasons).toContain('PAGE_LOCALLY_FULFILLED');
-      expect(locallyFulfilled.dataOk.refusalReasons).toContain('PAGE_LOCALLY_FULFILLED');
+      const locallyFulfilled = await expectVisit('/local');
+      expect(locallyFulfilled.verdict.loads.refusalReasons).toContain('PAGE_LOCALLY_FULFILLED');
+      expect(locallyFulfilled.verdict.dataOk.refusalReasons).toContain('PAGE_LOCALLY_FULFILLED');
+      expect(locallyFulfilled.observed.apiResponses[0]?.remoteAddress).toBeNull();
+      expect(locallyFulfilled.observed.apiResponses[0]?.proxied).toBe(false);
+
+      const unproxied = await expectVisit('/unproxied');
+      expect(unproxied.observed.apiResponses[0]?.remoteAddress).not.toBeNull();
+      expect(unproxied.observed.apiResponses[0]?.proxied).toBe(false);
+      expect(unproxied.verdict.loads.refusalReasons).toContain('PAGE_LOCALLY_FULFILLED');
+      expect(unproxied.verdict.dataOk.refusalReasons).toContain('PAGE_LOCALLY_FULFILLED');
     } finally {
 
       await observer.close();
