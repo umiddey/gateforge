@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- **Frontend detector: a trailing query-string hole is read as a query, not a
+  path segment.** Calls written like
+  `` `.../meters${qs ? `?code=${code}` : ''}` `` (also the `&&`, `|| ''`, and
+  const-bound forms, including function-local `const`) used to render their
+  unresolved hole as a positional slot glued to the last path segment
+  (`meters${}`), so the call failed to join its backend route and was reported
+  unwired. When the template's last hole provably evaluates only to query or
+  fragment text (empty, `?…`, or `#…`), it now renders as a bare `?` and
+  normalization strips the query, so the call joins its route. Anything not
+  provably a query suffix — a hole mid-path, a trailing path value, a branch
+  starting with `/` — is unchanged.
+
 ## 0.13.0
 
 - **Pages-family adoption for already-adopted repositories (0.13.0).**
