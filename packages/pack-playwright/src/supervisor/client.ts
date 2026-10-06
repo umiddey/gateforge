@@ -240,14 +240,16 @@ export class SupervisorClient {
     const body = init.payload === undefined ? undefined : JSON.stringify(init.payload);
     const headers: Record<string, string> = { ...this.headers() };
     if (body !== undefined) headers['content-length'] = String(Buffer.byteLength(body));
-    const transport: typeof http = target.protocol === 'https:' ? https : http;
-    const { promise, resolve, reject } = Promise.withResolvers<{ status: number; ok: boolean; bodyText: string }>();
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), init.timeoutMs);
-    const request = transport.request(
-      target,
-      { method: init.method, headers, signal: controller.signal },
-      (response) => {
+    const isHttps = target.protocol === 'https:';
+    // An executor-form promise, deliberately: the settled-resolver
+    // Promise static is Node 22+ and every package pins node >=20.
+    return new Promise((resolve, reject) => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), init.timeoutMs);
+      // One options shape for both schemes: https.RequestOptions extends
+      // http.RequestOptions with only optional TLS fields.
+      const options: https.RequestOptions = { method: init.method, headers, signal: controller.signal };
+      const onResponse = (response: http.IncomingMessage): void => {
         const chunks: Buffer[] = [];
         response.on('data', (chunk: Buffer) => chunks.push(chunk));
         response.on('error', (error: Error) => {
@@ -263,14 +265,16 @@ export class SupervisorClient {
             bodyText: Buffer.concat(chunks).toString('utf8'),
           });
         });
-      },
-    );
-    request.on('error', (error: Error) => {
-      clearTimeout(timer);
-      reject(error);
+      };
+      const request = isHttps
+        ? https.request(target, options, onResponse)
+        : http.request(target, options, onResponse);
+      request.on('error', (error: Error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+      request.end(body);
     });
-    request.end(body);
-    return promise;
   }
 
   /** The supervisor headers (run token + verifier key). */
