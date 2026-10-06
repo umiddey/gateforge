@@ -74,6 +74,7 @@ import {
   GateReceiptSchema,
   ExecutionResultSchema,
   executionBoundaryDigestOf,
+  evaluateObligation,
   LOCAL_UNISOLATED_BOUNDARY,
   humanMessage,
   isWitnessedRecord,
@@ -170,6 +171,7 @@ import {
   type ExpectedSetResponse,
   type NativeInstance,
   type NativeListResult,
+  type PageObservationContext,
   type RunnerEnumeration,
   type RunnerExecuteRequest,
   type RunnerTestIdentity,
@@ -4148,6 +4150,42 @@ async function runSupervisedTestGatesInner(
       (row) => `${row.planned.project ?? ''}\u0000${row.planned.file}\u0000${row.planned.titlePath.join('>')}`,
     ),
   );
+  // Controller-held page-observation context (0.13 authority cutover):
+  // computed ONCE here from engine-owned inputs (derived graph, config,
+  // trusted catalog) and registered with the expected set through the
+  // verifier-authenticated supervisor surface. The suite child receives
+  // only an enablement bit — never the grading configuration.
+  let pageObservation: PageObservationContext | null = null;
+  if (runnerName === 'playwright' && io.env['GATEFORGE_APP_BASE_URL'] !== undefined) {
+    const pages = pipeline.graph.resources.flatMap((resource) => {
+      const path = resource.attributes['path'];
+      return resource.kind === 'ui.page' && resource.id !== null && typeof path === 'string'
+        ? [{ id: resource.id, path }]
+        : [];
+    });
+    if (pages.length > 0) {
+      pageObservation = {
+        pages,
+        loginRoutes: (config.pages?.audiences ?? []).map((audience) => audience.loginRoute),
+        errorMarkers: config.pages?.errorMarkers ?? [],
+        appOrigins: [new URL(io.env['GATEFORGE_APP_BASE_URL']).origin],
+        tamperRisks:
+          catalog?.entries.flatMap((entry) => {
+            const risk = entry.suppressionSignals.find((signal) =>
+              signal.kind === 'mock' && signal.detail.startsWith('PAGE_OBSERVATION_TAMPER_RISK:'),
+            );
+            return risk === undefined
+              ? []
+              : [{
+                  testId: entry.parameterIdentity,
+                  file: entry.file,
+                  locationFile: risk.location.file,
+                  line: risk.location.line,
+                }];
+          }) ?? [],
+      };
+    }
+  }
   const registered = await (async (): Promise<ExpectedSetResponse> => {
     if (runnerName !== 'playwright') {
       // The contract enumeration (fixed above, before the policy gate
@@ -4169,7 +4207,10 @@ async function runSupervisedTestGatesInner(
             ? { observationOnly: true }
             : {}),
         }));
-      return supervisor.registerExpectedSet({ tests });
+      return supervisor.registerExpectedSet({
+        tests,
+        ...(pageObservation === null ? {} : { pageObservation }),
+      });
     }
     const enumeration = await listNativePlaywrightTests({ cwd: io.cwd });
     // A named run registers the NAMED tests, for the same reason it
@@ -4208,6 +4249,7 @@ async function runSupervisedTestGatesInner(
           ? { observationOnly: true }
           : {}),
       })),
+      ...(pageObservation === null ? {} : { pageObservation }),
     });
   })();
   // Progress goes to stderr: with --format json, stdout carries ONLY the
@@ -4255,50 +4297,27 @@ async function runSupervisedTestGatesInner(
     const value = io.env[name];
     if (typeof value === 'string' && value !== '') suiteEnv[name] = value;
   }
-  if (runnerName === 'playwright' && io.env['GATEFORGE_APP_BASE_URL'] !== undefined) {
-    const pages = pipeline.graph.resources.flatMap((resource) => {
-      const path = resource.attributes['path'];
-      return resource.kind === 'ui.page' && resource.id !== null && typeof path === 'string'
-        ? [{ id: resource.id, path }]
-        : [];
-    });
-    if (pages.length > 0) {
-      const appOrigin = new URL(io.env['GATEFORGE_APP_BASE_URL']).origin;
+  // Page-observation advisories + enablement (0.13 authority cutover):
+  // the child learns ONLY that observation is enabled — the grading
+  // configuration itself was registered with the expected set above, so
+  // a suite-controlled variable can disable observation but can never
+  // enable false proof.
+  if (pageObservation !== null) {
+    writeLine(
+      io.stderr,
+      'PAGE_OBSERVATION_FIXTURE_REQUIRED: page records are issued only for tests using the Gateforge Playwright fixture; other tests produce no page-observation records.',
+    );
+    const reportedTamperLocations = new Set<string>();
+    for (const risk of pageObservation.tamperRisks) {
+      const key = `${risk.file}\u0000${risk.locationFile}\u0000${risk.line}`;
+      if (reportedTamperLocations.has(key)) continue;
+      reportedTamperLocations.add(key);
       writeLine(
         io.stderr,
-        'PAGE_OBSERVATION_FIXTURE_REQUIRED: page records are issued only for tests using the Gateforge Playwright fixture; other tests produce no page-observation records.',
+        `PAGE_OBSERVATION_TAMPER_RISK: page records refused for tests in ${risk.file}; browser API mutation at ${risk.locationFile}:${risk.line}.`,
       );
-      const tamperRisks = catalog?.entries.flatMap((entry) => {
-        const risk = entry.suppressionSignals.find((signal) =>
-          signal.kind === 'mock' && signal.detail.startsWith('PAGE_OBSERVATION_TAMPER_RISK:'),
-        );
-        return risk === undefined
-          ? []
-          : [{
-              testId: entry.parameterIdentity,
-              file: entry.file,
-              locationFile: risk.location.file,
-              line: risk.location.line,
-            }];
-      }) ?? [];
-      const reportedTamperLocations = new Set<string>();
-      for (const risk of tamperRisks) {
-        const key = `${risk.file}\u0000${risk.locationFile}\u0000${risk.line}`;
-        if (reportedTamperLocations.has(key)) continue;
-        reportedTamperLocations.add(key);
-        writeLine(
-          io.stderr,
-          `PAGE_OBSERVATION_TAMPER_RISK: page records refused for tests in ${risk.file}; browser API mutation at ${risk.locationFile}:${risk.line}.`,
-        );
-      }
-      suiteEnv['GATEFORGE_PAGE_OBSERVATION_CONFIG'] = JSON.stringify({
-        pages,
-        loginRoutes: (config.pages?.audiences ?? []).map((audience) => audience.loginRoute),
-        errorMarkers: config.pages?.errorMarkers ?? [],
-        appOrigins: [appOrigin],
-        tamperRisks,
-      });
     }
+    suiteEnv['GATEFORGE_PAGE_OBSERVATION_ENABLED'] = '1';
   }
   if (declaredRunnerEnvNames !== undefined) {
     for (const name of declaredRunnerEnvNames) {
@@ -4929,18 +4948,30 @@ async function runSupervisedTestGatesInner(
         ? ledger.records
         : [];
       const createdEntityIds = createdEntityIdsFromRecords(priorRecords);
+      const observedPageRecords = priorRecords.filter((raw) => {
+        const parsed = EvidenceRecordSchema.safeParse(raw);
+        if (!parsed.success || parsed.data.kind !== 'page.observed' ||
+          parsed.data.origin !== 'engine-observed' || parsed.data.trust !== 'witnessed') return false;
+        const payload = parsed.data.payload;
+        return payload !== null && typeof payload === 'object' && !Array.isArray(payload) &&
+          'channel' in payload && payload.channel === 'observed';
+      });
+      // Gap selection uses the same latest-observation semantics as final grading.
+      const pageContext = {
+        claims: [], records: observedPageRecords, waivers: [],
+        classification: null, now: pipeline.now,
+      };
+      const cleanPageObligations = new Set<string>();
+      for (const obligation of pipeline.policy.obligations) {
+        if ((obligation.contract === 'page:loads' || obligation.contract === 'page:data-ok') &&
+          evaluateObligation(obligation, pageContext).verdict === 'satisfied') {
+          cleanPageObligations.add(obligation.id);
+        }
+      }
       const cleanPageIds = new Set<string>();
-      for (const record of priorRecords) {
-        if (record === null || typeof record !== 'object' || !('kind' in record) || record.kind !== 'page.observed' ||
-          !('origin' in record) || record.origin !== 'engine-observed' || !('payload' in record) ||
-          record.payload === null || typeof record.payload !== 'object' || !('channel' in record.payload) ||
-          record.payload.channel !== 'observed' || !('routeId' in record.payload) || typeof record.payload.routeId !== 'string') continue;
-        const payload = record.payload;
-        const loadsClean = 'loads' in payload && payload.loads !== null && typeof payload.loads === 'object' &&
-          'satisfied' in payload.loads && payload.loads.satisfied === true;
-        const dataClean = 'dataOk' in payload && payload.dataOk !== null && typeof payload.dataOk === 'object' &&
-          'satisfied' in payload.dataOk && payload.dataOk.satisfied === true;
-        if (loadsClean && dataClean) cleanPageIds.add(payload.routeId);
+      for (const page of pageResources) {
+        if (cleanPageObligations.has(`${page.id}:page:loads`) &&
+          cleanPageObligations.has(`${page.id}:page:data-ok`)) cleanPageIds.add(page.id);
       }
       const routesByAudience = new Map<string, Array<{ id: string; path: string }>>();
       for (const page of pageResources) {

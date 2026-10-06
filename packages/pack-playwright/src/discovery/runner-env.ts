@@ -108,7 +108,12 @@ export const RUNNER_GATEFORGE_ALLOWLIST: readonly string[] = [
   'GATEFORGE_RUN_TOKEN',
   'GATEFORGE_WITNESS_URL',
   'GATEFORGE_APP_BASE_URL',
-  'GATEFORGE_PAGE_OBSERVATION_CONFIG',
+  // Authority cutover (0.13): enablement ONLY. The grading configuration
+  // (route table, login/error markers, app origins, tamper risks) is
+  // supervisor-registered on the witness and never crosses to the child,
+  // so a suite-controlled variable can disable observation but can never
+  // enable false proof.
+  'GATEFORGE_PAGE_OBSERVATION_ENABLED',
   'GATEFORGE_TARGET_BASE_URL',
   'GATEFORGE_TARGET_FINGERPRINT',
   'GATEFORGE_REPORTER_FAIL_RUN',

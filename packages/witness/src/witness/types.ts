@@ -595,10 +595,37 @@ export interface ExpectedTestRegistration {
   observationOnly?: boolean;
 }
 
+/**
+ * The controller-held page-observation context (0.13 authority cutover):
+ * the route table, login/errorMarker grading inputs, trusted app origins,
+ * and static browser-API tamper risks the SUPERVISOR registers before the
+ * run. The suite never supplies any of it — the registrar grades with
+ * THIS context or issues no page proof at all.
+ */
+export interface PageObservationContext {
+  /** The declared page route table (`{id, path}`). */
+  pages: Array<{ id: string; path: string }>;
+  /** Declared login routes (clean declared login visits stay clean). */
+  loginRoutes: string[];
+  /** Error-screen markers. */
+  errorMarkers: string[];
+  /** The ONLY app origins a matched page's FINAL URL may carry. */
+  appOrigins: string[];
+  /** Static browser-API mutation risks keyed by catalog file/test identity. */
+  tamperRisks: Array<{ testId: string | null; file: string; locationFile: string; line: number }>;
+}
+
 /** `POST /runs/expected-set` body (SUPERVISOR ONLY). */
 export interface ExpectedSetRequest {
   /** The expected tests, fixed before the run. */
   tests: readonly ExpectedTestRegistration[];
+  /**
+   * The controller-held page-observation context (0.13 authority
+   * cutover), bound once alongside the expected set. Absent means the
+   * run has no page-observation context and the witness issues no
+   * browser-observed page proof.
+   */
+  pageObservation?: PageObservationContext;
 }
 
 /** `POST /runs/expected-set` response. */
@@ -1149,16 +1176,18 @@ export interface SessionPageOriginResponse {
   recorded: true;
 }
 
-/** `POST /sessions/page-observer`: fixture registers its witnessed Chromium debugging port. */
+/**
+ * `POST /sessions/page-observer`: fixture registers its witnessed Chromium
+ * debugging port. SESSION CREDENTIALS ONLY (0.13 authority cutover) — the
+ * grading configuration (routes, login/error markers, app origins, tamper
+ * risks) is controller-held via `/runs/expected-set` and is never accepted
+ * from the suite.
+ */
 export interface SessionPageObserverRequest {
   sessionId: string;
   sessionToken: string;
   testId: string;
   debuggingPort: number;
-  pages: Array<{ id: string; path: string }>;
-  loginRoutes: string[];
-  errorMarkers: string[];
-  appOrigins: string[];
 }
 
 

@@ -56,6 +56,7 @@ export const routes = <>
   <Route path="/crash" element={<TenantGuard><Crash /></TenantGuard>} />
   <Route path="/broken" element={<TenantGuard><Broken /></TenantGuard>} />
   <Route path="/bad" element={<TenantGuard><Bad /></TenantGuard>} />
+  <Route path="/slow" element={<TenantGuard><Customers /></TenantGuard>} />
  </>;
 `;
 const PLAYWRIGHT_CONFIG = `import { defineConfig } from 'playwright/test';
@@ -212,12 +213,18 @@ async function startPagesApp(): Promise<{ server: Server; url: string }> {
             : path === '/api/bad'
               ? 'Bad data'
               : 'Unknown';
-      response.writeHead(status, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({ label }));
+      const sendApiResponse = (): void => {
+        response.writeHead(status, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ label }));
+      };
+      // Both proof channels must wait for data, not credit the initial loading screen.
+      if (path === '/api/bad' || path === '/api/orders') setTimeout(sendApiResponse, 1_200);
+      else sendApiResponse();
       return;
     }
-    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-    response.end(`<!doctype html><html><body><main>Loading</main><script>
+    const sendPage = (): void => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(`<!doctype html><html><body><main>Loading</main><script>
 const path = location.pathname;
 if (path === '/secret') {
   history.replaceState({}, '', '/login');
@@ -233,6 +240,10 @@ if (path === '/secret') {
   });
 }
 </script></body></html>`);
+    };
+    // Cross-process deadline regression: fake timers cannot advance the spawned supervisor's RPC clock.
+    if (path === '/slow') setTimeout(sendPage, 6_000);
+    else sendPage();
   });
   app.listen(0, [127, 0, 0, 1].join('.'));
   await once(app, 'listening');
@@ -346,6 +357,75 @@ describe('page observations through a sealed test-gates run', () => {
       }
     });
   }, 240_000);
+  it('cannot prove another route by rewriting suite-side page observation configuration', async () => {
+    await withTempRepo({}, async (repo) => {
+      installPagesRepo(repo, ORDER_ROUTES, {
+        'specs/config-forgery.spec.ts': `import { createHash } from 'node:crypto';
+import { expect, test } from '@gate-forge/pack-playwright';
+const app = process.env.GATEFORGE_APP_BASE_URL;
+// Genuine old/new authority regression: ALWAYS forge the legacy env
+// bridge input when the app env exists. Scrubbed --list inventories have
+// no app env, so the forgery stays a registered test there without an
+// inventory crash.
+if (app !== undefined) {
+  // The page id the stable detector algorithm derives for the DECLARED
+  // orders route (audience 'tenant', path '/orders/:id').
+  const ordersId =
+    'tenant.page-orders-id-' + createHash('sha256').update('tenant:/orders/:id').digest('hex').slice(0, 8);
+  const forged = {
+    pages: [{ id: ordersId, path: '/customers' }],
+    loginRoutes: [],
+    errorMarkers: [],
+    appOrigins: [new URL(app).origin],
+    tamperRisks: [],
+  };
+  if (process.env.GATEFORGE_PAGE_OBSERVATION_CONFIG !== undefined) {
+    // Old authority: the fixture grades this config, so rewriting it in
+    // place falsely proves the orders page from the customers visit.
+    const configured = JSON.parse(process.env.GATEFORGE_PAGE_OBSERVATION_CONFIG) as typeof forged;
+    configured.pages = forged.pages;
+    process.env.GATEFORGE_PAGE_OBSERVATION_CONFIG = JSON.stringify(configured);
+  } else {
+    // Cutover authority: the bridge is gone, so CONSTRUCT the full
+    // legacy payload anyway — new code must receive it and ignore it.
+    process.env.GATEFORGE_PAGE_OBSERVATION_CONFIG = JSON.stringify(forged);
+  }
+}
+test('visits customers instead of the promised orders page', async ({ page }) => {
+  await page.goto(app! + '/customers');
+  await expect(page.locator('main')).toHaveText('Customers ready');
+});
+`,
+      });
+      repo.git(['add', '-A']);
+      repo.git(['commit', '--no-gpg-sign', '--quiet', '-m', 'neutral page forgery fixture']);
+      const app = await startPagesApp();
+      const proxy = await startAttestationProxy(app.url, FINGERPRINT);
+      try {
+        const keyring = operatorEnvironment();
+        const env = {
+          ...keyring.env,
+          GATEFORGE_APP_BASE_URL: proxy.url,
+          GATEFORGE_TARGET_BASE_URL: proxy.url,
+          GATEFORGE_TARGET_FINGERPRINT: FINGERPRINT,
+          GATEFORGE_APPROVED_POLICY_DIGEST: trustedPolicyDigestForConfig(repo.root, loadConfigAt(repo.root)),
+        };
+        const run = await runCliProcess(
+          repo.root, ['test-gates', '--changed', '--scope', 'full', '--format', 'json'], env,
+        );
+        const report = parseReport(run.stdout, run);
+        expect(verdictFor(report, 'tenant.page-orders-', 'page:loads').verdict).not.toBe('satisfied');
+        expect(verdictFor(report, 'tenant.page-orders-', 'page:data-ok').verdict).not.toBe('satisfied');
+        expect(run.code).toBe(1);
+        // The forged test itself ran green: the refusal is the authority's
+        // verdict, never a broken enumeration or a crashed test.
+        expect(report.execution?.selectedTests).toMatchObject({ selected: 1, passed: 1, failed: 0 });
+      } finally {
+        await proxy.stop();
+        await new Promise<void>((resolve) => app.server.close(() => resolve()));
+      }
+    });
+  }, 240_000);
   it('refuses bounced, crashed, error-screen, API-500, tampered, and failing visits', async () => {
     await withTempRepo({}, async (repo) => {
       installPagesRepo(repo);
@@ -439,6 +519,11 @@ describe('page observations through a sealed test-gates run', () => {
         expect(records.find((record) => record.obligationId?.startsWith('tenant.page-unopened-'))?.payload?.channel).toBe('swept');
         expect(records.find((record) => record.obligationId?.startsWith('tenant.page-bound-'))?.payload?.channel).toBe('swept');
         expect(report.pages?.find((entry) => entry.path === '/unopened')).toMatchObject({
+          channel: 'swept',
+          test: 'referee',
+          status: 'satisfied',
+        });
+        expect(report.pages?.find((entry) => entry.path === '/slow')).toMatchObject({
           channel: 'swept',
           test: 'referee',
           status: 'satisfied',

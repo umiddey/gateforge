@@ -16,7 +16,6 @@
  */
 import { chromium, firefox, webkit } from 'playwright';
 import type { Page } from 'playwright/test';
-import { relative } from 'node:path';
 import { createServer as createTcpServer } from 'node:net';
 import { once } from 'node:events';
 import type { Browser } from 'playwright/test';
@@ -234,33 +233,31 @@ export const test = base.extend<EvidenceFixtures>({
     }
     let pageObserverRegistered = false;
     const debuggingPort = browserDebuggingPorts.get(browser);
-    const pageObservationConfig = process.env['GATEFORGE_PAGE_OBSERVATION_CONFIG'];
-    if (debuggingPort !== undefined && pageObservationConfig !== undefined) {
-      const configured = JSON.parse(pageObservationConfig) as {
-        pages: Array<{ id: string; path: string }>;
-        loginRoutes: string[];
-        errorMarkers: string[];
-        appOrigins: string[];
-        tamperRisks: Array<{ testId: string | null; file: string; locationFile: string; line: number }>;
-      };
-      const file = relative(process.cwd(), testInfo.file).replaceAll('\\', '/');
-      const tamperRisk = configured.tamperRisks.find(
-        (risk) => (risk.testId !== null && risk.testId === testInfo.testId) || risk.file === file,
-      );
-      if (tamperRisk !== undefined) {
-        console.error(`PAGE_OBSERVATION_TAMPER_RISK: page records refused at ${tamperRisk.locationFile}:${tamperRisk.line}`);
-      } else if (Array.isArray(configured.pages) && configured.pages.length > 0) {
+    // Authority cutover (0.13): the request carries ONLY session
+    // credentials + the debugging port. Grading configuration is
+    // controller-held (supervisor-registered page-observation context);
+    // a registration the witness refuses (tampered session, unbound
+    // context) is surfaced and never retried from suite-side state.
+    if (debuggingPort !== undefined && process.env['GATEFORGE_PAGE_OBSERVATION_ENABLED'] === '1') {
+      try {
         await witness.registerPageObserver({
           sessionId: session.sessionId,
           sessionToken: session.sessionToken,
           testId: session.testId,
           debuggingPort,
-          pages: configured.pages,
-          loginRoutes: configured.loginRoutes,
-          errorMarkers: configured.errorMarkers,
-          appOrigins: configured.appOrigins,
         });
         pageObserverRegistered = true;
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        if (detail.startsWith('PAGE_OBSERVATION_TAMPER_RISK')) {
+          // The WITNESS refused this session's records from the
+          // controller context (its decision is not env-mutable here);
+          // surface it and continue — the page obligations stay
+          // unproven, never satisfied by a tampered session.
+          console.error(detail);
+        } else {
+          throw error;
+        }
       }
     }
     const flushPageObserver = async (): Promise<void> => {

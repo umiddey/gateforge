@@ -1,6 +1,6 @@
 import type { ServerResponse } from 'node:http';
 import type { BrowserContextOptions } from 'playwright';
-import type { SessionPageObserverRequest } from './types.js';
+import type { PageObservationContext, SessionPageObserverRequest } from './types.js';
 import { driveEngineVisit, type EngineBrowserManager } from './browser.js';
 import { observePageBrowser, type PageObserver } from './page-observer.js';
 import type { PageRoute, PageVisitVerdict } from './page-observation.js';
@@ -8,6 +8,8 @@ export interface PageObserverRegistrationState {
   pageObservers: Map<string, PageObserver>;
   pageObservationRecords: Map<string, string[]>;
   observed: Array<{ seq: number; sessionId: string | null; path: string; status: number }>;
+  /** Controller-held page-observation context (0.13 authority cutover). */
+  pageObservation: PageObservationContext | null;
 }
 
 export class PageObserverRegistrationError extends Error {
@@ -21,7 +23,13 @@ export async function registerPageObserver(input: {
   state: PageObserverRegistrationState;
   response: ServerResponse;
   body: SessionPageObserverRequest;
-  requireSession(body: Record<string, unknown>): { sessionId: string; testId: string; activity: number };
+  requireSession(body: Record<string, unknown>): {
+    sessionId: string;
+    testId: string;
+    activity: number;
+    /** The supervisor-registered spec file this session was minted for. */
+    registeredFile: string | null;
+  };
   issueRecord(obligationId: string, testId: string, payload: unknown): string;
 }): Promise<void> {
   const { state, body } = input;
@@ -30,29 +38,44 @@ export async function registerPageObserver(input: {
   if (!Number.isInteger(body.debuggingPort) || body.debuggingPort < 1 || body.debuggingPort > 65535) {
     throw new PageObserverRegistrationError('page observer debuggingPort must be a valid TCP port', 400);
   }
-  if (!Array.isArray(body.pages) || body.pages.some((page) =>
-    typeof page.id !== 'string' || page.id.length === 0 || page.id.includes(':') ||
-    typeof page.path !== 'string' || !page.path.startsWith('/'),
-  )) throw new PageObserverRegistrationError('page observer requires a valid page route table', 400);
-  if (!Array.isArray(body.loginRoutes) || body.loginRoutes.some((path) => typeof path !== 'string' || !path.startsWith('/')) ||
-    !Array.isArray(body.errorMarkers) || body.errorMarkers.some((marker) => typeof marker !== 'string' || marker.length === 0) ||
-    !Array.isArray(body.appOrigins) || body.appOrigins.some((origin) => {
-      try { return new URL(origin).origin !== origin; } catch { return true; }
-    })) {
-    throw new PageObserverRegistrationError('page observer configuration is invalid', 400);
+  // Authority cutover (0.13): the request carries NOTHING but session
+  // credentials and the debugging port. Every grading input comes from
+  // the supervisor-registered context; without one there is no page
+  // proof, whatever the suite body or environment claims.
+  const context = state.pageObservation;
+  if (context === null) {
+    throw new PageObserverRegistrationError(
+      'page observation refused: no controller-registered page-observation context exists for this run',
+      409,
+    );
+  }
+  // Static browser-API tamper risks match the SUPERVISOR-opened session
+  // identity (its registered spec file, or an applicable trusted test id)
+  // — never suite metadata, and never a mutable environment variable.
+  const tamperRisk = context.tamperRisks.find((risk) =>
+    (risk.testId !== null && risk.testId === session.testId) ||
+    (session.registeredFile !== null && risk.file === session.registeredFile),
+  );
+  if (tamperRisk !== undefined) {
+    throw new PageObserverRegistrationError(
+      'PAGE_OBSERVATION_TAMPER_RISK: page records refused for this test; browser API mutation at ' +
+        `${tamperRisk.locationFile}:${String(tamperRisk.line)}`,
+      403,
+    );
   }
   if (state.pageObservers.has(session.sessionId)) {
     throw new PageObserverRegistrationError('page observer is already registered for this session', 409);
   }
   const usedExchanges = new Set<number>();
+  let observationSequence = 0;
   let observer: PageObserver;
   try {
     observer = await observePageBrowser({
       debuggingPort: body.debuggingPort,
-      pages: body.pages,
-      loginRoutes: body.loginRoutes,
-      errorMarkers: body.errorMarkers,
-      appOrigins: body.appOrigins,
+      pages: context.pages,
+      loginRoutes: context.loginRoutes,
+      errorMarkers: context.errorMarkers,
+      appOrigins: context.appOrigins,
       isProxiedExchange(url, status) {
         const path = new URL(url).pathname;
         const exchange = state.observed.find((candidate) =>
@@ -64,20 +87,47 @@ export async function registerPageObserver(input: {
         return true;
       },
       onVisit(visit, verdict: PageVisitVerdict) {
+        // An unmatched observation (out-of-table or undeclared-login page)
+        // must never mint obligation ids like `null:page:loads`; a matched
+        // page keeps its records even when the verdict refuses it.
+        if (!context.pages.some((page) => page.id === verdict.pageId)) return;
+        // Origin enforcement (0.13 authority cutover): a MATCHED route
+        // whose FINAL URL origin the controller never declared can never
+        // mint proof — the explicit refusal replaces the verdict, so
+        // wrong-origin content is recorded as refused, never satisfied.
+        let finalOrigin: string | null = null;
+        try {
+          finalOrigin = new URL(visit.url).origin;
+        } catch {
+          finalOrigin = null;
+        }
+        let finalVerdict = verdict;
+        if (finalOrigin === null || !context.appOrigins.includes(finalOrigin)) {
+          finalVerdict = {
+            pageId: verdict.pageId,
+            finalUrl: visit.url,
+            loads: { satisfied: false, refusalReasons: ['PAGE_APP_ORIGIN_MISMATCH'] },
+            dataOk: { satisfied: false, refusalReasons: ['PAGE_APP_ORIGIN_MISMATCH'] },
+          };
+        }
         const payload = {
           channel: 'observed',
-          routeId: verdict.pageId,
+          routeId: finalVerdict.pageId,
           finalUrl: visit.url,
           navigations: visit.navigations,
           exceptions: visit.exceptions,
           domMarkerHit: visit.domMarkerHit,
           apiStatuses: visit.apiResponses.map(({ url, status, remoteAddress, proxied }) => ({ url, status, remoteAddress, proxied })),
-          loads: verdict.loads,
-          dataOk: verdict.dataOk,
+          // One payload shared by both promise records; the sequence
+          // increases on every observation of this registered session.
+          apiRequestsSettled: visit.apiRequestsSettled,
+          observationSequence: observationSequence++,
+          loads: finalVerdict.loads,
+          dataOk: finalVerdict.dataOk,
         };
         const recordIds = state.pageObservationRecords.get(session.sessionId) ?? [];
-        recordIds.push(input.issueRecord(`${verdict.pageId}:page:loads`, session.testId, payload));
-        recordIds.push(input.issueRecord(`${verdict.pageId}:page:data-ok`, session.testId, payload));
+        recordIds.push(input.issueRecord(`${finalVerdict.pageId}:page:loads`, session.testId, payload));
+        recordIds.push(input.issueRecord(`${finalVerdict.pageId}:page:data-ok`, session.testId, payload));
         state.pageObservationRecords.set(session.sessionId, recordIds);
       },
     });
@@ -149,6 +199,7 @@ export async function sweepPageVisits(input: {
 }): Promise<Array<{ routeId: string; verdict: PageVisitVerdict }>> {
   const page = await input.browser.pageFor(input.sessionId, normalizePageStorageState(input.storageState));
   const visits: Array<{ routeId: string; verdict: PageVisitVerdict }> = [];
+  let observationSequence = 0;
   for (const route of input.routes) {
     const observation = await driveEngineVisit(page, input.appBase, route, input.routes, {
       loginRoutes: input.loginRoutes,
@@ -166,6 +217,10 @@ export async function sweepPageVisits(input: {
       exceptions: visit.exceptions,
       domMarkerHit: visit.domMarkerHit,
       apiStatuses: visit.apiResponses.map(({ url, status, remoteAddress, proxied }) => ({ url, status, remoteAddress, proxied })),
+      // One payload reused for both contracts; the sequence increases
+      // within this sweep.
+      apiRequestsSettled: visit.apiRequestsSettled,
+      observationSequence: observationSequence++,
       loads: verdict.loads,
       dataOk: verdict.dataOk,
     };

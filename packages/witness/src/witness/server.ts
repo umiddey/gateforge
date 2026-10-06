@@ -235,6 +235,7 @@ import type {
   ObserveFinalizeResponse,
   ObserveFinalizedObligation,
   ObserveMutation,
+  PageObservationContext,
   PersistenceRequest,
   PersistenceResponse,
   PreObservationRequest,
@@ -660,6 +661,12 @@ interface WitnessState {
   >;
   /** Domain-separated digest over the registered expected set. */
   enumerationDigest: string | null;
+  /**
+   * Controller-held page-observation context (0.13 authority cutover):
+   * bound once via the expected-set registration, validated there, and
+   * the ONLY source of page grading inputs. Null means no page proof.
+   */
+  pageObservation: PageObservationContext | null;
   /**
    * Complete-behavior catalog (plan 2026-09-19 §4.7, Phase 4): the
    * compiled catalog plus allowed case/test assignments the TRUSTED
@@ -1476,6 +1483,7 @@ export async function startWitness(options: WitnessOptions): Promise<WitnessHand
     twinShapes: options.twinShapes === undefined || options.twinShapes === null ? null : options.twinShapes,
     expectedTests: new Map(),
     enumerationDigest: null,
+    pageObservation: null,
     behaviorCatalog: null,
     caseExecutions: new Map(),
     tick: 0,
@@ -2384,7 +2392,18 @@ async function handleRequest(
           state,
           response: res,
           body,
-          requireSession: (value) => requireOpenSession(state, value),
+          requireSession: (value) => {
+            const session = requireOpenSession(state, value);
+            return {
+              sessionId: session.sessionId,
+              testId: session.testId,
+              activity: session.activity,
+              // The supervisor-opened identity (0.13 authority cutover):
+              // static tamper risks match against THIS file, never
+              // suite-supplied metadata.
+              registeredFile: session.registered === null ? null : session.registered.file,
+            };
+          },
           issueRecord: (obligationId, testId, payload) =>
             issueRecord(state, obligationId, 'page.observed', testId, payload, 'engine-observed').recordId,
         });
@@ -2536,7 +2555,9 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
  *   state: running witness state.
  *   res: response to answer.
  *   verifier: the `x-gateforge-verifier` header value.
- *   body: the parsed request body ({tests: [...]}, identity-shaped).
+ *   body: the parsed request body ({tests: [...], pageObservation?},
+ *     identity-shaped; the optional controller-held page-observation
+ *     context binds once alongside the set and is never suite-supplied).
  */
 async function handleExpectedSet(
   state: WitnessState,
@@ -2591,9 +2612,97 @@ async function handleExpectedSet(
       observationOnly,
     });
   }
+  // Controller-held page-observation context (0.13 authority cutover):
+  // validated HERE, once, supervisor-authenticated, and stored alongside
+  // the expected set. The suite never supplies any of it — the registrar
+  // grades with THIS context or issues no page proof at all.
+  let pageObservation: PageObservationContext | null = null;
+  const rawContext = body['pageObservation'];
+  if (rawContext !== undefined) {
+    if (!isPlainObject(rawContext)) {
+      throw new HttpError(400, 'expected-set pageObservation must be an object');
+    }
+    const rawPages = rawContext['pages'];
+    const rawLoginRoutes = rawContext['loginRoutes'];
+    const rawErrorMarkers = rawContext['errorMarkers'];
+    const rawAppOrigins = rawContext['appOrigins'];
+    const rawTamperRisks = rawContext['tamperRisks'];
+    const validPages =
+      Array.isArray(rawPages) && rawPages.length > 0 &&
+      (rawPages as unknown[]).every((page) =>
+        typeof page === 'object' && page !== null &&
+        typeof (page as Record<string, unknown>)['id'] === 'string' &&
+        ((page as Record<string, unknown>)['id'] as string).length > 0 &&
+        !((page as Record<string, unknown>)['id'] as string).includes(':') &&
+        typeof (page as Record<string, unknown>)['path'] === 'string' &&
+        ((page as Record<string, unknown>)['path'] as string).startsWith('/'),
+      );
+    const validLoginRoutes =
+      Array.isArray(rawLoginRoutes) &&
+      (rawLoginRoutes as unknown[]).every((path) => typeof path === 'string' && path.startsWith('/'));
+    const validErrorMarkers =
+      Array.isArray(rawErrorMarkers) &&
+      (rawErrorMarkers as unknown[]).every((marker) => typeof marker === 'string' && marker.length > 0);
+    const validAppOrigins =
+      Array.isArray(rawAppOrigins) &&
+      (rawAppOrigins as unknown[]).every((origin) => {
+        if (typeof origin !== 'string') return false;
+        try {
+          return new URL(origin).origin === origin;
+        } catch {
+          return false;
+        }
+      });
+    const validTamperRisks =
+      Array.isArray(rawTamperRisks) &&
+      (rawTamperRisks as unknown[]).every((risk) => {
+        if (typeof risk !== 'object' || risk === null) return false;
+        const row = risk as Record<string, unknown>;
+        return (
+          (row['testId'] === null || typeof row['testId'] === 'string') &&
+          typeof row['file'] === 'string' && row['file'].length > 0 &&
+          typeof row['locationFile'] === 'string' && row['locationFile'].length > 0 &&
+          typeof row['line'] === 'number' && Number.isInteger(row['line']) && row['line'] >= 1
+        );
+      });
+    if (!validPages || !validLoginRoutes || !validErrorMarkers || !validAppOrigins || !validTamperRisks) {
+      throw new HttpError(
+        400,
+        'expected-set pageObservation requires pages (non-empty {id, path} rows), loginRoutes ' +
+          "('/'-prefixed strings), errorMarkers (non-empty strings), appOrigins (valid origin " +
+          'strings), and tamperRisks ({testId: string|null, file, locationFile, line})',
+      );
+    }
+    pageObservation = {
+      pages: (rawPages as Array<Record<string, unknown>>).map((page) => ({
+        id: page['id'] as string,
+        path: page['path'] as string,
+      })),
+      loginRoutes: rawLoginRoutes as string[],
+      errorMarkers: rawErrorMarkers as string[],
+      appOrigins: rawAppOrigins as string[],
+      tamperRisks: (rawTamperRisks as Array<Record<string, unknown>>).map((risk) => ({
+        testId: risk['testId'] as string | null,
+        file: risk['file'] as string,
+        locationFile: risk['locationFile'] as string,
+        line: risk['line'] as number,
+      })),
+    };
+  }
   const digest = enumerationDigestOf(tests);
   if (state.enumerationDigest !== null) {
     if (state.enumerationDigest === digest) {
+      // Identical tests with a DIFFERENT page-observation context are a
+      // relabeling attempt, exactly like a changed test set: the context
+      // is a PRE-run fact bound once with the set.
+      if (canonicalOf(state.pageObservation) !== canonicalOf(pageObservation)) {
+        sendJson(res, 409, {
+          error:
+            'an expected set with the same tests is already bound to this run with a different ' +
+            'page-observation context; the context is a PRE-run fact and is never relabeled',
+        });
+        return;
+      }
       sendJson(res, 200, { bound: true as const, enumerationDigest: digest, count: state.expectedTests.size });
       return;
     }
@@ -2617,6 +2726,7 @@ async function handleExpectedSet(
     state.expectedTests.set(expectedKey(test.project, test.file, test.titlePath), test);
   }
   state.enumerationDigest = digest;
+  state.pageObservation = pageObservation;
   sendJson(res, 200, { bound: true as const, enumerationDigest: digest, count: state.expectedTests.size });
 }
 

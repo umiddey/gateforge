@@ -16,12 +16,15 @@ const RUN_TOKEN = 'page-observer-records-run-token';
 const VERIFIER_KEY = 'page-observer-records-verifier-key';
 const APP_FINGERPRINT = 'orders-fixture-v1';
 const LOOPBACK = [127, 0, 0, 1].join('.');
-const app = createHttpServer((_request, response) => {
+const app = createHttpServer((request, response) => {
+  const path = new URL(request.url ?? '/', `http://${LOOPBACK}`).pathname;
   response.writeHead(200, {
     'content-type': 'text/html',
     'x-gateforge-env-fingerprint': APP_FINGERPRINT,
   });
-  response.end('<!doctype html><html><body><main>Orders are ready</main></body></html>');
+  response.end(path.startsWith('/broken')
+    ? '<!doctype html><html><body><main>Something went wrong</main></body></html>'
+    : '<!doctype html><html><body><main>Orders are ready</main></body></html>');
 });
 let appBaseUrl: string;
 let witness: WitnessHandle;
@@ -62,10 +65,66 @@ async function getRecords(): Promise<Array<Record<string, unknown>>> {
   return body.records;
 }
 
+/** The untyped JSON payload of one ledger record (witness-issued object). */
+function recordPayload(record: Record<string, unknown>): Record<string, unknown> {
+  const payload = record['payload'];
+  // Named boundary cast: ledger payloads are witness-issued JSON objects;
+  // anything else reads as an empty record so field reads stay honest.
+  return typeof payload === 'object' && payload !== null ? (payload as Record<string, unknown>) : {};
+}
+
+/** The spec identity every session in this file opens under. */
+const SPEC_FILE = 'specs/orders.spec.ts';
+const TITLE_PATH = ['opens the orders page'];
+
 async function openSession(testId: string): Promise<SessionCredential> {
-  const response = await post('/sessions/open', { runId: RUN_ID, testId, workerIndex: 0 }, true);
+  const response = await post('/sessions/open', {
+    runId: RUN_ID,
+    testId,
+    workerIndex: 0,
+    file: SPEC_FILE,
+    titlePath: TITLE_PATH,
+  }, true);
   if (response.status !== 200) throw new Error(`session open failed: ${JSON.stringify(response.body)}`);
   return response.body as unknown as SessionCredential;
+}
+
+/**
+ * Registers the controller-held page-observation context with the
+ * expected set (verifier-authenticated; MUST run before any session
+ * opens — the expected set is a pre-run fact).
+ */
+async function registerPageContext(context: {
+  pages: Array<{ id: string; path: string }>;
+  loginRoutes?: string[];
+  errorMarkers?: string[];
+  appOrigins?: string[];
+  tamperRisks?: Array<{ testId: string | null; file: string; locationFile: string; line: number }>;
+}): Promise<void> {
+  const registration = await post('/runs/expected-set', {
+    tests: [{ testId: null, project: null, file: SPEC_FILE, titlePath: TITLE_PATH }],
+    pageObservation: {
+      pages: context.pages,
+      loginRoutes: context.loginRoutes ?? ['/login'],
+      errorMarkers: context.errorMarkers ?? [],
+      appOrigins: context.appOrigins ?? [new URL(appBaseUrl).origin],
+      tamperRisks: context.tamperRisks ?? [],
+    },
+  }, true);
+  if (registration.status !== 200) {
+    throw new Error(`page context registration failed: ${JSON.stringify(registration.body)}`);
+  }
+}
+
+/** The only suite-side observer registration: session credentials + port. */
+function registerObserver(session: SessionCredential, debuggingPort: number, extra: Record<string, unknown> = {}): Promise<Answer> {
+  return post('/sessions/page-observer', {
+    sessionId: session.sessionId,
+    sessionToken: session.sessionToken,
+    testId: session.testId,
+    debuggingPort,
+    ...extra,
+  });
 }
 
 beforeAll(async () => {
@@ -102,20 +161,12 @@ describe('page.observed record retention', () => {
     { outcome: 'passed', retained: true },
     { outcome: 'failed', retained: false },
   ])('retains proof only when the test $outcome', async ({ outcome, retained }) => {
+    await registerPageContext({ pages: [{ id: 'tenant.page-orders', path: '/orders/:id' }] });
     const session = await openSession(`tests/orders-${outcome}`);
     const debuggingPort = await freePort();
     const browser = await chromium.launch({ args: [`--remote-debugging-port=${debuggingPort}`] });
     try {
-      const registration = await post('/sessions/page-observer', {
-        sessionId: session.sessionId,
-        sessionToken: session.sessionToken,
-        testId: session.testId,
-        debuggingPort,
-        pages: [{ id: 'tenant.page-orders', path: '/orders/:id' }],
-        loginRoutes: ['/login'],
-        errorMarkers: [],
-        appOrigins: [new URL(appBaseUrl).origin],
-      });
+      const registration = await registerObserver(session, debuggingPort);
       expect(registration.status).toBe(200);
       const page = await (await browser.newContext()).newPage();
       await page.goto(`${appBaseUrl}/orders/42`);
@@ -127,11 +178,180 @@ describe('page.observed record retention', () => {
         'tenant.page-orders:page:data-ok',
         'tenant.page-orders:page:loads',
       ]);
+      expect(records.map((record) => recordPayload(record)['apiRequestsSettled'])).toEqual([true, true]);
+      expect(records.every((record) => Number.isInteger(recordPayload(record)['observationSequence']))).toBe(true);
       const closed = await post('/sessions/close', { sessionId: session.sessionId, outcome }, true);
       expect(closed.status).toBe(200);
       expect((await getRecords()).filter((record) => record['kind'] === 'page.observed')).toHaveLength(retained ? 2 : 0);
     } finally {
       await browser.close();
     }
+  });
+
+  it('records nothing for an out-of-table visit while the declared page still proves', async () => {
+    await registerPageContext({ pages: [{ id: 'tenant.page-orders', path: '/orders/:id' }] });
+    const session = await openSession('tests/orders-out-of-table');
+    const debuggingPort = await freePort();
+    const browser = await chromium.launch({ args: [`--remote-debugging-port=${debuggingPort}`] });
+    try {
+      const registration = await registerObserver(session, debuggingPort);
+      expect(registration.status).toBe(200);
+      const page = await (await browser.newContext()).newPage();
+      await page.goto(`${appBaseUrl}/bootstrap`);
+      await page.goto(`${appBaseUrl}/orders/42`);
+      await expect.poll(async () => (await getRecords()).filter((record) => record['kind'] === 'page.observed').length).toBe(2);
+      const records = (await getRecords()).filter((record) => record['kind'] === 'page.observed');
+      expect(records.map((record) => record['obligationId']).sort()).toEqual([
+        'tenant.page-orders:page:data-ok',
+        'tenant.page-orders:page:loads',
+      ]);
+    } finally {
+      await browser.close();
+    }
+  });
+
+  it('retains refused records for a matched failing page', async () => {
+    await registerPageContext({
+      pages: [{ id: 'tenant.page-broken', path: '/broken/:id' }],
+      errorMarkers: ['Something went wrong'],
+    });
+    const session = await openSession('tests/orders-broken');
+    const debuggingPort = await freePort();
+    const browser = await chromium.launch({ args: [`--remote-debugging-port=${debuggingPort}`] });
+    try {
+      const registration = await registerObserver(session, debuggingPort);
+      expect(registration.status).toBe(200);
+      const page = await (await browser.newContext()).newPage();
+      await page.goto(`${appBaseUrl}/broken/7`);
+      await expect.poll(async () => (await getRecords()).filter((record) => record['kind'] === 'page.observed').length).toBe(2);
+      const records = (await getRecords()).filter((record) => record['kind'] === 'page.observed');
+      expect(records.map((record) => record['obligationId']).sort()).toEqual([
+        'tenant.page-broken:page:data-ok',
+        'tenant.page-broken:page:loads',
+      ]);
+      const loads = records.find((record) => record['obligationId'] === 'tenant.page-broken:page:loads')!;
+      const loadsPayload = loads['payload'] as { loads: { refusalReasons: string[] } };
+      expect(loadsPayload.loads.refusalReasons).toContain('PAGE_ERROR_MARKER');
+      const closed = await post('/sessions/close', { sessionId: session.sessionId, outcome: 'passed' }, true);
+      expect(closed.status).toBe(200);
+      expect((await getRecords()).filter((record) => record['kind'] === 'page.observed')).toHaveLength(2);
+    } finally {
+      await browser.close();
+    }
+  });
+
+  it('stamps increasing observation sequences across fresh navigation windows', async () => {
+    await registerPageContext({ pages: [{ id: 'tenant.page-orders', path: '/orders/:id' }] });
+    const session = await openSession('tests/orders-sequence');
+    const debuggingPort = await freePort();
+    const browser = await chromium.launch({ args: [`--remote-debugging-port=${debuggingPort}`] });
+    try {
+      const registration = await registerObserver(session, debuggingPort);
+      expect(registration.status).toBe(200);
+      const page = await (await browser.newContext()).newPage();
+      await page.goto(`${appBaseUrl}/orders/42`);
+      await expect.poll(async () => (await getRecords()).filter((record) => record['kind'] === 'page.observed').length).toBe(2);
+      // A genuinely new navigation after the window emitted starts a fresh
+      // window and bumps the sequence; the emitted window is not re-issued.
+      await page.goto(`${appBaseUrl}/orders/43`);
+      await expect.poll(async () => (await getRecords()).filter((record) => record['kind'] === 'page.observed').length).toBe(4);
+      const records = (await getRecords()).filter((record) => record['kind'] === 'page.observed');
+      const sequences = records
+        .map((record) => Number(recordPayload(record)['observationSequence']))
+        .sort((a, b) => a - b);
+      expect(sequences).toEqual([0, 0, 1, 1]);
+      expect(records.map((record) => recordPayload(record)['apiRequestsSettled'])).toEqual([true, true, true, true]);
+      const closed = await post('/sessions/close', { sessionId: session.sessionId, outcome: 'passed' }, true);
+      expect(closed.status).toBe(200);
+    } finally {
+      await browser.close();
+    }
+  });
+});
+
+describe('page observation authority (controller-held context)', () => {
+  it('refuses page observation when no controller context is registered', async () => {
+    const session = await openSession('tests/orders-unbound');
+    const registration = await registerObserver(session, await freePort());
+    expect(registration.status).toBe(409);
+    expect(String(registration.body['error'])).toContain('no controller-registered page-observation context');
+    expect((await getRecords()).filter((record) => record['kind'] === 'page.observed')).toHaveLength(0);
+  });
+
+  it('ignores suite-supplied grading configuration and grades with the controller table only', async () => {
+    await registerPageContext({ pages: [{ id: 'tenant.page-orders', path: '/orders/:id' }] });
+    const session = await openSession('tests/orders-forged-fields');
+    const debuggingPort = await freePort();
+    const browser = await chromium.launch({ args: [`--remote-debugging-port=${debuggingPort}`] });
+    try {
+      // Legacy suite body fields ride along and are ignored: the forged
+      // route proves nothing, the controller route still grades.
+      const registration = await registerObserver(session, debuggingPort, {
+        pages: [{ id: 'tenant.page-evil', path: '/evil' }],
+        appOrigins: ['https://evil.example'],
+      });
+      expect(registration.status).toBe(200);
+      const page = await (await browser.newContext()).newPage();
+      await page.goto(`${appBaseUrl}/evil`);
+      await page.goto(`${appBaseUrl}/orders/42`);
+      await expect.poll(async () => (await getRecords()).filter((record) => record['kind'] === 'page.observed').length).toBe(2);
+      const records = (await getRecords()).filter((record) => record['kind'] === 'page.observed');
+      expect(records.map((record) => record['obligationId']).sort()).toEqual([
+        'tenant.page-orders:page:data-ok',
+        'tenant.page-orders:page:loads',
+      ]);
+    } finally {
+      await browser.close();
+    }
+  });
+
+  it('refuses matched wrong-origin content with PAGE_APP_ORIGIN_MISMATCH', async () => {
+    await registerPageContext({ pages: [{ id: 'tenant.page-orders', path: '/orders/:id' }] });
+    const session = await openSession('tests/orders-wrong-origin');
+    const debuggingPort = await freePort();
+    const browser = await chromium.launch({ args: [`--remote-debugging-port=${debuggingPort}`] });
+    // A SECOND HTTP server on its own origin serving the same path shape:
+    // the route matches the controller table, the origin never does.
+    const secondApp = createHttpServer((request, response) => {
+      response.writeHead(200, { 'content-type': 'text/html' });
+      response.end('<!doctype html><html><body><main>Orders are ready</main></body></html>');
+    });
+    await new Promise<void>((resolve) => secondApp.listen(0, LOOPBACK, resolve));
+    const secondAddress = secondApp.address() as AddressInfo;
+    const secondBase = `http://${LOOPBACK}:${String(secondAddress.port)}`;
+    try {
+      expect((await registerObserver(session, debuggingPort)).status).toBe(200);
+      const page = await (await browser.newContext()).newPage();
+      await page.goto(`${secondBase}/orders/42`);
+      await expect.poll(async () => (await getRecords()).filter((record) => record['kind'] === 'page.observed').length).toBe(2);
+      const records = (await getRecords()).filter((record) => record['kind'] === 'page.observed');
+      expect(records).toHaveLength(2);
+      for (const record of records) {
+        const payload = recordPayload(record) as {
+          loads: { satisfied: boolean; refusalReasons: string[] };
+          dataOk: { satisfied: boolean; refusalReasons: string[] };
+        };
+        expect(payload.loads.satisfied).toBe(false);
+        expect(payload.dataOk.satisfied).toBe(false);
+        expect(payload.loads.refusalReasons).toContain('PAGE_APP_ORIGIN_MISMATCH');
+        expect(payload.dataOk.refusalReasons).toContain('PAGE_APP_ORIGIN_MISMATCH');
+      }
+    } finally {
+      await browser.close();
+      await new Promise<void>((resolve) => secondApp.close(() => resolve()));
+    }
+  });
+
+  it('refuses a session whose registered identity carries a static tamper risk', async () => {
+    await registerPageContext({
+      pages: [{ id: 'tenant.page-orders', path: '/orders/:id' }],
+      tamperRisks: [{ testId: null, file: SPEC_FILE, locationFile: 'specs/tamper.spec.ts', line: 4 }],
+    });
+    const session = await openSession('tests/orders-tampered');
+    const registration = await registerObserver(session, await freePort());
+    expect(registration.status).toBe(403);
+    expect(String(registration.body['error'])).toContain('PAGE_OBSERVATION_TAMPER_RISK');
+    expect(String(registration.body['error'])).toContain('specs/tamper.spec.ts:4');
+    expect((await getRecords()).filter((record) => record['kind'] === 'page.observed')).toHaveLength(0);
   });
 });

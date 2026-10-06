@@ -9,7 +9,7 @@
  * trace that supervision grades completeness from. The suite-side
  * `WitnessClient` deliberately has none of these methods.
  */
-import { VERIFIER_HEADER, RUN_HEADER, DEFAULT_REQUEST_TIMEOUT_MS } from '../constants.js';
+import { VERIFIER_HEADER, RUN_HEADER, DEFAULT_REQUEST_TIMEOUT_MS, ENGINE_PAGE_VISIT_BUDGET_MS } from '../constants.js';
 import type {
   ExpectedSetRequest,
   ExpectedSetResponse,
@@ -133,7 +133,11 @@ export class SupervisorClient {
 
   /** POST /runs/page-sweep: visits unproven page obligations after the suite. */
   async sweepPages(request: PageSweepRequest): Promise<{ visits: unknown[] }> {
-    return this.request<{ visits: unknown[] }>('/runs/page-sweep', request);
+    return this.request<{ visits: unknown[] }>(
+      '/runs/page-sweep',
+      request,
+      this.timeoutMs + request.pages.length * ENGINE_PAGE_VISIT_BUDGET_MS,
+    );
   }
 
   /**
@@ -243,9 +247,9 @@ export class SupervisorClient {
   }
 
   /** POST with supervisor headers; errors map to typed WitnessRequestError. */
-  private async request<T>(path: string, payload: unknown): Promise<T> {
+  private async request<T>(path: string, payload: unknown, timeoutMs: number = this.timeoutMs): Promise<T> {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     let response: Response;
     try {
       response = await fetch(`${this.url}${path}`, {

@@ -78,6 +78,7 @@ export type {
   ExpectedSetResponse,
   ExpectedTestRegistration,
   ExecutionTraceResponse,
+  PageObservationContext,
 } from './witness/types.js';
 
 export { OBSERVE_CHANNEL, OBSERVED_E2E_TEST_KIND, OBSERVED_KIND } from './constants.js';
