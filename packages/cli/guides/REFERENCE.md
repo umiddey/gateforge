@@ -72,8 +72,8 @@ first commands; the guides cover the walks:
 | `gateforge enforcement doctor [--json]` | Reports verified enforcement `level` (0–3), hook activation, wired CI templates, and read-only GitHub/GitLab branch-protection results; missing credentials or uncertain responses remain `not verified`. A local hook never counts as server protection. Its `engine:` line reports the install provenance npm's own metadata proves: a tarball/directory install (read from `node_modules/.package-lock.json`, or the manifest's `_resolved`) is named as such instead of claiming the registry, and an install with no readable metadata is reported as unproven rather than as an all-clear. The receipt's `engine.source` is receipt-bound and keeps its meaning. Diagnostic only: exit 0 whenever it runs. | 0/2 |
 | `gateforge enforcement pin --pin-file <path> [--confirm]` | Writes the owner-approved policy digest of the STAGED candidate into an env file OUTSIDE the repository. The flag is `--pin-file`, NOT `--env-file`: Node itself consumes `--env-file <path>` (and `--env-file-if-exists <path>`) anywhere in argv — it reads the file and exits 9 on a missing one, so the CLI would never run. The digest is the one the commit gate computes: the index is frozen and materialized exactly as `check --staged` does, and the entries are hashed by the same function. It refuses when a policy input is not fully staged, naming the files. Preview by default — the line it would write, nothing written. `--confirm` replaces exactly the `GATEFORGE_APPROVED_POLICY_DIGEST=<hex>` line, drops a duplicate assignment, leaves every other line untouched, never prints another line of the file, and writes the file mode `0600`. A path inside the repository is refused: the pin must live outside the candidate, because a candidate-controlled file cannot approve policy. A symlink or a non-regular file is refused too (fail closed). | 0/2 |
 | `gateforge enforce [--ci github\|gitlab]` | Add blocking wiring to an initialized repository. The provider defaults to GitLab unless GitHub is the only detected CI provider; the explicit flag selects GitHub Actions or GitLab CI. Appending to an EXISTING `.pre-commit-config.yaml` is announced as an action on one line, naming the file as the repository's own and printing the exact way back (`git restore -- .pre-commit-config.yaml` for a tracked file; for an untracked one, which has nothing to restore, the line says to delete the appended entry). The generated GitHub workflow installs `@gate-forge/cli@<version>` from the registry unless `GATEFORGE_CI_ENGINE_SOURCE` is set when the generator runs: it then installs that one npm specifier (a `.tgz` path, a directory, or any specifier) through the step environment, for a release that is not on the registry. Unset the variable and rerun for the registry install. | 0/2 |
-| `gateforge adopt` | Adopt an EXISTING repository: run it once, after `init`, on a project that already has code and therefore already has findings. Records today's blocking findings (pin-#2 obligation fingerprints, blocking entries, and the classification-blocked resource identities) into `.gateforge/baselines/obligations.json`, sanctioned by a dated, count-annotated receipt `.gateforge/baselines/adoption.json` — without that receipt a baseline forgives nothing — then applies the blocking wiring through the same idempotent path as `init --blocking`. It is the ONE sanctioned bulk-add and only once per repository: a second `adopt` is a no-op success. The recorded set is shrink-only (`gateforge baseline update` shrinks it) and never forgives new work. With `enforcement.strictE2E: true`, a baselined E2E obligation is not proof and blocks with `ENFORCEMENT_UNTRUSTED` again as soon as a change touches it. `adopt --help` prints this contract. | 0/2 |
-| `gateforge baseline update <fp...>` | Shrink the baseline to a strict subset (invariant 4). | 0/2 |
+| `gateforge adopt` | Adopt an EXISTING repository: run it once, after `init`, on a project that already has code and therefore already has findings. Records today's blocking findings (pin-#2 obligation fingerprints, blocking entries, and the classification-blocked resource identities) into `.gateforge/baselines/obligations.json`, sanctioned by a dated, count-annotated receipt `.gateforge/baselines/adoption.json` — without that receipt a baseline forgives nothing — then applies the blocking wiring through the same idempotent path as `init --blocking`. It is the ONE sanctioned bulk-add and only once per repository: a second `adopt` is a no-op success. The recorded set is shrink-only (`gateforge baseline update` shrinks it) and never forgives new work. With `enforcement.strictE2E: true`, a baselined E2E obligation is not proof and blocks with `ENFORCEMENT_UNTRUSTED` again as soon as a change touches it. `adopt --help` prints this contract. `adopt --family pages [--confirm]` revises an ALREADY-adopted repository for the 0.13 pages rollout: preview by default (nothing written), `--confirm` records a dated, commit-referenced `families.pages` marker in the existing receipt with ONE atomic write — every page obligation discovered at that moment (proven pages included), with only the then-missing/unproven page fingerprints marked forgiven — and a page obligation the ORIGINAL receipt already indexed is recorded, never re-adopted; the baseline document is untouched, so no crash can expose unrecorded forgiveness. The marker is permanent: a repeat records nothing (new pages are new work to prove), the family debt shrinks via `baseline update --family-pages` while the marker is retained, and a page whose audience or data plane is unresolved refuses the migration. Because the receipt is part of the approved policy revision, a confirmed migration changes the trusted-policy digest — strict gates stay untrusted until the owner repins outside the candidate. A plain `adopt` on a repo with `pages:` configured records the family marker in the receipt it already writes with an EMPTY `forgiven` set — the page debt rides the baseline bulk-add under the ordinary shrink contract (one forgiveness store), so the family is then already adopted. | 0/2 |
+| `gateforge baseline update <fp...>` | Shrink the baseline to a strict subset (invariant 4). `--classification-blocked <resourceId>...` shrinks the adopted classification layer the same way (keep-semantics; `=` keeps none). `--family-pages <fingerprint>...` shrinks the receipt's `pages` family `forgiven` list the same way (`--family-pages=` keeps none): the set is shrink-only, unknown fingerprints fail closed, and the family marker itself (dates, commit, every recorded page obligation) is retained. | 0/2 |
 | `gateforge baseline diff <before> <after>` | Compare adopted obligations by ID without printing fingerprints. | 0/2 |
 
 On a repo that already has Gateforge files, `init` reports only what THAT run did: it keeps an existing `.gateforge.yml` and says so instead of claiming to write a preset, and the `undo:` lines it prints name every path the run created (`rm -rf`) and every file it changed in place (`git restore --`, for an appended `.gitlab-ci.yml` include, an appended `.pre-commit-config.yaml` entry, or an added ignore rule) — so following them can never delete pre-existing config, baselines, waivers, hooks or CI files, and a run that changed nothing prints no undo line at all. A preset that wires no local hook says whether your existing commit hook and/or CI job still decide what blocks your commits.
@@ -810,6 +810,51 @@ change the owner re-approves, never something a candidate grants itself.
 lenient default like every other configuration; declare `strict` in
 `.gateforge.yml` to keep the 0.10.3 treatment.
 
+### The pages family (adopting page debt into an already-adopted repo)
+
+A repository that adopted BEFORE the 0.13 pages rollout has a receipt with
+no pages family, so newly discovered page debt blocks. The one
+owner-approved exception to the one-bulk-add invariant is a NAMED family
+migration: `gateforge adopt --family pages` previews it (nothing
+written), `gateforge adopt --family pages --confirm` records it. The
+migration is valid ONLY for an already-adopted repository (it never
+seeds a receipt), and it performs ONE atomic write to the EXISTING
+`.gateforge/baselines/adoption.json`: a dated, commit-referenced
+`families.pages` marker that records EVERY page obligation discovered at
+that moment — proven pages included — with only the then-missing/unproven
+page fingerprints marked `forgiven`. The baseline document is never
+touched, so there is no two-file window in which the old receipt could
+forgive fingerprints the new record has not sanctioned; the evaluator
+forgives the family's `forgiven` set from the receipt alone.
+
+The marker is permanent: a repeat records nothing, a page route
+discovered after the migration is new work to prove (never re-adopted
+debt), and a page that was already proven at migration time and breaks
+later blocks — it was recorded, not forgiven. The same guard reads the
+EXISTING receipt backwards: a page obligation id the original adoption
+already indexed (an earlier snapshot's plain `adopt` that already knew
+pages, with no family marker) is recorded in the marker but NEVER
+re-adopted — proven there stays proven (a later break blocks), resolved
+stays resolved (a shrink is not undone), and only page obligations the
+original receipt never knew are sanctioned. A receipt that predates page
+indexing carries no page ids, so the genuine first pages rollout is
+unaffected. Family debt shrinks
+through `gateforge baseline update --family-pages <fingerprint>...`
+(`--family-pages=` keeps none) while the marker is retained. Only the
+two page contracts (`page:loads`, `page:data-ok`) of `ui.page` resources
+can enter the family — persistence contracts, classification debt and
+business rules never do — and the migration refuses (exit 2, nothing
+written) while any page's audience or data plane is unresolved, and on a
+repository with no page routes at all. Because the receipt is part of
+the approved policy revision, a confirmed migration changes the
+trusted-policy digest: strict gates stay untrusted until the owner repins
+outside the candidate (the same `git add` + `enforcement pin` flow as any
+policy change). A plain `adopt` on a repository with `pages:` configured
+records the family marker in the receipt it already writes with an EMPTY
+`forgiven` set — the page debt itself rides the baseline bulk-add, so the
+ordinary shrink-only `baseline update` contract governs it and there is
+exactly one forgiveness store; the family is then already adopted.
+
 ### The owner answers and the generated wiring are owner-pinned
 
 The owner-answers document and `.gateforge.yml` are owner-owned
@@ -820,7 +865,12 @@ bound them, so a candidate could narrow `clientScanRoots` (deleting
 obligations) in the same commit and the pin still matched. Their bytes are now
 inside the approved policy digest, and so are the generated `.gateforge/hooks/`
 and `.gateforge/ci/` wiring, for the same reason: deleting the generated hook
-is a policy-revision change, not a way back into adoption mode.
+is a policy-revision change, not a way back into adoption mode. Since 0.13
+the adoption receipt (`.gateforge/baselines/adoption.json`) is pinned too,
+present-only: it carries the adopted family markers and each family's
+`forgiven` fingerprints, which the evaluator forgives from the receipt alone —
+a candidate that edits its own forgiveness cannot approve the edit. A
+pre-adoption repository keeps a byte-identical digest.
 
 **Upgrading:** a repository that ships a pack config or the generated gate
 wiring re-pins ONCE, after upgrading —
@@ -1139,6 +1189,32 @@ takes precedence over the sweep. Both channels use the same route, redirect,
 crash, error-marker, and API-response grader. Browser API tampering in tests
 is refused as `PAGE_OBSERVATION_TAMPER_RISK`.
 
+An API request counts as settled only when its response BODY finished
+(Playwright `requestfinished`), never at the response headers: a failed or
+unfinished body refuses both page promises with `PAGE_API_UNSETTLED`.
+Before grading, each channel waits for in-flight app data requests
+(fetch/XHR by resource type, plus `/api/` paths) and a quiet window after
+the last activity, bounded by the shared engine budget — a 500 arriving a
+second late, or a 200 whose body dies mid-flight, is no longer a clean
+page.
+
+Per test, only a page's LATEST observation (`observationSequence`) counts.
+An early clean visit cannot hide a later refusal by the same test, and
+another passing test's latest clean visit still proves the page. A missing
+or malformed sequence never proves, and equal-sequence contradictions fail
+closed with `PAGE_OBSERVATION_CONFLICT`; the post-suite sweep chooses its
+gap visits with the same rule.
+
+Page proof metadata is controller-held: the route table, login routes,
+error markers, trusted app origins, and static tamper risks are registered
+by the CLI with the witness on the verifier-authenticated expected-set
+registration, and `/sessions/page-observer` carries only the session
+credentials and the debugging port. A run without registered context
+issues no page proof, and a matched page whose final URL origin is not a
+trusted app origin is refused with `PAGE_APP_ORIGIN_MISMATCH`. The suite
+receives only the enablement flag `GATEFORGE_PAGE_OBSERVATION_ENABLED` —
+it can disable observation, never enable false proof.
+
 Configure the reader and audience in `.gateforge.yml`:
 
 ```yaml
@@ -1148,12 +1224,24 @@ pages:
     - name: tenant
       loginRoute: /login
       guard: TenantGuard
+      plane: tenant
   errorMarkers: ['Something went wrong']
   params:
     '/orders/:id': { id: 'seeded-order-id' }
   exclude: []
   sweep: true
 ```
+
+Each audience may declare its DATA plane explicitly: `plane: tenant |
+master | global` (employee→tenant, admin→master, public→global). A plane
+is the data the pages serve — it is not a user role, and an audience name
+is only a plane when it is exactly one of those three words; declare the
+conventional names (`tenant`, `master`, `global`) explicitly when you
+want to be exact, and every other audience name (a role like `employee`
+or `admin`) REQUIRES the explicit `plane:` key. An audience without a
+resolved plane leaves its pages classification-blocked, and
+`gateforge adopt --family pages` refuses to record while any page
+identity is undecided.
 
 `pages.params` supplies seeded IDs for dynamic routes. When no seed is
 configured, the referee can use a unique engine-observed create ID for the

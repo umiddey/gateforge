@@ -153,7 +153,14 @@ the blocking wiring. The full adopt contract, and the baseline
 commands that shrink the recorded set: [Reference](guides/REFERENCE.md).
 Under `strictE2E`, an adopted E2E obligation still blocks
 as soon as a change touches it — adoption forgives today's
-debt, never new work.
+debt, never new work. A repository that adopted before the 0.13
+pages rollout revises its adoption with `gateforge adopt --family
+pages --confirm` (preview by default): one atomic receipt write
+records a permanent `pages` family marker — every page obligation
+discovered, proven pages included — forgiving only the then-missing
+page debt; the marker survives every shrink, repeats add nothing,
+and the digest change requires the owner's external repin for
+strict gates ([Reference — the pages family](guides/REFERENCE.md#the-pages-family-adopting-page-debt-into-an-already-adopted-repo)).
 
 ## Development
 

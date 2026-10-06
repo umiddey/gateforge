@@ -2,6 +2,46 @@
 
 ## Unreleased
 
+- **Pages-family adoption for already-adopted repositories (0.13.0).**
+  `gateforge adopt --family pages` revises an ALREADY-adopted repository —
+  the one owner-approved exception to the one-bulk-add invariant, scoped to
+  a named family. Preview by default (nothing written); `--confirm` performs
+  ONE atomic write to the existing `.gateforge/baselines/adoption.json`: a
+  dated, commit-referenced `families.pages` marker recording EVERY page
+  obligation discovered at that moment (proven pages included), with only
+  the then-missing/unproven page fingerprints marked `forgiven`. Receipt
+  writes are validated and then atomic (same-directory temporary file +
+  rename): a failed or interrupted write leaves the previous receipt
+  intact, never a truncated one. The
+  baseline document is never touched — the evaluator forgives the family's
+  `forgiven` set from the receipt alone, so no crash window can expose
+  unrecorded forgiveness (a union baseline would have been forgiven by the
+  OLD receipt before the new record existed). The marker is permanent: a
+  repeat records nothing, a page route discovered after the migration is
+  new work to prove, and an already-proven page that breaks later blocks.
+  The same guard reads the existing receipt backwards: page obligation ids
+  the ORIGINAL adoption already indexed (an earlier snapshot's plain
+  `adopt` that already knew pages) are recorded in the marker but never
+  re-adopted — proven stays proven, resolved stays resolved — while a
+  receipt that predates page indexing keeps the genuine first rollout
+  valid.
+  Family debt shrinks via `gateforge baseline update --family-pages
+  <fingerprint>...` (`--family-pages=` keeps none) while the marker is
+  retained. Only the `ui.page` contracts `page:loads`/`page:data-ok` can
+  enter the family; the migration refuses (exit 2, nothing written) on an
+  unadopted repository, with no page routes, or while any page's audience
+  or data plane is unresolved — declare each audience in `pages.audiences`
+  with an explicit `plane:` (`employee`→`tenant`, `admin`→`master`,
+  `public`→`global`; an audience name is a role, not a plane), which
+  `gateforge init` now asks for. The adoption receipt is now part of the
+  trusted-policy digest (present-only): a confirmed migration changes the
+  digest, and strict gates stay untrusted until the owner repins outside
+  the candidate. A plain `adopt` on a repo with `pages:` configured records
+  the family marker in the receipt it already writes with an EMPTY
+  `forgiven` set — the page debt itself rides the baseline bulk-add under
+  the ordinary shrink contract, so there is exactly one forgiveness store;
+  the family is then already adopted.
+
 - **React Router page inventory and page obligations (0.13.0).** The
   `@gate-forge/pack-react-router` pack reads JSX and object route trees,
   resolves nested paths, reports unreadable paths, and supports an explicit
@@ -30,6 +70,58 @@
   the runner's initialized core API if a raw test imports it while the public
   CommonJS entry is still loading; raw tests keep running without requiring
   Gateforge fixtures or producing page records.
+
+- **Page promises report honest causes and honor waivers.** A missing
+  `page:loads`/`page:data-ok` was mislabeled `VERIFIER_UNSUPPORTED`
+  ("drop the pack") although the page proof channel exists; it now maps
+  to `EVIDENCE_NOT_COLLECTED` with the actionable fix (a witnessed page
+  visit through a browser test, or the engine's post-suite sweep), while
+  an unknown `page:*` contract stays unsupported. Page obligations also
+  honor owner waivers on the same lane as every other obligation — same
+  exact scope, expiry, and stale-owner rules (an exemption recorded by
+  the owner, never proof; revoke it and the page grades on its evidence
+  again).
+
+- **Bound page sweep RPCs by the number of engine visits, rather than the ordinary single-call deadline.**
+
+- **Page API data is graded only after the response body completes.** A
+  page's API request now counts as settled only when the response BODY
+  finished (Playwright `requestfinished`), not at the response headers; a
+  failed or unfinished body refuses both page promises with
+  `PAGE_API_UNSETTLED`. Both proof channels — the browser tests' observed
+  channel and the referee's swept channel — wait for in-flight app data
+  requests (fetch/XHR by resource type, plus `/api/` paths) and a quiet
+  window after the last activity before grading, bounded by the shared
+  engine budget. Before, a 500 arriving 1.2 s after the headers, or a 200
+  whose body died mid-flight, was graded clean.
+
+- **The latest page observation per test decides.** Per test, only a
+  page's latest observation (`observationSequence`) counts: an early
+  clean visit cannot hide a later refusal by the same test, while another
+  passing test's latest clean visit still proves the page. A missing or
+  malformed sequence never proves, and equal-sequence contradictions fail
+  closed with `PAGE_OBSERVATION_CONFLICT`. The post-suite sweep chooses
+  its gap visits with the same rule.
+
+- **Page observation metadata is controller-held.** The route table,
+  login routes, error markers, trusted app origins, and static tamper
+  risks are registered by the CLI with the witness on the
+  verifier-authenticated expected-set registration;
+  `/sessions/page-observer` carries only the session credentials and the
+  debugging port, and a run without registered context issues no page
+  proof. A matched page whose final URL origin is not a trusted app
+  origin is refused with `PAGE_APP_ORIGIN_MISMATCH`. The suite receives
+  only an enablement flag (`GATEFORGE_PAGE_OBSERVATION_ENABLED`): it can
+  disable observation, never enable false proof. Before, a test could
+  hand the witness its own route table or point it at another server and
+  get witnessed proof.
+
+- **`gateforge next` resolves the witness verifier key ring like `check`.**
+  The key file and keyring locations now feed `next`'s durable-attestation
+  verification, not only the `GATEFORGE_WITNESS_VERIFIER_KEY` variable.
+  Before, with a verifier key file configured, `next` reported that
+  durable attestation cannot verify without a witness verifier key while
+  `check` passed.
 
 ## 0.12.0
 
