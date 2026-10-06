@@ -75,7 +75,8 @@ import { computeEvaluationScope, detectStagedWorkingTreeMismatches } from '../sc
 import { httpRoutesView, resolveStateDir } from '../state.js';
 import { gateforgeOwnedInputs } from '../gateforge-owned.js';
 import { engineGeneratedStateFileFilter } from '../state-artifacts.js';
-import { loadConfigAt, rejectUnknownFlags, VERIFIER_KEY_ENV } from './common.js';
+import { loadConfigAt, rejectUnknownFlags } from './common.js';
+import { resolveVerifierKeyring } from '../verifier-keys.js';
 import { loadCacheExclusions } from '../cache-exclusions.js';
 import { singletonPerTenantGuidanceLines } from '../singleton-guidance.js';
 import { unmatchedRouteBannerLines } from '../unmatched-routes.js';
@@ -995,14 +996,14 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
   }
   const diffScoped = options['changed'] === true;
   const asJson = options['json'] === true;
-
-  const witnessVerifierKey = io.env[VERIFIER_KEY_ENV];
   const config = loadConfigAt(io.cwd);
   const cacheExclusions = loadCacheExclusions(io.cwd, config);
   const providerIdentity: ChangedProvider = diffScoped
     ? resolveProvider(config.changed.provider, io.cwd, io.env).provider
     : 'all-files';
   const stateDir = resolveStateDir(io.cwd);
+  const verifierKeyring = resolveVerifierKeyring(io.cwd, io.env, [stateDir]);
+  const witnessVerifierKey = verifierKeyring?.active.key;
 
   // Trusted digest: the same pre/post inventory check `check` performs
   // so witnessed records authorize for the current bytes (next never
@@ -1230,6 +1231,7 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
     claimInventory,
     mappedCoverage,
     witnessVerifierKey,
+    witnessVerifierKeys: verifierKeyring?.keys.map((entry) => entry.key),
     baseline: resolveAdoptedBaseline(io.cwd, config.baselines),
     evidenceContext: {
       expectedInputDigest: expectedDigest,
