@@ -1254,6 +1254,40 @@ resolved plane leaves its pages classification-blocked, and
 `gateforge adopt --family pages` refuses to record while any page
 identity is undecided.
 
+Page paths carry the FULL deployment prefix. A string-literal `basename`
+on `<BrowserRouter>`, `<HashRouter>`, or `<MemoryRouter>` — or in the
+`createBrowserRouter` / `createHashRouter` options object — is prefixed
+onto every page path discovered under that router in the same file, so a
+router opened with `basename="/app"` yields `/app/departments`, not
+`/departments`. A computed basename (`basename={...}`, a variable in the
+options) is never guessed: the pages under it are not emitted and each
+becomes `PAGE_ROUTE_UNRESOLVED` naming the `file:line`. Two different
+literal basenames in one project are ambiguous: every page still carries
+its own router's prefix, and an `AMBIGUOUS_BASENAME` finding lists every
+declaration for the owner to reconcile.
+
+A prefix that lives OUTSIDE the code — a reverse proxy or sub-path host
+serving the app under a prefix — is the owner's `pages.basePath` setting.
+Declare it once and EVERY discovered page path (both routers, and manual
+`.gateforge/pages.yml` entries) is prefixed with it, after any router
+`basename`: `basePath: /shop` plus `basename="/app"` plus route `/x`
+gives `/shop/app/x`. The value must start with `/` and carry no trailing
+slash (`/` alone is the deployment root); anything else is a config
+validation error naming the rule. Page identity and every downstream
+check (visit URLs, final-URL-must-match-route grading) use the prefixed
+path end to end.
+
+A relative route (`path="departments"`) with no parent route in its file
+AND no router root (`BrowserRouter`, `HashRouter`, `MemoryRouter`,
+`RouterProvider`, `createBrowserRouter`, `createHashRouter`) in the file
+cannot be placed: Gateforge refuses to guess which prefix the component
+is rendered under and emits `PAGE_ROUTE_UNRESOLVED` — `relative route
+'departments' in src/Pages.tsx:12 has no parent route in this file;
+Gateforge cannot tell which prefix it is rendered under (make it
+absolute, or wrap it under its parent route)` — instead of a silently
+wrong page. Relative children under a parent route in the same file keep
+joining normally.
+
 `pages.params` supplies seeded IDs for dynamic routes. When no seed is
 configured, the referee can use a unique engine-observed create ID for the
 route's matching resource; ambiguous or unmatched IDs are never guessed, and

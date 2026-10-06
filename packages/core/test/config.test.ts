@@ -79,6 +79,24 @@ describe('parseConfig (pin #6)', () => {
     })).toThrow();
   });
 
+  it('validates pages.basePath as the deployment prefix outside the code', () => {
+    const base = { router: 'react-router', audiences: [], errorMarkers: [], params: {}, exclude: [], sweep: true };
+    expect(parseConfig({ ...validConfig, pages: { ...base, basePath: '/app' } }).pages?.basePath).toBe('/app');
+    expect(parseConfig({ ...validConfig, pages: { ...base } }).pages?.basePath).toBeUndefined();
+    for (const bad of ['app', '', 'app/', '/app/']) {
+      let caught: unknown;
+      try {
+        parseConfig({ ...validConfig, pages: { ...base, basePath: bad } });
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(GateforgeConfigError);
+      const diagnostics = (caught as GateforgeConfigError).diagnostics;
+      expect(diagnostics.some((diagnostic) => diagnostic.jsonPath === '$.pages.basePath')).toBe(true);
+      expect(diagnostics.some((diagnostic) => diagnostic.message.includes("pages.basePath must start with '/'"))).toBe(true);
+    }
+  });
+
   it('defaults an absent runner key to playwright (frozen behavior)', () => {
     const config = parseConfig(validConfig);
     expect(config.runner).toBe('playwright');

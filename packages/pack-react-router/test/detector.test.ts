@@ -67,4 +67,69 @@ describe('React Router reader', () => {
   const manual = createPageDetector({ root }).discover(['src'], { sections: { pages: { router: 'manual', audiences } } });
   expect(manual.resources[0]?.attributes).toMatchObject({ audience: 'employee', plane: 'tenant' });
  });
+ it('prefixes page paths with a string-literal router basename declared in the same file', () => {
+  const root = fixture(`<BrowserRouter basename="/app"><Routes><Route path="/departments" element={<Departments />} /><Route path="/departments/:id" element={<Department />} /></Routes></BrowserRouter>`);
+  const result = createPageDetector({ root }).discover(['src']);
+  expect(result.resources.map(r => r.attributes.path)).toEqual(['/app/departments', '/app/departments/:id']);
+  expect(result.unresolved).toEqual([]);
+  expect(result.findings).toEqual([]);
+ });
+ it('prefixes page paths with the createBrowserRouter options basename', () => {
+  const root = fixture(`const router = createBrowserRouter([{ path: '/departments', Component: Departments }, { path: 'about', Component: About }], { basename: '/app' });`);
+  const result = createPageDetector({ root }).discover(['src']);
+  expect(result.resources.map(r => r.attributes.path)).toEqual(['/app/departments', '/app/about']);
+  expect(result.unresolved).toEqual([]);
+ });
+ it('refuses a computed router basename instead of guessing the prefix', () => {
+  const root = fixture(`<BrowserRouter basename={import.meta.env.BASE_URL}><Routes><Route path="/departments" element={<Departments />} /></Routes></BrowserRouter>`);
+  const result = createPageDetector({ root }).discover(['src']);
+  expect(result.resources).toEqual([]);
+  expect(result.unresolved).toHaveLength(1);
+  expect(result.unresolved[0]).toMatchObject({ code: 'PAGE_ROUTE_UNRESOLVED', location: { file: 'src/routes.tsx', line: 1 } });
+  expect(result.unresolved[0]?.detail).toContain('basename');
+ });
+ it('prefixes every page path with pages.basePath after the router basename', () => {
+  const root = fixture(`<><BrowserRouter basename="/app"><Routes><Route path="/x" element={<X />} /></Routes></BrowserRouter><Routes><Route path="/y" element={<Y />} /><Route path="z" element={<Z />} /></Routes></>`);
+  const result = createPageDetector({ root }).discover(['src'], { root, sections: { pages: { basePath: '/shop' } } });
+  expect(result.resources.map(r => r.attributes.path).sort()).toEqual(['/shop/app/x', '/shop/y', '/shop/z']);
+  expect(result.unresolved).toEqual([]);
+  expect(result.findings).toEqual([]);
+ });
+ it('prefixes manual page paths with pages.basePath too', () => {
+  const root = fixture(`<Routes><Route path="/x" element={<X />} /></Routes>`);
+  mkdirSync(join(root, '.gateforge'));
+  writeFileSync(join(root, '.gateforge/pages.yml'), `pages:\n  - path: /x\n    audience: global\n    source: src/routes.tsx:1\n`);
+  const result = createPageDetector({ root }).discover(['src'], { sections: { pages: { router: 'manual', basePath: '/shop' } } });
+  expect(result.resources[0]?.attributes).toMatchObject({ path: '/shop/x' });
+ });
+ it('flags two different router basenames in the project as an ambiguous finding', () => {
+  const root = fixture(`<BrowserRouter basename="/app"><Routes><Route path="/x" element={<X />} /></Routes></BrowserRouter>`);
+  writeFileSync(join(root, 'src/other.tsx'), `<HashRouter basename="/shop"><Routes><Route path="/y" element={<Y />} /></Routes></HashRouter>`);
+  const result = createPageDetector({ root }).discover(['src']);
+  expect(result.resources.map(r => r.attributes.path).sort()).toEqual(['/app/x', '/shop/y']);
+  expect(result.findings).toHaveLength(1);
+  expect(result.findings[0]?.code).toBe('AMBIGUOUS_BASENAME');
+  expect(result.findings[0]?.locations).toHaveLength(2);
+ });
+ it('refuses a relative orphan route whose file has no parent route and no router root', () => {
+  const root = fixture(`<Routes><Route path="departments" element={<Departments />} /></Routes>`);
+  const result = createPageDetector({ root }).discover(['src']);
+  expect(result.resources).toEqual([]);
+  expect(result.unresolved).toHaveLength(1);
+  expect(result.unresolved[0]?.code).toBe('PAGE_ROUTE_UNRESOLVED');
+  expect(result.unresolved[0]?.detail).toBe(`relative route 'departments' in src/routes.tsx:1 has no parent route in this file; Gateforge cannot tell which prefix it is rendered under (make it absolute, or wrap it under its parent route)`);
+  expect(result.unresolved[0]?.location).toMatchObject({ file: 'src/routes.tsx', line: 1 });
+ });
+ it('still joins a relative child route under its parent route in the same file', () => {
+  const root = fixture(`<Routes><Route path="/orders" element={<Orders />}><Route path=":id" element={<Order />} /><Route path="new" element={<NewOrder />} /></Route></Routes>`);
+  const result = createPageDetector({ root }).discover(['src']);
+  expect(result.resources.map(r => r.attributes.path)).toEqual(['/orders', '/orders/:id', '/orders/new']);
+  expect(result.unresolved).toEqual([]);
+ });
+ it('keeps a plain absolute Routes tree unchanged', () => {
+  const root = fixture(`<Routes><Route path="/x" element={<X />} /></Routes>`);
+  const result = createPageDetector({ root }).discover(['src']);
+  expect(result.resources.map(r => r.attributes.path)).toEqual(['/x']);
+  expect(result.unresolved).toEqual([]);
+ });
 });

@@ -749,6 +749,17 @@ export const GateforgeConfigSchema = z
     pages: z
       .object({
         router: z.enum(['react-router', 'manual']),
+        /**
+         * The deployment prefix that lives OUTSIDE the code — a reverse
+         * proxy or sub-path host serving the app under a prefix (e.g.
+         * '/app' when the site is reached at https://host/app/...).
+         * Prefixed onto EVERY discovered page path, after any router
+         * `basename` the detector reads from the code. Must start with
+         * '/' and carry no trailing slash ('/' alone is the root).
+         * ABSENT = the app is served from the origin root, byte-identical
+         * to pre-0.13.0 discovery.
+         */
+        basePath: z.string().optional(),
         audiences: z.array(z.object({
           name: z.string().min(1),
           loginRoute: z.string().startsWith('/'),
@@ -764,6 +775,16 @@ export const GateforgeConfigSchema = z
       })
       .strict()
       .superRefine((pages, ctx) => {
+        if (pages.basePath !== undefined) {
+          const value = pages.basePath;
+          if (!value.startsWith('/') || (value.length > 1 && value.endsWith('/'))) {
+            ctx.addIssue({
+              code: 'custom',
+              path: ['basePath'],
+              message: "pages.basePath must start with '/' and must not end with '/' (use '/' alone for the deployment root)",
+            });
+          }
+        }
         const names = new Set<string>();
         for (const [index, audience] of pages.audiences.entries()) {
           if (names.has(audience.name)) ctx.addIssue({ code: 'custom', path: ['audiences', index, 'name'], message: `duplicate audience '${audience.name}'` });

@@ -66,6 +66,23 @@
   channel; reports, `explain`, and `next` show page status and the cheapest
   route, seed, or refusal fix.
 
+- **Router `basename` and `pages.basePath` prefixes; unplaceable relative routes refused (0.13.0).**
+  The React Router reader prefixes page paths with a string-literal
+  `basename` read from the code — on `<BrowserRouter>`/`<HashRouter>`/`<MemoryRouter>`
+  or in the `createBrowserRouter`/`createHashRouter` options — so a page under
+  `basename="/app"` is discovered, visited, and route-matched at `/app/...`,
+  never at the bare route. A computed basename is never guessed: the pages
+  under it become `PAGE_ROUTE_UNRESOLVED` naming the `file:line`, and two
+  different basenames in one project raise an `AMBIGUOUS_BASENAME` finding.
+  A prefix that lives OUTSIDE the code (reverse proxy, sub-path host) is the
+  new optional `pages.basePath` key: it prefixes EVERY discovered page path
+  after the router `basename`, must start with `/` with no trailing slash,
+  and an invalid value is a config validation error naming the rule. A
+  relative route (`path="departments"`) with no parent route in its file and
+  no router root in the file is no longer silently joined onto `/departments`:
+  the page is not emitted and `PAGE_ROUTE_UNRESOLVED` says to make it
+  absolute or wrap it under its parent route.
+
 - **Plain Playwright test compatibility.** The Playwright fixture now reuses
   the runner's initialized core API if a raw test imports it while the public
   CommonJS entry is still loading; raw tests keep running without requiring
