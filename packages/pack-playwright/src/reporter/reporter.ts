@@ -824,7 +824,7 @@ export class GateforgeReporter {
         exposure: string;
         plane: string;
         evidenceAdapter?: string;
-        evidenceLane?: 'adapter' | 'claims';
+        evidenceLane?: 'adapter' | 'claims' | 'page-observation';
         lifecycle: Classification['lifecycle'];
       }
     >
@@ -844,7 +844,7 @@ export class GateforgeReporter {
           exposure: string;
           plane: string;
           evidenceAdapter?: string;
-          evidenceLane?: 'adapter' | 'claims';
+          evidenceLane?: 'adapter' | 'claims' | 'page-observation';
           lifecycle: Classification['lifecycle'];
         }
       > = {};
@@ -872,7 +872,9 @@ export class GateforgeReporter {
           // The claims lane (http.endpoint resources) MUST reach the
           // engine: without it a user-facing adapter-free entry fails the
           // engine's classification validation and grades unclassified.
-          ...(entry['evidenceLane'] === 'adapter' || entry['evidenceLane'] === 'claims'
+          ...(entry['evidenceLane'] === 'adapter' ||
+          entry['evidenceLane'] === 'claims' ||
+          entry['evidenceLane'] === 'page-observation'
             ? { evidenceLane: entry['evidenceLane'] }
             : {}),
           lifecycle: {
@@ -920,7 +922,7 @@ export class GateforgeReporter {
         exposure: string;
         plane: string;
         evidenceAdapter?: string;
-        evidenceLane?: 'adapter' | 'claims';
+        evidenceLane?: 'adapter' | 'claims' | 'page-observation';
         lifecycle: Classification['lifecycle'];
       }
     >,

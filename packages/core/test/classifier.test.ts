@@ -844,6 +844,58 @@ describe('plane, identity, adapter, hostile input', () => {
     expect(decision(result).blocks.map((block) => block.code)).toEqual(['IDENTITY_CONTRADICTION']);
   });
 
+
+  it('classifies a reader-resolved page without persistence identity evidence or an adapter', () => {
+    const page = resource({
+      name: 'page-orders',
+      id: 'tenant.page-orders',
+      kind: 'ui.page',
+      source: 'src/routes.tsx',
+      location: { file: 'src/routes.tsx', line: 4, col: 0 },
+      detector: { id: 'gateforge.pack-react-router', version: '0.13.0' },
+      attributes: { path: '/orders', audience: 'tenant', plane: 'tenant' },
+    });
+    const result = classifyResources({
+      resources: [page],
+      signals: [],
+      policy: policy(),
+      adapters: [],
+      scan: EMPTY_SCAN,
+    });
+    const entry = decision(result, 'page-orders');
+    expect(entry.blocks).toEqual([]);
+    expect(entry.classification).toMatchObject({
+      exposure: 'user-facing',
+      plane: 'tenant',
+      lifecycle: { create: false, read: false, update: false, delete: false },
+      primaryKey: ['path'],
+      evidenceLane: 'page-observation',
+    });
+    expect(entry.classification?.evidenceAdapter).toBeUndefined();
+  });
+
+  it('keeps reader pages with an unknown audience classification-blocked', () => {
+    const page = resource({
+      name: 'page-private',
+      id: null,
+      kind: 'ui.page',
+      source: 'src/routes.tsx',
+      location: { file: 'src/routes.tsx', line: 5, col: 0 },
+      detector: { id: 'gateforge.pack-react-router', version: '0.13.0' },
+      attributes: { path: '/private', audience: 'unknown', plane: 'tenant' },
+    });
+    const result = classifyResources({
+      resources: [page],
+      signals: [],
+      policy: policy(),
+      adapters: [],
+      scan: EMPTY_SCAN,
+    });
+    const entry = decision(result, 'page-private');
+    expect(entry.classification).toBeNull();
+    expect(entry.blocks.map((block) => block.code)).toEqual(['PLANE_UNRESOLVED']);
+  });
+
   it('user-facing without an adapter blocks as ADAPTER_MISSING', () => {
     const result = classify({ ...cleanInput(), adapters: [] });
     expect(decision(result).blocks.map((block) => block.code)).toEqual(['ADAPTER_MISSING']);

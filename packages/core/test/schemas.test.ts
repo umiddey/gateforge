@@ -518,7 +518,7 @@ describe('archive lifecycle requires a non-empty owner-owned archiveFields map',
   });
 });
 
-describe('evidenceLane: the claims lane exempts a user-facing entry from the adapter', () => {
+describe('evidence lanes exempt route resources from the persistence adapter', () => {
   const businessBase = {
     exposure: 'user-facing',
     plane: 'tenant',
@@ -541,11 +541,15 @@ describe('evidenceLane: the claims lane exempts a user-facing entry from the ada
   });
 
   it("user-facing with evidenceLane 'claims' and no adapter passes (http.endpoint lane)", () => {
-    // The classifier mints this for http.endpoint resources only; the
-    // schema-level contract is that the lane REPLACES the adapter demand.
     expect(ClassificationSchema.safeParse({ ...businessBase, evidenceLane: 'claims' }).success).toBe(
       true,
     );
+  });
+
+  it("user-facing with evidenceLane 'page-observation' and no adapter passes (ui.page lane)", () => {
+    expect(
+      ClassificationSchema.safeParse({ ...businessBase, evidenceLane: 'page-observation' }).success,
+    ).toBe(true);
   });
 
   it('rejects unknown evidenceLane values', () => {

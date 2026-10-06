@@ -8,14 +8,11 @@
  *   `primaryKey` attribute;
  * - internal resources default to NO CRUD obligations and their claims
  *   are invalid (enforced downstream by the verdict engine, not here);
- * - a user-facing resource cannot be proven without a trusted evidence
- *   adapter, so `evidenceAdapter` is mandatory for user-facing entries —
- *   on the BUSINESS-resource lane. `http.endpoint` resources are witnessed
- *   through the claims/witness-proxy lane (`http:frontend-request-observed`
- *   etc.), not through entity persistence adapters (whose contract — read
- *   by id, normalize body, deletion kind — is about business entities), so
- *   a user-facing classification may instead declare
- *   `evidenceLane: 'claims'` and omit the adapter.
+ * - a user-facing resource cannot be proven without trusted evidence;
+ *   business resources therefore require `evidenceAdapter`. `http.endpoint`
+ *   resources use the claims/witness-proxy lane, while reader-resolved
+ *   `ui.page` resources use browser observation. Those route lanes omit the
+ *   persistence adapter, whose contract is about business entities.
  */
 import { z } from 'zod';
 import { ExposureSchema, PlaneSchema, SchemaVersionField } from './common.js';
@@ -111,9 +108,9 @@ export const ClassificationSchema = z
     /** Lifecycle operations the UI supports for this resource. */
     lifecycle: LifecycleSchema,
     /**
-     * Mandatory ordered entity-identity columns (ADR 0001): a single
-     * column for simple identity, ordered lowest-index-first for
-     * composite identity.
+     * Ordered identity columns for persisted resources (ADR 0001). The
+     * classifier supplies `['path']` for `ui.page`: a route's structural
+     * key, not persistence identity evidence.
      */
     primaryKey: z.array(z.string().min(1)).min(1),
     /**
@@ -124,16 +121,13 @@ export const ClassificationSchema = z
      */
     evidenceAdapter: z.string().min(1).optional(),
     /**
-     * Which evidence lane proves user-facing reachability. Omitted means
+     * Which evidence lane proves a user-facing resource. Omitted means
      * the default `'adapter'` lane: a reviewed EntityAdapter must collect
-     * the evidence (the business-resource requirement — never weakened).
-     * `'claims'` is the http.endpoint lane: routes are witnessed through
-     * the claims/witness-proxy lane (`http:frontend-request-observed`),
-     * not through entity persistence adapters, so the adapter is not
-     * demanded. The classifier mints `'claims'` ONLY for `http.endpoint`
-     * resources; business resources must keep the adapter demand.
+     * persistence evidence. `'claims'` is the HTTP endpoint lane;
+     * `'page-observation'` is the witness's observation-only UI page lane.
+     * Neither route lane uses an EntityAdapter.
      */
-    evidenceLane: z.enum(['adapter', 'claims']).optional(),
+    evidenceLane: z.enum(['adapter', 'claims', 'page-observation']).optional(),
     /** Free-form classification note shown in reports. */
     notes: z.string().optional(),
   })
@@ -142,7 +136,8 @@ export const ClassificationSchema = z
     if (
       entry.exposure === 'user-facing' &&
       entry.evidenceAdapter === undefined &&
-      entry.evidenceLane !== 'claims'
+      entry.evidenceLane !== 'claims' &&
+      entry.evidenceLane !== 'page-observation'
     ) {
       ctx.addIssue({
         code: 'custom',

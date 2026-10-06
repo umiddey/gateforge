@@ -36,6 +36,8 @@ import {
 import { globMatch } from './glob.js';
 import { HTTP_ENDPOINT_RESOURCE_KIND } from '../graph/schema.js';
 
+const UI_PAGE_RESOURCE_KIND = 'ui.page';
+
 /** The resources the classifier classifies (graph resources, pre-binding). */
 export interface ClassifierResourceRef {
   /** Bare resource name (the `resourceName` attribute). */
@@ -157,6 +159,7 @@ export const RULES = {
   exposurePositive: 'EXPOSURE_POSITIVE_SIGNAL',
   exposureInternalCertificate: 'EXPOSURE_INTERNAL_CERTIFICATE',
   exposureDefault: 'EXPOSURE_DEFAULT_USER_FACING',
+  exposurePageAudience: 'EXPOSURE_PAGE_AUDIENCE',
   exposureOperationalProbe: 'EXPOSURE_OPERATIONAL_PROBE',
   lifecyclePositive: 'LIFECYCLE_POSITIVE_SIGNAL',
   lifecycleDeclaredSupported: 'LIFECYCLE_DECLARED_SUPPORTED',
@@ -168,6 +171,8 @@ export const RULES = {
   deleteOwnerRule: 'DELETE_SEMANTICS_OWNER_RULE',
   planeEvidence: 'PLANE_DETECTOR_EVIDENCE',
   lifecycleEndpointHttp: 'LIFECYCLE_ENDPOINT_HTTP',
+  lifecyclePageObservation: 'LIFECYCLE_PAGE_OBSERVATION',
+  identityPageRoute: 'IDENTITY_PAGE_ROUTE',
   identityEvidence: 'IDENTITY_DETECTOR_EVIDENCE',
   adapterNameMatch: 'ADAPTER_NAME_MATCH',
   orgInternalRule: 'ORGANIZATION_INTERNAL_RULE',
@@ -1066,6 +1071,14 @@ function classifyOne(
   // -- Plane ----------------------------------------------------------------
   const planeCandidates = new Set<string>();
   const attributePlane = resource.attributes['plane'];
+  if (
+    resource.kind === UI_PAGE_RESOURCE_KIND &&
+    (typeof resource.attributes['audience'] !== 'string' ||
+      resource.attributes['audience'] === '' ||
+      resource.attributes['audience'] === 'unknown')
+  ) {
+    return blocked(resource, [planeUnresolvedBlock(resource, 'page audience is unresolved by pages.audiences')]);
+  }
   if (attributePlane === 'tenant' || attributePlane === 'master' || attributePlane === 'global') {
     planeCandidates.add(attributePlane);
   }
@@ -1128,7 +1141,10 @@ function classifyOne(
     identityKeys.add(joinKeys(signal.assertion as string[]));
   }
   let primaryKey: string[];
-  if (identityKeys.size === 1) {
+  if (resource.kind === UI_PAGE_RESOURCE_KIND) {
+    primaryKey = ['path'];
+    rules.push(RULES.identityPageRoute);
+  } else if (identityKeys.size === 1) {
     const only = [...identityKeys][0] as string;
     primaryKey = splitKeys(only);
     rules.push(RULES.identityEvidence);
@@ -1182,7 +1198,10 @@ function classifyOne(
   const hasInternalIntent = internalDeclarations.length > 0 || matchedInternalRules.length > 0;
 
   let exposure: 'user-facing' | 'internal';
-  if (isOperationalEndpoint(resource)) {
+  if (resource.kind === UI_PAGE_RESOURCE_KIND) {
+    exposure = 'user-facing';
+    rules.push(RULES.exposurePageAudience);
+  } else if (isOperationalEndpoint(resource)) {
     // Operational probes (plan §6 "Health/operations") resolve through an
     // engine-issued exposure lane, NOT the user-facing default and NOT an
     // internality certificate: the class itself is positive compiler
@@ -1336,7 +1355,13 @@ function classifyOne(
   // contracts) have no honest meaning here and would only demand
   // delete-semantics evidence no route can carry.
   const lifecycle: Lifecycle = { create: true, read: true, update: true, delete: true };
-  if (resource.kind === HTTP_ENDPOINT_RESOURCE_KIND) {
+  if (resource.kind === UI_PAGE_RESOURCE_KIND) {
+    lifecycle.create = false;
+    lifecycle.read = false;
+    lifecycle.update = false;
+    lifecycle.delete = false;
+    rules.push(RULES.lifecyclePageObservation);
+  } else if (resource.kind === HTTP_ENDPOINT_RESOURCE_KIND) {
     // ADR 0004 D5/D8: HTTP endpoints carry no lifecycle lattice. Their
     // route semantics live in the compiled capabilities attribute, and
     // the policy engine never generates crud:*/persistence:* contracts
@@ -1606,20 +1631,13 @@ function classifyOne(
   }
 
   // -- Adapter binding -------------------------------------------------------
-  // The reviewed EntityAdapter demand is a BUSINESS-resource requirement,
-  // not a universal one (dogfood: 473/746 ADAPTER_MISSING blocks on pure
-  // endpoints). An `http.endpoint` resource is witnessed through the
-  // claims/witness-proxy lane (`http:frontend-request-observed` etc.);
-  // EntityAdapter's contract — read by id, normalize a body, deletion
-  // kind — is about business-entity persistence and has no honest meaning
-  // for a route, so demanding one for every user-facing endpoint was a
-  // category error that red the gate on evidence no route can carry.
-  // Endpoints therefore classify user-facing WITHOUT an adapter (the
-  // claims lane, recorded as `evidenceLane: 'claims'` so the schema and
-  // every downstream consumer see WHY no adapter is present). The demand
-  // is unchanged for business kinds: a user-facing table without a
-  // reviewed adapter still blocks (ADAPTER_MISSING).
-  const businessResource = resource.kind !== HTTP_ENDPOINT_RESOURCE_KIND;
+  // Reviewed EntityAdapters are required only for persisted business
+  // resources. HTTP endpoints use the claims/witness-proxy lane; ui.page
+  // resources are witness-observed routes with no persistence state.
+  // Neither route kind has an honest EntityAdapter contract, while the
+  // adapter demand remains unchanged for business kinds.
+  const businessResource =
+    resource.kind !== HTTP_ENDPOINT_RESOURCE_KIND && resource.kind !== UI_PAGE_RESOURCE_KIND;
   let evidenceAdapter: string | undefined;
   if (exposure === 'user-facing' && businessResource) {
     const bound = bindAdapter(ctx.adapters, resource, signals);
@@ -1646,7 +1664,11 @@ function classifyOne(
     plane,
     lifecycle,
     primaryKey,
-    ...(exposure === 'user-facing' && !businessResource ? { evidenceLane: 'claims' as const } : {}),
+    ...(exposure === 'user-facing' && resource.kind === UI_PAGE_RESOURCE_KIND
+      ? { evidenceLane: 'page-observation' as const }
+      : exposure === 'user-facing' && !businessResource
+        ? { evidenceLane: 'claims' as const }
+        : {}),
     ...(evidenceAdapter !== undefined ? { evidenceAdapter } : {}),
   };
   const signalIds = [...new Set(contributing.map((s) => signalId(s)))].sort(compareStrings);
