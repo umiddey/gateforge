@@ -2095,6 +2095,45 @@ function gradeAlembicObligation(obligation: Obligation, context: VerdictContext)
   };
 }
 
+function gradePageObligation(obligation: Obligation, records: readonly unknown[]): VerdictOutcome {
+  const verdictKey = obligation.contract === 'page:loads' ? 'loads' : 'dataOk';
+  const pageRecords = records
+    .map(asRecord)
+    .filter((record): record is RecordLike =>
+      record !== null &&
+      record.obligationId === obligation.id &&
+      record.kind === 'page.observed' &&
+      record.origin === 'engine-observed' &&
+      record.testId !== undefined &&
+      trustOf(record) === 'witnessed' &&
+      payloadOf(record)?.['routeId'] === obligation.resourceId,
+    );
+  for (const record of pageRecords) {
+    const pageVerdict = payloadOf(record)?.[verdictKey];
+    if (!isPlainObject(pageVerdict) || pageVerdict['satisfied'] !== true ||
+      !Array.isArray(pageVerdict['refusalReasons']) || pageVerdict['refusalReasons'].length !== 0) continue;
+    if (typeof record.recordId !== 'string') continue;
+    return { verdict: 'satisfied', reason: null, recordIds: [record.recordId] };
+  }
+  const refused = pageRecords[0];
+  if (refused !== undefined) {
+    const pageVerdict = payloadOf(refused)?.[verdictKey];
+    const reasons = isPlainObject(pageVerdict) && Array.isArray(pageVerdict['refusalReasons'])
+      ? pageVerdict['refusalReasons'].filter((reason): reason is string => typeof reason === 'string')
+      : [];
+    return {
+      verdict: 'invalid',
+      reason: reasons.length > 0 ? `witness refused page observation: ${reasons.join(', ')}` : 'witness page observation was not clean',
+      recordIds: typeof refused.recordId === 'string' ? [refused.recordId] : [],
+    };
+  }
+  return {
+    verdict: 'missing',
+    reason: `no clean witness-observed page visit from a passing test exists for '${obligation.resourceId}'`,
+    recordIds: [],
+  };
+}
+
 /**
  * Evaluates ONE obligation against the run's claims, records, waivers,
  * classification, and injected clock (pin #9). Pure and deterministic:
@@ -2128,6 +2167,9 @@ export function evaluateObligation(
   const verified = parsedObligation.data;
   if (verified.contract.startsWith('alembic:')) {
     return gradeAlembicObligation(verified, context);
+  }
+  if (verified.contract === 'page:loads' || verified.contract === 'page:data-ok') {
+    return gradePageObligation(verified, context.records ?? []);
   }
   const now = parseInstant(context.now);
 

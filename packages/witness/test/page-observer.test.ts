@@ -82,7 +82,9 @@ describe('real CDP page observer', () => {
       expect((await expectVisit('/broken')).verdict.loads.refusalReasons).toContain('PAGE_ERROR_MARKER');
       expect((await expectVisit('/bad')).verdict.dataOk.refusalReasons).toContain('PAGE_API_ERROR');
       await page.route('**/api/local', (route) => route.fulfill({ status: 200, body: '{}' }));
-      expect((await expectVisit('/local')).verdict.dataOk.refusalReasons).toContain('PAGE_LOCALLY_FULFILLED');
+      const locallyFulfilled = (await expectVisit('/local')).verdict;
+      expect(locallyFulfilled.loads.refusalReasons).toContain('PAGE_LOCALLY_FULFILLED');
+      expect(locallyFulfilled.dataOk.refusalReasons).toContain('PAGE_LOCALLY_FULFILLED');
     } finally {
 
       await observer.close();

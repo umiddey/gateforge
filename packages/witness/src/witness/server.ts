@@ -614,6 +614,7 @@ interface WitnessState {
    */
   sessionPageOrigins: Map<string, SessionPageOriginReport>;
   pageObservers: Map<string, { close(): Promise<void> }>;
+  pageObservationRecords: Map<string, string[]>;
   /**
    * Trusted run context bound via `POST /run-context` (plan §11.4): the
    * frozen `{runId, invocationId, inputDigest}` the witness attests.
@@ -1264,6 +1265,15 @@ async function stopPageObserver(state: WitnessState, sessionId: string): Promise
   await observer?.close();
 }
 
+/** Only a test session sealed as passing can retain its page observations. */
+function sealPageObservationRecords(state: WitnessState, sessionId: string, outcome: string | null): void {
+  const recordIds = state.pageObservationRecords.get(sessionId) ?? [];
+  if (outcome !== 'passed') {
+    for (const recordId of recordIds) state.ledger.delete(recordId);
+  }
+  state.pageObservationRecords.delete(sessionId);
+}
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -1467,6 +1477,7 @@ export async function startWitness(options: WitnessOptions): Promise<WitnessHand
     behaviorCatalog: null,
     caseExecutions: new Map(),
     tick: 0,
+    pageObservationRecords: new Map(),
     sessions: new Map(),
     workerSessions: new Map(),
     sessionIdentities: new Map(),
@@ -2338,9 +2349,8 @@ async function handleRequest(
           response: res,
           body,
           requireSession: (value) => requireOpenSession(state, value),
-          issueRecord: (obligationId, testId, payload) => {
-            issueRecord(state, obligationId, 'page.observed', testId, payload, 'engine-observed');
-          },
+          issueRecord: (obligationId, testId, payload) =>
+            issueRecord(state, obligationId, 'page.observed', testId, payload, 'engine-observed').recordId,
         });
       } catch (error) {
         if (error instanceof PageObserverRegistrationError) throw new HttpError(error.status, error.message);
@@ -3707,6 +3717,7 @@ async function handleSessionClose(
       }
       session.outcome = outcome;
     }
+    sealPageObservationRecords(state, sessionId, session.outcome);
     // The session's own evidence died with its proxy at release; the
     // observe snapshots are dropped HERE, at the moment the outcome is
     // finally recorded, so an unreleased session's before-state can
@@ -3723,6 +3734,7 @@ async function handleSessionClose(
     session.status = 'sealed';
     session.sealedTick = (state.tick += 1);
     session.outcome = typeof outcome === 'string' ? outcome : null;
+    sealPageObservationRecords(state, sessionId, session.outcome);
     state.workerSessions.delete(session.workerIndex);
     // Observe snapshots die with the session: finalize runs BEFORE seal
     // (the drain finalizes a passed test, then seals), so anything left
@@ -6394,6 +6406,9 @@ async function stopWitness(state: WitnessState): Promise<void> {
   }
   for (const sessionId of state.pageObservers.keys()) {
     await stopPageObserver(state, sessionId);
+  }
+  for (const sessionId of state.pageObservationRecords.keys()) {
+    sealPageObservationRecords(state, sessionId, null);
   }
   // Phase 4 lifecycle shutdown: release every live fixture lease namespace.
   // Timeouts/failures release only their own namespace and never flip a

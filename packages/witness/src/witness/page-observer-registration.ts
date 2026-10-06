@@ -4,6 +4,7 @@ import { observePageBrowser, type PageObserver } from './page-observer.js';
 import type { PageVisitVerdict } from './page-observation.js';
 export interface PageObserverRegistrationState {
   pageObservers: Map<string, PageObserver>;
+  pageObservationRecords: Map<string, string[]>;
   observed: Array<{ seq: number; sessionId: string | null; path: string; status: number }>;
 }
 
@@ -19,7 +20,7 @@ export async function registerPageObserver(input: {
   response: ServerResponse;
   body: SessionPageObserverRequest;
   requireSession(body: Record<string, unknown>): { sessionId: string; testId: string; activity: number };
-  issueRecord(obligationId: string, testId: string, payload: unknown): void;
+  issueRecord(obligationId: string, testId: string, payload: unknown): string;
 }): Promise<void> {
   const { state, body } = input;
   const session = input.requireSession(body as unknown as Record<string, unknown>);
@@ -62,7 +63,7 @@ export async function registerPageObserver(input: {
       },
       onVisit(visit, verdict: PageVisitVerdict) {
         if (verdict.pageId === null) return;
-        input.issueRecord(`${verdict.pageId}:page:loads`, session.testId, {
+        const payload = {
           routeId: verdict.pageId,
           finalUrl: visit.url,
           navigations: visit.navigations,
@@ -71,7 +72,11 @@ export async function registerPageObserver(input: {
           apiStatuses: visit.apiResponses.map(({ url, status, remoteAddress, proxied }) => ({ url, status, remoteAddress, proxied })),
           loads: verdict.loads,
           dataOk: verdict.dataOk,
-        });
+        };
+        const recordIds = state.pageObservationRecords.get(session.sessionId) ?? [];
+        recordIds.push(input.issueRecord(`${verdict.pageId}:page:loads`, session.testId, payload));
+        recordIds.push(input.issueRecord(`${verdict.pageId}:page:data-ok`, session.testId, payload));
+        state.pageObservationRecords.set(session.sessionId, recordIds);
       },
     });
   } catch (error) {

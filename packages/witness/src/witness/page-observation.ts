@@ -76,8 +76,10 @@ export function gradePageVisit(input: {
   if (visit.domMarkerHit) loadsReasons.push('PAGE_ERROR_MARKER');
   const dataReasons: PageRefusalReason[] = [];
   for (const response of visit.apiResponses) {
-    if (response.remoteAddress === null || !response.proxied) dataReasons.push('PAGE_LOCALLY_FULFILLED');
-    else if (response.status >= 400) dataReasons.push('PAGE_API_ERROR');
+    if (response.remoteAddress === null || !response.proxied) {
+      loadsReasons.push('PAGE_LOCALLY_FULFILLED');
+      dataReasons.push('PAGE_LOCALLY_FULFILLED');
+    } else if (response.status >= 400) dataReasons.push('PAGE_API_ERROR');
   }
   return {
     pageId: page?.id ?? null,
