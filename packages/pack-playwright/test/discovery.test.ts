@@ -268,6 +268,37 @@ describe('static discovery', () => {
     expect(inferenceOf(real).mockSignals.some((signal) => signal.kind === 'mock')).toBe(false);
   });
 
+  it('flags page-observation tampering APIs in specs and imported helpers with exact locations', () => {
+    const calls = [
+      'page.evaluate("document.body.innerText")',
+      'page.addInitScript(() => {})',
+      'page.exposeFunction("host", () => {})',
+      'page.route("**/*", route => route.continue())',
+      'context.route("**/*", route => route.continue())',
+      'route.fulfill({ status: 200 })',
+      'page.setContent("<main></main>")',
+      'context.newCDPSession(page)',
+    ];
+    for (const call of calls) {
+      const root = makeTempDir();
+      writeTree(root, {
+        'e2e/helper.js': `export function tamper(page, context, route) { ${call}; }`,
+        'e2e/page.spec.ts': [
+          "import { test } from 'playwright/test';",
+          "import { tamper } from './helper.js';",
+          "test('opens orders', async ({ page }) => { tamper(page); });",
+          '',
+        ].join('\n'),
+      });
+      const result = scanTestFiles({ cwd: root, include: ['e2e/**/*.ts'], exclude: [] });
+      const test = rowFor(result.entries, 'e2e/page.spec.ts');
+      expect(test.facts.fileRouteInterception?.file).toBe('e2e/helper.js');
+      expect(inferenceOf(test).mockSignals.some((signal) =>
+        signal.detail.startsWith('PAGE_OBSERVATION_TAMPER_RISK:'),
+      )).toBe(true);
+    }
+  });
+
   it("a mocked/mock/mocks FOLDER segment mocks its specs (0.9.2)", () => {
     const root = makeTempDir();
     writeTree(root, {

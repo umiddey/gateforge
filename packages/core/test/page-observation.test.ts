@@ -6,8 +6,8 @@ const RUN_ID = '3f2504e0-4f89-41d3-9a0c-0305e82c3301';
 const cleanPayload = {
   routeId: PAGE_ID,
   finalUrl: 'http://127.0.0.1/orders/42',
-  loads: { satisfied: true, refusalReasons: [] },
-  dataOk: { satisfied: true, refusalReasons: [] },
+  loads: { satisfied: true, refusalReasons: [] as string[] },
+  dataOk: { satisfied: true, refusalReasons: [] as string[] },
 };
 
 function obligation(contract: 'page:loads' | 'page:data-ok'): Obligation {

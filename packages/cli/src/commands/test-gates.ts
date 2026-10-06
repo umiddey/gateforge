@@ -4262,11 +4262,29 @@ async function runSupervisedTestGatesInner(
     });
     if (pages.length > 0) {
       const appOrigin = new URL(io.env['GATEFORGE_APP_BASE_URL']).origin;
+      writeLine(
+        io.stderr,
+        'PAGE_OBSERVATION_FIXTURE_REQUIRED: page records are issued only for tests using the Gateforge Playwright fixture; other tests produce no page-observation records.',
+      );
+      const tamperRisks = catalog?.entries.flatMap((entry) => {
+        const risk = entry.suppressionSignals.find((signal) =>
+          signal.kind === 'mock' && signal.detail.startsWith('PAGE_OBSERVATION_TAMPER_RISK:'),
+        );
+        return risk === undefined
+          ? []
+          : [{
+              testId: entry.parameterIdentity,
+              file: entry.file,
+              titlePath: entry.titlePath,
+              line: risk.location.line,
+            }];
+      }) ?? [];
       suiteEnv['GATEFORGE_PAGE_OBSERVATION_CONFIG'] = JSON.stringify({
         pages,
         loginRoutes: (config.pages?.audiences ?? []).map((audience) => audience.loginRoute),
         errorMarkers: config.pages?.errorMarkers ?? [],
         appOrigins: [appOrigin],
+        tamperRisks,
       });
     }
   }

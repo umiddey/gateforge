@@ -1135,8 +1135,7 @@ function mockSignalsOf(staticEntry: StaticScanResult['entries'][number]) {
   if (staticEntry.facts.fileRouteInterception !== null) {
     signals.push({
       kind: 'mock',
-      detail:
-        'network interception (page.route/context.route/route.fulfill) somewhere in the test file — a shared helper every test calls intercepts for all of them',
+      detail: `PAGE_OBSERVATION_TAMPER_RISK: browser API mutation at ${staticEntry.facts.fileRouteInterception.file}:${staticEntry.facts.fileRouteInterception.line}`,
       location: staticEntry.facts.fileRouteInterception,
     });
   }

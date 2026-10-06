@@ -212,14 +212,22 @@ export function inferTestKind(input: InferenceFacts): InferenceResult {
     rulesFired.push({ ruleId: 'mock-page-route', evidence: 'page.route call intercepts network', location: input.facts.pageRoute });
   }
   if (input.facts.fileRouteInterception !== null) {
+    const riskDetail =
+      `PAGE_OBSERVATION_TAMPER_RISK: browser API mutation at ${input.facts.fileRouteInterception.file}:` +
+      `${input.facts.fileRouteInterception.line} in the spec or its imported helper`;
     mockSignals.push({
       kind: 'mock',
-      detail: 'network interception (page.route/context.route/route.fulfill) somewhere in the test file — a shared helper every test calls intercepts for all of them',
+      detail: riskDetail,
       location: input.facts.fileRouteInterception,
     });
     rulesFired.push({
       ruleId: 'mock-file-route-interception',
-      evidence: 'route interception anywhere in the file mocks the boundary for every test in it',
+      evidence: riskDetail,
+      location: input.facts.fileRouteInterception,
+    });
+    rulesFired.push({
+      ruleId: 'page-observation-tamper-risk',
+      evidence: riskDetail,
       location: input.facts.fileRouteInterception,
     });
   }

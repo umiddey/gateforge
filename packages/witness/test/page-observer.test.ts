@@ -64,7 +64,9 @@ describe('real CDP page observer', () => {
       appOrigins: [appOrigin],
       isProxiedExchange: (url) => !new URL(url).pathname.endsWith('/local'),
       quietMs: 300,
-      onVisit: (visit, verdict) => visits.push({ url: new URL(visit.url).pathname, verdict }),
+      onVisit: (visit, verdict) => {
+        visits.push({ url: new URL(visit.url).pathname, verdict });
+      },
     });
     const context = await browser.newContext();
     const page = await context.newPage();

@@ -8,9 +8,14 @@
   `.gateforge/pages.yml` inventory when `pages.router: manual` is selected.
   `.gateforge.yml` `pages:` owner declarations bind audiences and error
   markers; each plane-resolved `ui.page` contributes `page:loads` and
-  `page:data-ok` obligations. These obligations have no proof channel yet,
-  so they remain missing until evidence support is added; `gateforge adopt`
-  records pre-existing page debt without blocking the adoption.
+  `page:data-ok` obligations. In witnessed Playwright runs, the fixture gives
+  the witness an independent Chromium debugging endpoint; the witness records
+  settled, route-matched visits, login bounces, uncaught errors, configured
+  error markers, and app-origin API statuses. Local fulfilment or an unobserved
+  proxy exchange refuses proof. Only clean page observations from passing tests
+  in the sealed run satisfy obligations; static browser-tampering risks are
+  refused with source locations. `gateforge adopt` records pre-existing page
+  debt without blocking the adoption.
 
 ## 0.12.0
 

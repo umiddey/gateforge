@@ -16,6 +16,7 @@
  */
 import { chromium, firefox, webkit } from 'playwright';
 import type { Page } from 'playwright/test';
+import { relative } from 'node:path';
 import { createServer as createTcpServer } from 'node:net';
 import { once } from 'node:events';
 import type { Browser } from 'playwright/test';
@@ -239,8 +240,16 @@ export const test = base.extend<EvidenceFixtures>({
         loginRoutes: string[];
         errorMarkers: string[];
         appOrigins: string[];
+        tamperRisks: Array<{ testId: string | null; file: string; titlePath: string[]; line: number }>;
       };
-      if (Array.isArray(configured.pages) && configured.pages.length > 0) {
+      const file = relative(process.cwd(), testInfo.file).replaceAll('\\', '/');
+      const tamperRisk = configured.tamperRisks.find((risk) =>
+        (risk.testId !== null && risk.testId === testInfo.testId) ||
+        (risk.file === file && risk.titlePath.join('\u0000') === testInfo.titlePath.join('\u0000')),
+      );
+      if (tamperRisk !== undefined) {
+        console.error(`PAGE_OBSERVATION_TAMPER_RISK: page records refused at ${tamperRisk.file}:${tamperRisk.line}`);
+      } else if (Array.isArray(configured.pages) && configured.pages.length > 0) {
         await witness.registerPageObserver({
           sessionId: session.sessionId,
           sessionToken: session.sessionToken,

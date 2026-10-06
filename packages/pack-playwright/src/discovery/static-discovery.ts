@@ -110,10 +110,11 @@ export interface StaticTestFacts {
   /** `vi.mock(...)` / `jest.mock(...)` anywhere in the file. */
   fileMockImport: Location | null;
   /**
-   * Network interception ANYWHERE in the file: a `<x>.route(...)` call
-   * (`page.route`, `context.route`, …) or a `route.fulfill(...)` call.
-   * A body-scoped scan (`pageRoute`) cannot see a file-scope helper that
-   * registers the interception and that every test merely calls.
+   * First browser-tampering API call in the spec or any imported helper:
+   * evaluate/init scripts, function exposure, network routing/fulfilment,
+   * content replacement, and direct CDP sessions. Static observation
+   * risks are refused by the witness; this location names the offending
+   * file and source line.
    */
   fileRouteInterception: Location | null;
   /**
@@ -1180,44 +1181,57 @@ function findModuleMock(source: ts.SourceFile, file: string): Location | null {
 }
 
 /**
- * Whether the WHOLE file registers network interception: a `<x>.route(…)`
- * call (`page.route`, `context.route`, …) or a `route.fulfill(…)` call.
- *
- * A body-scoped scan only sees interception written inside the test
- * callback. Real suites hoist it into a file-scope helper every test
- * merely calls (`await stubNotifications(page)`), and such a file mocks
- * the app exactly as much as a body-level `page.route` does.
- *
- * Args:
- *   source: the file's parsed source.
- *   file: repo-relative posix path (for the returned location).
- *
- * Returns:
- *   Location | null: the first interception call's location, or null.
+ * Finds one page-observation tamper API call in a parsed helper/spec.
+ * Includes every browser mutation path the witness cannot verify solely
+ * from its independent CDP observer.
  */
 function findRouteInterception(source: ts.SourceFile, file: string): Location | null {
+  const tamperCalls: Record<string, true> = {
+    addInitScript: true,
+    connectOverCDP: true,
+    evaluate: true,
+    exposeFunction: true,
+    fulfill: true,
+    newBrowserCDPSession: true,
+    newCDPSession: true,
+    route: true,
+    setContent: true,
+  };
   let found: Location | null = null;
   const visit = (node: ts.Node): void => {
     if (found !== null) return;
-    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
-      const callee = node.expression;
-      // `<x>.route(…)` intercepts (page, context, any receiver).
-      if (callee.name.text === 'route' && ts.isIdentifier(callee.expression)) {
-        found = locationOf(file, source, node);
-        return;
-      }
-      // `route.fulfill(…)` answers an intercepted request with a canned
-      // body — a mock even when the `route(…)` registration itself lives
-      // in another file this spec imports.
-      if (callee.name.text === 'fulfill' && ts.isIdentifier(callee.expression)) {
-        found = locationOf(file, source, node);
-        return;
-      }
+    if (
+      ts.isCallExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      tamperCalls[node.expression.name.text] === true
+    ) {
+      found = locationOf(file, source, node);
+      return;
     }
     ts.forEachChild(node, visit);
   };
   visit(source);
   return found;
+}
+
+/** First tamper call in a spec or any helper imported by its module graph. */
+function findImportedRouteInterception(state: ScanState, cwd: string, root: string): Location | null {
+  const visited = new Set<string>();
+  const visit = (file: string, depth: number): Location | null => {
+    if (visited.has(file) || depth > state.maxImportDepth) return null;
+    visited.add(file);
+    const model = state.models.get(file) ?? modelOf(state, cwd, file, true);
+    if (model === null) return null;
+    const local = findRouteInterception(model.source, file);
+    if (local !== null) return local;
+    for (const binding of model.bindings.values()) {
+      if (binding.kind !== 'import' || binding.target === undefined) continue;
+      const nested = visit(binding.target, depth + 1);
+      if (nested !== null) return nested;
+    }
+    return null;
+  };
+  return visit(root, 0);
 }
 
 /**
@@ -1261,7 +1275,7 @@ export function scanTestFiles(options: StaticScanOptions): StaticScanResult {
     if (model === null) continue;
     const fileHttpClient = findHttpClientCall(model.source, model.source, file);
     const fileMock = findModuleMock(model.source, file);
-    const fileRoute = findRouteInterception(model.source, file);
+    const fileRoute = findImportedRouteInterception(state, options.cwd, file);
     const gateforgeImport = findGateforgeFixtureImport(model.source, file);
     scanFileForTests(state, options.cwd, model, fileHttpClient, fileMock, fileRoute, gateforgeImport);
   }
