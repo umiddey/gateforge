@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.13.1
 
 - **Frontend detector: a trailing query-string hole is read as a query, not a
   path segment.** Calls written like
