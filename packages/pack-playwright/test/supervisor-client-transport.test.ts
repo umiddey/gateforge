@@ -33,6 +33,7 @@ const SWEEP = {
   pages: [{ id: 'orders', path: '/orders' }],
   loginRoutes: [],
   errorMarkers: [],
+  liveChannels: [],
 };
 
 describe('supervisor client transport', () => {
