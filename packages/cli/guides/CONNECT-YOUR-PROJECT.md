@@ -429,7 +429,10 @@ onto `@gate-forge/pack-playwright/fixture` is what lets those existing
 journeys prove their page visits; keep their route assertions and test bodies.
 The test channel (`observed`) is primary. After the tests, Gateforge's own
 referee visits only page obligations without a clean test record (`swept`).
-Both channels use the same grader.
+Both channels use the same grader. An audience with a `session:` file needs
+one the suite does not consume: a rotating refresh token turns a consumed
+session into `PAGE_AUDIENCE_SESSION_INVALID` sweep refusals — mint a
+sweep-only session file.
 
 Declare the router, login route, audience guard, error markers and seeded
 values for dynamic paths in `.gateforge.yml`:

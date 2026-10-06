@@ -23,7 +23,7 @@ describe('referee page sweep', () => {
     cleanup = async () => { await manager.closeAll(); await new Promise<void>((resolve) => app.close(() => resolve())); };
     const records: Array<{ obligationId: string; testId: string; payload: { channel?: unknown; apiRequestsSettled?: unknown; observationSequence?: unknown } }> = [];
     try {
-      const visits = await sweepPageVisits({
+      const { visits } = await sweepPageVisits({
         browser: manager,
         sessionId: 'sweep-test',
         testId: 'referee',
@@ -90,7 +90,7 @@ describe('referee page sweep', () => {
     const payloads: Array<{ liveChannels?: { count: number; paths: string[] }; apiRequestsSettled?: unknown }> = [];
     try {
       const started = Date.now();
-      const visits = await sweepPageVisits({
+      const { visits } = await sweepPageVisits({
         browser: manager,
         sessionId: 'sweep-live',
         testId: 'referee',
@@ -114,6 +114,88 @@ describe('referee page sweep', () => {
       expect(payloads[0]?.apiRequestsSettled).toBe(true);
       // The live channel stays visible in the visit payload.
       expect(payloads[0]?.liveChannels).toEqual({ count: 1, paths: ['/live/poll'] });
+    } finally {
+      await cleanup();
+      cleanup = undefined;
+    }
+  });
+
+  it('a rejected audience session stops the sweep for its remaining pages', async () => {
+    // The app rejects every session except the exact valid cookie: the
+    // sweep's storage state carries a STALE session (what a rotating
+    // refresh token leaves in a file the suite already consumed), so the
+    // first protected page bounces to /login and the remaining pages
+    // must not be visited at all.
+    const requested: string[] = [];
+    const app = createServer((request, response) => {
+      requested.push(request.url ?? '/');
+      if (request.url === '/login') {
+        response.writeHead(200, { 'content-type': 'text/html' });
+        response.end('<!doctype html><body><main>Sign in</main></body>');
+        return;
+      }
+      if (request.headers.cookie?.includes('sid=valid') === true) {
+        response.writeHead(200, { 'content-type': 'text/html' });
+        response.end(`<!doctype html><body><main>Protected ${request.url}</main></body>`);
+        return;
+      }
+      response.writeHead(302, { location: '/login' });
+      response.end();
+    });
+    app.listen(0, [127, 0, 0, 1].join('.'));
+    await once(app, 'listening');
+    const address = app.address();
+    if (address === null || typeof address === 'string') throw new Error('app server did not bind');
+    const appBase = `http://${[127, 0, 0, 1].join('.')}:${String(address.port)}`;
+    const manager = new EngineBrowserManager({ launch: (options) => chromium.launch(options) });
+    cleanup = async () => { await manager.closeAll(); await new Promise<void>((resolve) => app.close(() => resolve())); };
+    const payloads: Array<{ notVisited?: unknown; routeId?: string }> = [];
+    try {
+      const sweep = await sweepPageVisits({
+        browser: manager,
+        sessionId: 'sweep-rejected',
+        testId: 'referee',
+        appBase,
+        routes: [{ id: 'tenant.page-orders', path: '/orders' }, { id: 'tenant.page-settings', path: '/settings' }],
+        loginRoutes: ['/login'],
+        errorMarkers: [],
+        liveChannels: [],
+        storageState: {
+          cookies: [{
+            name: 'sid',
+            value: 'stale',
+            domain: [127, 0, 0, 1].join('.'),
+            path: '/',
+            expires: -1,
+            httpOnly: false,
+            secure: false,
+            sameSite: 'Lax',
+          }],
+          origins: [],
+        },
+        issueRecord: (_obligationId, _testId, payload) => {
+          if (payload === null || typeof payload !== 'object') throw new Error('sweep record has no payload');
+          payloads.push(payload);
+          return String(payloads.length);
+        },
+      });
+      // The first page was visited and bounced; it is graded as today.
+      expect(sweep.visits[0]?.visited).toBe(true);
+      expect(sweep.visits[0]?.verdict.loads.refusalReasons).toContain('PAGE_BOUNCED_TO_LOGIN');
+      // The remaining page was refused WITHOUT a visit.
+      expect(sweep.visits[1]?.visited).toBe(false);
+      expect(sweep.visits[1]?.verdict.loads.satisfied).toBe(false);
+      expect(sweep.visits[1]?.verdict.loads.refusalReasons).toEqual(['PAGE_AUDIENCE_SESSION_INVALID']);
+      expect(sweep.visits[1]?.verdict.dataOk.refusalReasons).toEqual(['PAGE_AUDIENCE_SESSION_INVALID']);
+      expect(sweep.sessionRejected).toEqual({ path: '/orders', login: '/login', notVisited: 1 });
+      // The skipped page was never requested…
+      expect(requested).toContain('/orders');
+      expect(requested).not.toContain('/settings');
+      // …but its records still issued, saying it was not visited and why.
+      expect(payloads).toHaveLength(4);
+      expect(payloads[2]?.routeId).toBe('tenant.page-settings');
+      expect(payloads[2]?.notVisited).toBe('PAGE_AUDIENCE_SESSION_INVALID');
+      expect(payloads[3]?.notVisited).toBe('PAGE_AUDIENCE_SESSION_INVALID');
     } finally {
       await cleanup();
       cleanup = undefined;

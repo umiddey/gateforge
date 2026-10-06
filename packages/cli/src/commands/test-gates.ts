@@ -5043,7 +5043,16 @@ async function runSupervisedTestGatesInner(
           liveChannels: config.pages?.liveChannels ?? [],
           ...(storageState !== undefined ? { storageState } : {}),
         });
-        writeLine(io.stderr, `page sweep visited ${String(sweep.visits.length)} page gap(s) for audience '${audienceName}'.`);
+        if (sweep.sessionRejected != null) {
+          writeLine(
+            io.stderr,
+            `gateforge: page sweep: audience '${audienceName}' session rejected on ${sweep.sessionRejected.path} ` +
+              `(redirected to ${sweep.sessionRejected.login}); ${String(sweep.sessionRejected.notVisited)} pages not visited — ` +
+              'mint a session file the suite does not consume',
+          );
+        }
+        const visitedCount = sweep.visits.filter((visit) => visit.visited !== false).length;
+        writeLine(io.stderr, `page sweep visited ${String(visitedCount)} page gap(s) for audience '${audienceName}'.`);
       }
     }
     if (effectiveWitnessUrl !== undefined) {

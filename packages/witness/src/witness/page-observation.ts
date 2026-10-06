@@ -85,7 +85,8 @@ export type PageRefusalReason =
   | 'PAGE_API_ERROR'
   | 'PAGE_LOCALLY_FULFILLED'
   | 'PAGE_API_UNSETTLED'
-  | 'PAGE_APP_ORIGIN_MISMATCH';
+  | 'PAGE_APP_ORIGIN_MISMATCH'
+  | 'PAGE_AUDIENCE_SESSION_INVALID';
 
 export interface PageVisitVerdict {
   pageId: string | null;
@@ -112,6 +113,26 @@ export function matchPageRoute(routePath: string, rawUrl: string): boolean {
   return templateParts.length === actualParts.length && templateParts.every((part, index) =>
     part.startsWith(':') ? actualParts[index] !== '' : part === actualParts[index],
   );
+}
+
+/**
+ * The declared login route a visit landed on, or null. A visit whose
+ * REQUESTED route is itself a declared login page never counts: a
+ * directly opened declared login page is a legitimate public page, only
+ * a bounced protected navigation is a rejected session.
+ */
+export function landedLoginRoute(
+  finalUrl: string,
+  requestedPath: string,
+  loginRoutes: readonly string[],
+): string | null {
+  const finalPath = pathname(finalUrl);
+  if (finalPath === null) return null;
+  const matched = loginRoutes.find((route) => pathname(route) === finalPath);
+  if (matched === undefined) return null;
+  const requested = pathname(requestedPath);
+  if (requested !== null && loginRoutes.some((route) => pathname(route) === requested)) return null;
+  return matched;
 }
 
 /**

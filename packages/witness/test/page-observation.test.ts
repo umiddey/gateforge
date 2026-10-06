@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { gradePageVisit, matchPageRoute } from '../src/witness/page-observation.js';
+import { gradePageVisit, landedLoginRoute, matchPageRoute } from '../src/witness/page-observation.js';
 
 const pages = [{ id: 'tenant.page-orders', path: '/orders/:id' }];
 const clean = {
@@ -16,6 +16,25 @@ describe('page observation grading', () => {
   it('matches parameterized routes', () => {
     expect(matchPageRoute('/orders/:id', '/orders/42')).toBe(true);
     expect(matchPageRoute('/orders/:id', '/orders/42/items')).toBe(false);
+  });
+
+  describe('landedLoginRoute', () => {
+    it('names the login route a bounced visit landed on', () => {
+      expect(landedLoginRoute('http://127.0.0.1:47013/login?next=/orders', '/orders', ['/login'])).toBe('/login');
+    });
+
+    it('never counts a directly opened declared login page as a rejection', () => {
+      expect(landedLoginRoute('http://127.0.0.1:47013/login', '/login', ['/login'])).toBeNull();
+    });
+
+    it('returns null when the final URL is no declared login route', () => {
+      expect(landedLoginRoute('http://127.0.0.1:47013/orders/42', '/orders/42', ['/login'])).toBeNull();
+      expect(landedLoginRoute('http://127.0.0.1:47013/signin', '/orders', ['/login'])).toBeNull();
+    });
+
+    it('normalizes trailing slashes and query strings', () => {
+      expect(landedLoginRoute('http://127.0.0.1:47013/login/?next=/orders', '/orders', ['/login/'])).toBe('/login/');
+    });
   });
 
   it('satisfies both obligations for a clean visit', () => {

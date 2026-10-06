@@ -3,7 +3,7 @@ import type { BrowserContextOptions } from 'playwright';
 import type { PageObservationContext, SessionPageObserverRequest } from './types.js';
 import { driveEngineVisit, type EngineBrowserManager } from './browser.js';
 import { observePageBrowser, type PageObserver } from './page-observer.js';
-import type { PageRoute, PageVisitVerdict } from './page-observation.js';
+import { landedLoginRoute, type PageRoute, type PageVisitVerdict } from './page-observation.js';
 export interface PageObserverRegistrationState {
   pageObservers: Map<string, PageObserver>;
   pageObservationRecords: Map<string, string[]>;
@@ -188,6 +188,25 @@ function normalizePageStorageState(raw: unknown): BrowserContextOptions['storage
   return { cookies, origins };
 }
 
+/** One swept route outcome: the page verdict plus whether the sweep visited it. */
+export interface SweptPageVisit {
+  routeId: string;
+  verdict: PageVisitVerdict;
+  /** False when the sweep refused this page WITHOUT visiting it. */
+  visited: boolean;
+}
+
+/** The outcome of one audience's swept page visits. */
+export interface PageSweepResult {
+  visits: SweptPageVisit[];
+  /**
+   * Set when the audience's session was rejected on the FIRST visited
+   * page (it landed on a declared login route): the remaining pages were
+   * refused WITHOUT visiting, with PAGE_AUDIENCE_SESSION_INVALID.
+   */
+  sessionRejected: { path: string; login: string; notVisited: number } | null;
+}
+
 export async function sweepPageVisits(input: {
   browser: EngineBrowserManager;
   sessionId: string;
@@ -200,11 +219,46 @@ export async function sweepPageVisits(input: {
   liveChannels: readonly string[];
   storageState?: unknown;
   issueRecord(obligationId: string, testId: string, payload: unknown): string;
-}): Promise<Array<{ routeId: string; verdict: PageVisitVerdict }>> {
+}): Promise<PageSweepResult> {
   const page = await input.browser.pageFor(input.sessionId, normalizePageStorageState(input.storageState));
-  const visits: Array<{ routeId: string; verdict: PageVisitVerdict }> = [];
+  const visits: SweptPageVisit[] = [];
   let observationSequence = 0;
-  for (const route of input.routes) {
+  // A session the app rejects (e.g. a rotating refresh token the suite's
+  // own storage-state file already consumed) bounces the FIRST visited
+  // page to a declared login route. Every further route could only
+  // bounce the same way, so they are refused WITHOUT visiting; the
+  // records still issue, and the payload says the page was not visited
+  // and why. Session-less audiences are unaffected.
+  let sessionRejected: PageSweepResult['sessionRejected'] = null;
+  for (const [index, route] of input.routes.entries()) {
+    if (sessionRejected !== null) {
+      const verdict: PageVisitVerdict = {
+        pageId: route.id,
+        finalUrl: route.path,
+        loads: { satisfied: false, refusalReasons: ['PAGE_AUDIENCE_SESSION_INVALID'] },
+        dataOk: { satisfied: false, refusalReasons: ['PAGE_AUDIENCE_SESSION_INVALID'] },
+      };
+      const payload = {
+        channel: 'swept',
+        routeId: verdict.pageId,
+        // The page was never visited; the payload says so and why.
+        notVisited: 'PAGE_AUDIENCE_SESSION_INVALID',
+        finalUrl: route.path,
+        navigations: [],
+        exceptions: [],
+        domMarkerHit: false,
+        apiStatuses: [],
+        apiRequestsSettled: true,
+        liveChannels: { count: 0, paths: [] },
+        observationSequence: observationSequence++,
+        loads: verdict.loads,
+        dataOk: verdict.dataOk,
+      };
+      input.issueRecord(`${verdict.pageId}:page:loads`, input.testId, payload);
+      input.issueRecord(`${verdict.pageId}:page:data-ok`, input.testId, payload);
+      visits.push({ routeId: route.id, verdict, visited: false });
+      continue;
+    }
     const observation = await driveEngineVisit(page, input.appBase, route, input.routes, {
       loginRoutes: input.loginRoutes,
       errorMarkers: input.errorMarkers,
@@ -232,7 +286,13 @@ export async function sweepPageVisits(input: {
     };
     input.issueRecord(`${verdict.pageId}:page:loads`, input.testId, payload);
     input.issueRecord(`${verdict.pageId}:page:data-ok`, input.testId, payload);
-    visits.push({ routeId: verdict.pageId, verdict });
+    visits.push({ routeId: verdict.pageId, verdict, visited: true });
+    if (index === 0 && input.storageState !== undefined) {
+      const login = landedLoginRoute(visit.url, route.path, input.loginRoutes);
+      if (login !== null) {
+        sessionRejected = { path: route.path, login, notVisited: input.routes.length - 1 };
+      }
+    }
   }
-  return visits;
+  return { visits, sessionRejected };
 }

@@ -2239,7 +2239,7 @@ async function handleRequest(
         throw new HttpError(400, 'page sweep configuration is invalid');
       }
       if (state.engineBrowser === null) throw new HttpError(503, 'page sweep needs the engine browser');
-      const visits = await sweepPageVisits({
+      const sweep = await sweepPageVisits({
         browser: state.engineBrowser,
         sessionId: `page-sweep-${state.options.runId}-${body.audience}`,
         testId: 'page-sweep',
@@ -2252,7 +2252,7 @@ async function handleRequest(
         issueRecord: (obligationId, testId, payload) =>
           issueRecord(state, obligationId, 'page.observed', testId, payload, 'engine-observed').recordId,
       });
-      sendJson(res, 200, { visits });
+      sendJson(res, 200, { visits: sweep.visits, sessionRejected: sweep.sessionRejected });
       return;
     }
     if (req.method === 'POST' && path === '/runs/expected-set') {

@@ -134,8 +134,14 @@ export class SupervisorClient {
   }
 
   /** POST /runs/page-sweep: visits unproven page obligations after the suite. */
-  async sweepPages(request: PageSweepRequest): Promise<{ visits: unknown[] }> {
-    return this.request<{ visits: unknown[] }>(
+  async sweepPages(request: PageSweepRequest): Promise<{
+    visits: Array<{ routeId: string; visited?: boolean }>;
+    sessionRejected?: { path: string; login: string; notVisited: number } | null;
+  }> {
+    return this.request<{
+      visits: Array<{ routeId: string; visited?: boolean }>;
+      sessionRejected?: { path: string; login: string; notVisited: number } | null;
+    }>(
       '/runs/page-sweep',
       request,
       this.timeoutMs + request.pages.length * ENGINE_PAGE_VISIT_BUDGET_MS,

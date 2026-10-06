@@ -1232,6 +1232,16 @@ an unfinished app data request and refuses the page with
 page configuration, the prefixes are controller-held and registered with
 the witness, so both proof channels apply the same rule.
 
+A rejected audience session stops that audience's sweep. When an audience
+WITH a session lands on one of its declared login routes on the FIRST
+visited page, that page is graded as today, and every remaining page of
+the same audience is refused WITHOUT visiting, with
+`PAGE_AUDIENCE_SESSION_INVALID` — the records still issue, and the sweep
+payload says each page was not visited and why. Session-less audiences are
+unaffected. The usual cause is a rotating refresh token: the suite's run
+consumed the session a storage-state file carried, so mint a session file
+the suite does not consume.
+
 Per test, only a page's LATEST observation (`observationSequence`) counts.
 An early clean visit cannot hide a later refusal by the same test, and
 another passing test's latest clean visit still proves the page. A missing
