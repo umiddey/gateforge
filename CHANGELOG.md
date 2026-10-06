@@ -14,6 +14,27 @@
   provably a query suffix — a hole mid-path, a trailing path value, a branch
   starting with `/` — is unchanged.
 
+- **The post-suite page sweep can now run past five minutes.** The
+  supervisor's call to the witness used Node's global fetch, whose fixed
+  300-second internal header/body timeout aborted every sweep budgeted for
+  longer than that, reporting `fetch failed` no matter what deadline the
+  sweep itself had computed. The supervisor client now performs its HTTP
+  calls directly with `node:http`/`node:https`, so the computed budget (base
+  timeout plus the per-page allowance) is the only deadline. Error types,
+  messages, and fail-closed behavior are unchanged; a budget shorter than a
+  slow answer still aborts with the same typed error.
+
+- **A storage-only init script no longer refuses page proof.** A spec or
+  helper calling `page.addInitScript(() => localStorage.setItem('lang',
+  'en'))` (also the block form, `sessionStorage`, `removeItem`/`clear`,
+  optional `window.` receiver, and the `context.addInitScript` form) was
+  reported as a page-observation tamper risk and refused page-level proof.
+  Such a script only sets storage keys the witness's independent observer
+  can see, so it is no longer a tamper; the scan continues past it, and a
+  real tamper later in the same file (a route interception, `window.fetch`
+  reassignment, a template or non-literal value, extra arguments, or a
+  string/path script) is still reported at its own line.
+
 ## 0.13.0
 
 - **Pages-family adoption for already-adopted repositories (0.13.0).**
