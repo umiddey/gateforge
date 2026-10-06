@@ -1161,6 +1161,16 @@ export interface SessionPageObserverRequest {
   appOrigins: string[];
 }
 
+
+/** Supervisor request for the post-suite referee page-gap sweep. */
+export interface PageSweepRequest {
+  audience: string;
+  pages: Array<{ id: string; path: string }>;
+  loginRoutes: string[];
+  errorMarkers: string[];
+  storageState?: unknown;
+}
+
 /** `POST /sessions/page-observer/flush`: finalizes quiet visits before the fixture closes Chromium. */
 export interface SessionPageObserverFlushRequest {
   sessionId: string;

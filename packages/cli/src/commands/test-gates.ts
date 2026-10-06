@@ -2470,6 +2470,7 @@ async function runSupervisedTestGatesInner(
   // pair did not both run — a divergence needs two sides observed in
   // the SAME run, never shapes carried over from another.
   let twinDivergences: TwinDivergence[] = [];
+  let pageSweepAdvisories: BlockingEntry[] = [];
   if (runnerName === 'pytest') {
     const configured = (config.diagnostics?.suites ?? []).filter((suite) => suite.runner === 'pytest');
     if (configured.length > 1) {
@@ -4912,6 +4913,83 @@ async function runSupervisedTestGatesInner(
     } catch {
       sessionTrace = null; // fail closed: a missing authority never grades success
     }
+    if (effectiveWitnessUrl !== undefined && config.pages?.sweep !== false) {
+      const pageResources = pipeline.graph.resources.flatMap((resource) => {
+        const pagePath = resource.attributes['path'];
+        const audience = resource.attributes['audience'];
+        return resource.kind === 'ui.page' && resource.id !== null && typeof pagePath === 'string' && typeof audience === 'string'
+          ? [{ id: resource.id, path: pagePath, audience }]
+          : [];
+      });
+      const response = await fetch(`${effectiveWitnessUrl}/records`, { headers: { [RUN_HEADER]: runToken } });
+      if (!response.ok) throw new UsageError(`test-gates: page sweep cannot read witness records (HTTP ${String(response.status)})`);
+      const ledger: unknown = await response.json();
+      const priorRecords = ledger !== null && typeof ledger === 'object' && 'records' in ledger && Array.isArray(ledger.records)
+        ? ledger.records
+        : [];
+      const cleanPageIds = new Set<string>();
+      for (const record of priorRecords) {
+        if (record === null || typeof record !== 'object' || !('kind' in record) || record.kind !== 'page.observed' ||
+          !('origin' in record) || record.origin !== 'engine-observed' || !('payload' in record) ||
+          record.payload === null || typeof record.payload !== 'object' || !('channel' in record.payload) ||
+          record.payload.channel !== 'observed' || !('routeId' in record.payload) || typeof record.payload.routeId !== 'string') continue;
+        const payload = record.payload;
+        const loadsClean = 'loads' in payload && payload.loads !== null && typeof payload.loads === 'object' &&
+          'satisfied' in payload.loads && payload.loads.satisfied === true;
+        const dataClean = 'dataOk' in payload && payload.dataOk !== null && typeof payload.dataOk === 'object' &&
+          'satisfied' in payload.dataOk && payload.dataOk.satisfied === true;
+        if (loadsClean && dataClean) cleanPageIds.add(payload.routeId);
+      }
+      const routesByAudience = new Map<string, Array<{ id: string; path: string }>>();
+      for (const page of pageResources) {
+        if (cleanPageIds.has(page.id) || config.pages?.exclude?.includes(page.path)) continue;
+        const parameterNames = [...page.path.matchAll(/:([A-Za-z][A-Za-z0-9_]*)/g)].map((match) => match[1] as string);
+        if (parameterNames.length === 0) {
+          const routes = routesByAudience.get(page.audience) ?? [];
+          routes.push(page);
+          routesByAudience.set(page.audience, routes);
+          continue;
+        }
+        const bindings = config.pages?.params?.[page.path];
+        if (bindings === undefined || parameterNames.some((name) => !bindings[name])) {
+          const detail = `PAGE_PARAM_UNBOUND: ${page.path} needs pages.params seed ids before the referee can visit it.`;
+          writeLine(io.stderr, detail);
+          pageSweepAdvisories.push({ kind: 'finding', resourceId: page.id, name: page.path, detail, location: null, cause: null, nextAction: null });
+          continue;
+        }
+        let resolvedPath = page.path;
+        for (const name of parameterNames) resolvedPath = resolvedPath.replace(`:${name}`, encodeURIComponent(bindings[name] as string));
+        const routes = routesByAudience.get(page.audience) ?? [];
+        routes.push({ ...page, path: resolvedPath });
+        routesByAudience.set(page.audience, routes);
+      }
+      for (const [audienceName, routes] of routesByAudience) {
+        const audience = config.pages?.audiences.find((entry) => entry.name === audienceName);
+        if (audience === undefined) {
+          const detail = `PAGE_AUDIENCE_UNBOUND: referee cannot select a session for audience '${audienceName}'.`;
+          writeLine(io.stderr, detail);
+          pageSweepAdvisories.push({ kind: 'finding', resourceId: null, name: audienceName, detail, location: null, cause: null, nextAction: null });
+          continue;
+        }
+        let storageState: unknown;
+        if (audience.session !== undefined) {
+          const sessionPath = resolve(io.cwd, audience.session);
+          try {
+            storageState = JSON.parse(readFileSync(sessionPath, 'utf8')) as unknown;
+          } catch (error) {
+            throw new UsageError(`test-gates: page audience '${audienceName}' storage state could not be read at '${audience.session}': ${(error as Error).message}`);
+          }
+        }
+        const sweep = await supervisor.sweepPages({
+          audience: audienceName,
+          pages: routes,
+          loginRoutes: [audience.loginRoute],
+          errorMarkers: config.pages?.errorMarkers ?? [],
+          ...(storageState !== undefined ? { storageState } : {}),
+        });
+        writeLine(io.stderr, `page sweep visited ${String(sweep.visits.length)} page gap(s) for audience '${audienceName}'.`);
+      }
+    }
     if (effectiveWitnessUrl !== undefined) {
       await writeWitnessLedgerDocument(io, stateDir, effectiveWitnessUrl, runToken);
     }
@@ -5432,7 +5510,7 @@ async function runSupervisedTestGatesInner(
   // Advisory rules ride the report's existing advisory channel (plan D5,
   // invariant 7): printed and serialized every run, out of `blocking` and
   // out of the exit code — so a demoted rule never hides.
-  const runAdvisories = [...twinAdvisories, ...rulePartition.advisories];
+  const runAdvisories = [...twinAdvisories, ...rulePartition.advisories, ...pageSweepAdvisories];
   const evaluated: typeof evaluatedBase =
     runBlocking.length === 0
       ? evaluatedBase

@@ -10,9 +10,9 @@ describe('referee page sweep', () => {
   afterEach(async () => cleanup?.());
 
   it('issues swept-channel records carrying the shared visit verdict', async () => {
-    const app = createServer((_request, response) => {
+    const app = createServer((request, response) => {
       response.writeHead(200, { 'content-type': 'text/html' });
-      response.end('<body>Ready</body>');
+      response.end(request.headers.cookie?.includes('auth=ready') ? '<body>Ready</body>' : '<body>Something went wrong</body>');
     });
     app.listen(0, [127, 0, 0, 1].join('.'));
     await once(app, 'listening');
@@ -31,6 +31,19 @@ describe('referee page sweep', () => {
         routes: [{ id: 'tenant.page-home', path: '/' }],
         loginRoutes: [],
         errorMarkers: [],
+        storageState: {
+          cookies: [{
+            name: 'auth',
+            value: 'ready',
+            domain: [127, 0, 0, 1].join('.'),
+            path: '/',
+            expires: -1,
+            httpOnly: false,
+            secure: false,
+            sameSite: 'Lax',
+          }],
+          origins: [],
+        },
         issueRecord: (obligationId, testId, payload) => {
           if (payload === null || typeof payload !== 'object' || !('channel' in payload)) throw new Error('sweep record has no channel');
           records.push({ obligationId, testId, payload });

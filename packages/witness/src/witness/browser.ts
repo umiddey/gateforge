@@ -32,7 +32,7 @@
 // below, and the LAUNCHER is injected (`EngineBrowserManager` requires
 // one) — `@gate-forge/pack-playwright` is the layer that knows which
 // browser to launch. Nothing here imports Playwright at runtime.
-import type { Browser, BrowserContext, Frame, Locator, Page, Response } from 'playwright';
+import type { Browser, BrowserContext, BrowserContextOptions, Frame, Locator, Page, Response } from 'playwright';
 import { gradePageVisit, type ObservedPageVisit, type PageRoute, type PageVisitVerdict } from './page-observation.js';
 import {
   declaredSurfaceFields,
@@ -45,6 +45,11 @@ import {
 
 /** The UI operations the engine can perform (constrained subset). */
 export type EngineOperation = 'create' | 'read' | 'update' | 'delete' | 'visit';
+export interface EnginePageVisitObservation {
+  visit: ObservedPageVisit;
+  verdict: PageVisitVerdict;
+}
+
 /** Opens one trusted app route and grades it with the page-observation grader. */
 export async function driveEngineVisit(
   page: Page,
@@ -52,14 +57,21 @@ export async function driveEngineVisit(
   route: PageRoute,
   pages: readonly PageRoute[],
   options: { loginRoutes?: readonly string[]; errorMarkers?: readonly string[] } = {},
-): Promise<PageVisitVerdict> {
+): Promise<EnginePageVisitObservation> {
   const appOrigin = new URL(appBase).origin;
+  const destination = new URL(route.path, appBase);
+  if (destination.origin !== appOrigin) throw new EngineBrowserError('browser.visit refuses a page route outside the trusted app origin');
   const navigations: string[] = [];
   const exceptions: string[] = [];
   const apiResponses: ObservedPageVisit['apiResponses'] = [];
   const pendingResponses = new Set<Promise<void>>();
+  const foreignNavigations: string[] = [];
   const onNavigation = (frame: Frame): void => {
-    if (frame === page.mainFrame()) navigations.push(frame.url());
+    if (frame !== page.mainFrame()) return;
+    navigations.push(frame.url());
+    try {
+      if (new URL(frame.url()).origin !== appOrigin) foreignNavigations.push(frame.url());
+    } catch {}
   };
   const onError = (error: Error): void => { exceptions.push(error.message); };
   const onResponse = (response: Response): void => {
@@ -68,7 +80,20 @@ export async function driveEngineVisit(
     if (url.origin !== appOrigin || !url.pathname.startsWith('/api/')) return;
     const pending = (async () => {
       let remoteAddress: string | null = null;
-      try { remoteAddress = (await response.serverAddr())?.ipAddress ?? null; } catch {}
+      let timeout: NodeJS.Timeout | undefined;
+      try {
+        remoteAddress = await Promise.race([
+          response.serverAddr().then((address) => address?.ipAddress ?? null),
+          new Promise<null>((resolve) => {
+            timeout = setTimeout(() => resolve(null), 1_000);
+          }),
+        ]);
+      } catch {
+        // An unavailable peer address stays null and the shared grader
+        // refuses the response rather than crediting unverifiable data.
+      } finally {
+        clearTimeout(timeout);
+      }
       apiResponses.push({ url: response.url(), status: response.status(), remoteAddress, proxied: remoteAddress !== null });
     })();
     pendingResponses.add(pending);
@@ -78,21 +103,21 @@ export async function driveEngineVisit(
   page.on('pageerror', onError);
   page.on('response', onResponse);
   try {
-    await page.goto(new URL(route.path, appBase).href, { waitUntil: 'networkidle', timeout: ENGINE_STEP_TIMEOUT_MS });
+    await page.goto(destination.href, { waitUntil: 'domcontentloaded', timeout: ENGINE_STEP_TIMEOUT_MS });
     await page.waitForTimeout(300);
+    if (foreignNavigations.length > 0) {
+      throw new EngineBrowserError(`browser.visit observed a navigation outside the trusted app origin: ${foreignNavigations[0]}`);
+    }
     await Promise.all([...pendingResponses]);
     const body = await page.locator('body').innerText({ timeout: ENGINE_STEP_TIMEOUT_MS });
-    return gradePageVisit({
-      pages,
-      loginRoutes: options.loginRoutes,
-      visit: {
-        url: page.url(),
-        navigations,
-        exceptions,
-        domMarkerHit: (options.errorMarkers ?? []).some((marker) => body.includes(marker)),
-        apiResponses,
-      },
-    });
+    const visit: ObservedPageVisit = {
+      url: page.url(),
+      navigations,
+      exceptions,
+      domMarkerHit: (options.errorMarkers ?? []).some((marker) => body.includes(marker)),
+      apiResponses,
+    };
+    return { visit, verdict: gradePageVisit({ pages, loginRoutes: options.loginRoutes, visit }) };
   } catch (error) {
     if (error instanceof EngineBrowserError) throw error;
     throw new EngineBrowserError(`browser.visit failed: ${(error as Error).message}`);
@@ -279,11 +304,11 @@ export class EngineBrowserManager {
    *   EngineBrowserError: when Chromium cannot launch (fail closed —
    *     the capability is honestly unavailable at runtime).
    */
-  async pageFor(sessionId: string): Promise<Page> {
+  async pageFor(sessionId: string, storageState?: BrowserContextOptions['storageState']): Promise<Page> {
     const existing = this.sessions.get(sessionId);
     if (existing !== undefined) return existing.page;
     const browser = await this.ensureBrowser();
-    const context = await browser.newContext();
+    const context = await browser.newContext(storageState === undefined ? {} : { storageState });
     const page = await context.newPage();
     this.sessions.set(sessionId, { context, page });
     return page;

@@ -185,7 +185,7 @@ import {
   RUN_HEADER,
   VERIFIER_HEADER,
 } from '../constants.js';
-import { PageObserverRegistrationError, registerPageObserver } from './page-observer-registration.js';
+import { PageObserverRegistrationError, registerPageObserver, sweepPageVisits } from './page-observer-registration.js';
 import { loadAdapters, makeAdapterContext } from './adapter-registry.js';
 import {
   AttestationError,
@@ -255,6 +255,7 @@ import type {
   SessionResolveRequest,
   SessionPageObserverRequest,
   SessionPageObserverFlushRequest,
+  PageSweepRequest,
   TestSession,
   TwinShapeReport,
   TwinShapesResponse,
@@ -2206,6 +2207,40 @@ async function handleRequest(
     }
     if (req.method === 'POST' && path === '/records') {
       await handleRecords(state, res, (await readBody(req)) as RecordsRequest);
+      return;
+    }
+    if (req.method === 'POST' && path === '/runs/page-sweep') {
+      requireSupervisor(state, req.headers[VERIFIER_HEADER]);
+      const body = (await readBody(req)) as PageSweepRequest;
+      if (
+        typeof body.audience !== 'string' || body.audience.length === 0 ||
+        !Array.isArray(body.pages) ||
+        body.pages.some((page) =>
+          !isPlainObject(page) ||
+          typeof page['id'] !== 'string' || page['id'].length === 0 ||
+          typeof page['path'] !== 'string' || !page['path'].startsWith('/'),
+        ) ||
+        !Array.isArray(body.loginRoutes) ||
+        body.loginRoutes.some((route) => typeof route !== 'string') ||
+        !Array.isArray(body.errorMarkers) ||
+        body.errorMarkers.some((marker) => typeof marker !== 'string')
+      ) {
+        throw new HttpError(400, 'page sweep configuration is invalid');
+      }
+      if (state.engineBrowser === null) throw new HttpError(503, 'page sweep needs the engine browser');
+      const visits = await sweepPageVisits({
+        browser: state.engineBrowser,
+        sessionId: `page-sweep-${state.options.runId}-${body.audience}`,
+        testId: 'page-sweep',
+        appBase: requireTrustedUiBase(state),
+        routes: body.pages,
+        loginRoutes: body.loginRoutes,
+        errorMarkers: body.errorMarkers,
+        storageState: body.storageState,
+        issueRecord: (obligationId, testId, payload) =>
+          issueRecord(state, obligationId, 'page.observed', testId, payload, 'engine-observed').recordId,
+      });
+      sendJson(res, 200, { visits });
       return;
     }
     if (req.method === 'POST' && path === '/runs/expected-set') {

@@ -30,6 +30,7 @@ import type {
   SessionReleaseRequest,
   SessionReleaseResponse,
   TwinShapesResponse,
+  PageSweepRequest,
 } from '../witness/types.js';
 import { WitnessRequestError } from '../fixture/witness-client.js';
 
@@ -128,6 +129,11 @@ export class SupervisorClient {
     request: ObserveDeclarationsRequest,
   ): Promise<ObserveDeclarationsResponse> {
     return this.request<ObserveDeclarationsResponse>('/runs/observe-declarations', request);
+  }
+
+  /** POST /runs/page-sweep: visits unproven page obligations after the suite. */
+  async sweepPages(request: PageSweepRequest): Promise<{ visits: unknown[] }> {
+    return this.request<{ visits: unknown[] }>('/runs/page-sweep', request);
   }
 
   /**

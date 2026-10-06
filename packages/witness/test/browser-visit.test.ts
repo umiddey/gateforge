@@ -37,11 +37,11 @@ describe('engine browser visit', () => {
     close = async () => { await manager.closeAll(); await new Promise<void>((resolve) => app.close(() => resolve())); };
     const pages = ['/clean', '/bounce', '/crash', '/error', '/bad'].map((path) => ({ id: path, path }));
     try {
-      expect((await driveEngineVisit(page, appBase, pages[0]!, pages, { loginRoutes: ['/login'], errorMarkers: ['Something went wrong'] })).loads.satisfied).toBe(true);
-      expect((await driveEngineVisit(page, appBase, pages[1]!, pages, { loginRoutes: ['/login'] })).loads.refusalReasons).toContain('PAGE_BOUNCED_TO_LOGIN');
-      expect((await driveEngineVisit(page, appBase, pages[2]!, pages)).loads.refusalReasons).toContain('PAGE_UNCAUGHT_EXCEPTION');
-      expect((await driveEngineVisit(page, appBase, pages[3]!, pages, { errorMarkers: ['Something went wrong'] })).loads.refusalReasons).toContain('PAGE_ERROR_MARKER');
-      expect((await driveEngineVisit(page, appBase, pages[4]!, pages)).dataOk.refusalReasons).toContain('PAGE_API_ERROR');
+      expect((await driveEngineVisit(page, appBase, pages[0]!, pages, { loginRoutes: ['/login'], errorMarkers: ['Something went wrong'] })).verdict.loads.satisfied).toBe(true);
+      expect((await driveEngineVisit(page, appBase, pages[1]!, pages, { loginRoutes: ['/login'] })).verdict.loads.refusalReasons).toContain('PAGE_BOUNCED_TO_LOGIN');
+      expect((await driveEngineVisit(page, appBase, pages[2]!, pages)).verdict.loads.refusalReasons).toContain('PAGE_UNCAUGHT_EXCEPTION');
+      expect((await driveEngineVisit(page, appBase, pages[3]!, pages, { errorMarkers: ['Something went wrong'] })).verdict.loads.refusalReasons).toContain('PAGE_ERROR_MARKER');
+      expect((await driveEngineVisit(page, appBase, pages[4]!, pages)).verdict.dataOk.refusalReasons).toContain('PAGE_API_ERROR');
     } finally {
       await close();
       close = undefined;

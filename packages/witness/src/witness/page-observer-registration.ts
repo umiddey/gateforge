@@ -1,4 +1,5 @@
 import type { ServerResponse } from 'node:http';
+import type { BrowserContextOptions } from 'playwright';
 import type { SessionPageObserverRequest } from './types.js';
 import { driveEngineVisit, type EngineBrowserManager } from './browser.js';
 import { observePageBrowser, type PageObserver } from './page-observer.js';
@@ -93,6 +94,48 @@ export async function registerPageObserver(input: {
  * Visits referee-selected page gaps in the engine-owned session and issues
  * the same page-observation records with their independent channel.
  */
+function normalizePageStorageState(raw: unknown): BrowserContextOptions['storageState'] {
+  if (raw === undefined) return undefined;
+  if (raw === null || typeof raw !== 'object' || !('cookies' in raw) || !Array.isArray(raw.cookies) ||
+    !('origins' in raw) || !Array.isArray(raw.origins)) {
+    throw new PageObserverRegistrationError('page sweep storage state must contain cookie and origin arrays', 400);
+  }
+  const cookies = raw.cookies.map((entry) => {
+    if (entry === null || typeof entry !== 'object' || !('name' in entry) || typeof entry.name !== 'string' ||
+      !('value' in entry) || typeof entry.value !== 'string' || !('domain' in entry) || typeof entry.domain !== 'string' ||
+      !('path' in entry) || typeof entry.path !== 'string' || !('expires' in entry) || typeof entry.expires !== 'number' ||
+      !('httpOnly' in entry) || typeof entry.httpOnly !== 'boolean' || !('secure' in entry) || typeof entry.secure !== 'boolean' ||
+      !('sameSite' in entry) || (entry.sameSite !== 'Strict' && entry.sameSite !== 'Lax' && entry.sameSite !== 'None')) {
+      throw new PageObserverRegistrationError('page sweep storage state contains an invalid cookie', 400);
+    }
+    return {
+      name: entry.name,
+      value: entry.value,
+      domain: entry.domain,
+      path: entry.path,
+      expires: entry.expires,
+      httpOnly: entry.httpOnly,
+      secure: entry.secure,
+      sameSite: entry.sameSite,
+    };
+  });
+  const origins = raw.origins.map((entry) => {
+    if (entry === null || typeof entry !== 'object' || !('origin' in entry) || typeof entry.origin !== 'string' ||
+      !('localStorage' in entry) || !Array.isArray(entry.localStorage)) {
+      throw new PageObserverRegistrationError('page sweep storage state contains an invalid origin', 400);
+    }
+    const localStorage = entry.localStorage.map((item: unknown) => {
+      if (item === null || typeof item !== 'object' || !('name' in item) || typeof item.name !== 'string' ||
+        !('value' in item) || typeof item.value !== 'string') {
+        throw new PageObserverRegistrationError('page sweep storage state contains an invalid local-storage value', 400);
+      }
+      return { name: item.name, value: item.value };
+    });
+    return { origin: entry.origin, localStorage };
+  });
+  return { cookies, origins };
+}
+
 export async function sweepPageVisits(input: {
   browser: EngineBrowserManager;
   sessionId: string;
@@ -101,26 +144,28 @@ export async function sweepPageVisits(input: {
   routes: readonly PageRoute[];
   loginRoutes: readonly string[];
   errorMarkers: readonly string[];
+  storageState?: unknown;
   issueRecord(obligationId: string, testId: string, payload: unknown): string;
 }): Promise<Array<{ routeId: string; verdict: PageVisitVerdict }>> {
-  const page = await input.browser.pageFor(input.sessionId);
+  const page = await input.browser.pageFor(input.sessionId, normalizePageStorageState(input.storageState));
   const visits: Array<{ routeId: string; verdict: PageVisitVerdict }> = [];
   for (const route of input.routes) {
-    const verdict = await driveEngineVisit(page, input.appBase, route, input.routes, {
+    const observation = await driveEngineVisit(page, input.appBase, route, input.routes, {
       loginRoutes: input.loginRoutes,
       errorMarkers: input.errorMarkers,
     });
+    const { verdict, visit } = observation;
     if (verdict.pageId === null) {
       throw new PageObserverRegistrationError(`engine visit did not match a declared page route: ${route.path}`, 503);
     }
     const payload = {
       channel: 'swept',
       routeId: verdict.pageId,
-      finalUrl: verdict.finalUrl,
-      navigations: [],
-      exceptions: [],
-      domMarkerHit: false,
-      apiStatuses: [],
+      finalUrl: visit.url,
+      navigations: visit.navigations,
+      exceptions: visit.exceptions,
+      domMarkerHit: visit.domMarkerHit,
+      apiStatuses: visit.apiResponses.map(({ url, status, remoteAddress, proxied }) => ({ url, status, remoteAddress, proxied })),
       loads: verdict.loads,
       dataOk: verdict.dataOk,
     };

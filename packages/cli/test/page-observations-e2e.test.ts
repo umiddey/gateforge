@@ -45,6 +45,19 @@ export const routes = <>
   <Route path="/orders/:id" element={<TenantGuard><Orders /></TenantGuard>} />
 </>;
 `;
+const SWEEP_ROUTES = `import { Route } from 'react-router-dom';
+
+export const routes = <>
+  <Route path="/orders/:id" element={<TenantGuard><Orders /></TenantGuard>} />
+  <Route path="/unopened" element={<TenantGuard><Customers /></TenantGuard>} />
+  <Route path="/unbound/:id" element={<TenantGuard><Customers /></TenantGuard>} />
+  <Route path="/bound/:id" element={<TenantGuard><Customers /></TenantGuard>} />
+  <Route path="/secret" element={<TenantGuard><Secret /></TenantGuard>} />
+  <Route path="/crash" element={<TenantGuard><Crash /></TenantGuard>} />
+  <Route path="/broken" element={<TenantGuard><Broken /></TenantGuard>} />
+  <Route path="/bad" element={<TenantGuard><Bad /></TenantGuard>} />
+ </>;
+`;
 const PLAYWRIGHT_CONFIG = `import { defineConfig } from 'playwright/test';
 export default defineConfig({
   testDir: 'specs',
@@ -134,6 +147,7 @@ interface Verdict {
   recordIds: string[];
 }
 interface GateReport {
+  advisories?: Array<{ detail: string }>;
   verdicts?: Verdict[];
   execution?: {
     selectedTests?: {
@@ -150,6 +164,8 @@ function installPagesRepo(
   repo: TempRepo,
   routes: string = ROUTES,
   specs: Record<string, string> = PAGE_SPECS,
+  sweep = false,
+  params = '{}',
 ): void {
   const options = {
     include: "['src/**/*.tsx', 'specs/**/*.ts']",
@@ -157,7 +173,7 @@ function installPagesRepo(
     scan: { scanRoots: "['src/**/*.tsx']", coverage: PAGE_COVERAGE },
   };
   repo.writeFiles({
-    '.gateforge.yml': `${configYml(options).replace('languages: [python]', 'languages: [javascript]')}${PAGE_CONFIG}`,
+    '.gateforge.yml': `${configYml(options).replace('languages: [python]', 'languages: [javascript]')}${PAGE_CONFIG.replace('sweep: false', `sweep: ${String(sweep)}`).replace('params: {}', `params: ${params}`)}`,
     '.gateforge/policies.yml':
       'schemaVersion: 1\npolicies:\n  - id: unrelated-table-fixture\n    when:\n      kind: sql.table\n    require:\n      - persistence:read\n',
     '.gateforge/classification-policy.yml': 'schemaVersion: 1\ntrustedInternalEntryPoints: []\ninternalRules: []\n',
@@ -234,8 +250,18 @@ async function runCliProcess(
     stderr += chunk.toString();
   });
   const code = await new Promise<number | null>((resolve, reject) => {
-    child.once('error', reject);
-    child.once('close', resolve);
+    const timeout = setTimeout(() => {
+      child.kill('SIGTERM');
+      reject(new Error(`test-gates child timed out\nstdout:\n${stdout}\nstderr:\n${stderr}`));
+    }, 120_000);
+    child.once('error', (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.once('close', (exitCode) => {
+      clearTimeout(timeout);
+      resolve(exitCode);
+    });
   });
   return { code: code ?? 1, stdout, stderr };
 }
@@ -364,6 +390,76 @@ describe('page observations through a sealed test-gates run', () => {
         const failedCustomer = verdictFor(report, 'tenant.page-customers-', 'page:loads');
         expect(failedCustomer.verdict).not.toBe('satisfied');
         expect(failedCustomer.reason).toContain('no clean witness-observed page visit from a passing test');
+        expect(run.stderr, run.stdout).not.toContain('page sweep visited');
+      } finally {
+        await proxy.stop();
+        await new Promise<void>((resolve) => app.server.close(() => resolve()));
+      }
+    });
+  }, 240_000);
+  it('sweeps a page gap after the existing witnessed test run', async () => {
+    await withTempRepo({}, async (repo) => {
+      installPagesRepo(repo, SWEEP_ROUTES, SEALED_PAGE_SPECS, true, '{ "/bound/:id": { id: "43" } }');
+      repo.git(['add', '-A']);
+      repo.git(['commit', '--no-gpg-sign', '--quiet', '-m', 'neutral page sweep fixture']);
+      const app = await startPagesApp();
+      const proxy = await startAttestationProxy(app.url, FINGERPRINT);
+      try {
+        const keyring = operatorEnvironment();
+        const env = {
+          ...keyring.env,
+          GATEFORGE_APP_BASE_URL: proxy.url,
+          GATEFORGE_TARGET_BASE_URL: proxy.url,
+          GATEFORGE_TARGET_FINGERPRINT: FINGERPRINT,
+          GATEFORGE_APPROVED_POLICY_DIGEST: trustedPolicyDigestForConfig(repo.root, loadConfigAt(repo.root)),
+        };
+        const run = await runCliProcess(repo.root, ['test-gates', '--changed', '--scope', 'full', '--format', 'json'], env);
+        const report = parseReport(run.stdout, run);
+        expect(run.stderr, run.stdout).toContain('PAGE_PARAM_UNBOUND: /unbound/:id');
+        expect(report.advisories?.some((entry) => entry.detail.includes('PAGE_PARAM_UNBOUND: /unbound/:id'))).toBe(true);
+        expect(verdictFor(report, 'tenant.page-bound-', 'page:loads').verdict).toBe('satisfied');
+        expect(verdictFor(report, 'tenant.page-unbound-', 'page:loads').verdict).not.toBe('satisfied');
+        expect(verdictFor(report, 'tenant.page-secret-', 'page:loads').reason).toContain('PAGE_BOUNCED_TO_LOGIN');
+        expect(verdictFor(report, 'tenant.page-crash-', 'page:loads').reason).toContain('PAGE_UNCAUGHT_EXCEPTION');
+        expect(verdictFor(report, 'tenant.page-broken-', 'page:loads').reason).toContain('PAGE_ERROR_MARKER');
+        expect(verdictFor(report, 'tenant.page-bad-', 'page:data-ok').reason).toContain('PAGE_API_ERROR');
+        const records = JSON.parse(readFileSync(repo.path('.gateforge/test-gates/records.json'), 'utf8')) as Array<{
+          obligationId?: string;
+          payload?: { channel?: string };
+        }>;
+        expect(records.find((record) => record.obligationId?.startsWith('tenant.page-orders-'))?.payload?.channel).toBe('observed');
+        expect(records.find((record) => record.obligationId?.startsWith('tenant.page-unopened-'))?.payload?.channel).toBe('swept');
+        expect(records.find((record) => record.obligationId?.startsWith('tenant.page-bound-'))?.payload?.channel).toBe('swept');
+      } finally {
+        await proxy.stop();
+        await new Promise<void>((resolve) => app.server.close(() => resolve()));
+      }
+    });
+  }, 240_000);
+  it('leaves unopened pages unproven when sweeping is disabled', async () => {
+    await withTempRepo({}, async (repo) => {
+      installPagesRepo(repo, SWEEP_ROUTES, SEALED_PAGE_SPECS, false);
+      repo.git(['add', '-A']);
+      repo.git(['commit', '--no-gpg-sign', '--quiet', '-m', 'neutral disabled page sweep fixture']);
+      const app = await startPagesApp();
+      const proxy = await startAttestationProxy(app.url, FINGERPRINT);
+      try {
+        const keyring = operatorEnvironment();
+        const env = {
+          ...keyring.env,
+          GATEFORGE_APP_BASE_URL: proxy.url,
+          GATEFORGE_TARGET_BASE_URL: proxy.url,
+          GATEFORGE_TARGET_FINGERPRINT: FINGERPRINT,
+          GATEFORGE_APPROVED_POLICY_DIGEST: trustedPolicyDigestForConfig(repo.root, loadConfigAt(repo.root)),
+        };
+        const run = await runCliProcess(repo.root, ['test-gates', '--changed', '--scope', 'full', '--format', 'json'], env);
+        const report = parseReport(run.stdout, run);
+        expect(verdictFor(report, 'tenant.page-unopened-', 'page:loads').verdict).not.toBe('satisfied');
+        expect(run.stderr, run.stdout).not.toContain('page sweep visited');
+        const records = JSON.parse(readFileSync(repo.path('.gateforge/test-gates/records.json'), 'utf8')) as Array<{
+          payload?: { channel?: string };
+        }>;
+        expect(records.some((record) => record.payload?.channel === 'swept')).toBe(false);
       } finally {
         await proxy.stop();
         await new Promise<void>((resolve) => app.server.close(() => resolve()));
