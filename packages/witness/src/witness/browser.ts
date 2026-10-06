@@ -32,7 +32,7 @@
 // below, and the LAUNCHER is injected (`EngineBrowserManager` requires
 // one) — `@gate-forge/pack-playwright` is the layer that knows which
 // browser to launch. Nothing here imports Playwright at runtime.
-import type { Browser, BrowserContext, BrowserContextOptions, Frame, Locator, Page, Request, Response } from 'playwright';
+import type { Browser, BrowserContext, BrowserContextOptions, Frame, Locator, Page, Response } from 'playwright';
 import {
   apiRequestsSettled,
   gradePageVisit,
@@ -42,9 +42,9 @@ import {
   type PageRoute,
   type PageVisitVerdict,
 } from './page-observation.js';
+import { trackPageApiSettlement, type ApiSettlementTracker, type TrackedApiExchange } from './api-settlement.js';
 import {
   ENGINE_PAGE_VISIT_STEP_TIMEOUT_MS,
-  ENGINE_PAGE_VISIT_ADDRESS_TIMEOUT_MS,
   ENGINE_PAGE_VISIT_SETTLE_MS,
   ENGINE_PAGE_VISIT_API_SETTLE_TIMEOUT_MS,
 } from '../constants.js';
@@ -81,12 +81,11 @@ export async function driveEngineVisit(
   const navigations: string[] = [];
   const exceptions: string[] = [];
   const apiResponses: ObservedPageVisit['apiResponses'] = [];
-  const pendingResponses = new Set<Promise<void>>();
   /** App data requests (fetch/XHR or /api/) started but not yet settled. */
-  const outstandingRequests = new Set<Request>();
+  const outstandingRequests = new Set<TrackedApiExchange>();
   /** Tracked app data requests that failed, with the browser failure text. */
   const failedApiRequests: ObservedApiRequestFailure[] = [];
-  /** Tracked app data requests that reached requestfinished. */
+  /** Tracked app data requests the browser's network events completed. */
   const completedApiRequests: ObservedApiRequestCompletion[] = [];
   /** Bumped on every tracked event; wakes the drain/quiet wait. */
   let activityVersion = 0;
@@ -112,76 +111,56 @@ export async function driveEngineVisit(
     exceptions.push(error.message);
     noteActivity();
   };
-  const onRequest = (request: Request): void => {
-    let url: URL;
-    try { url = new URL(request.url()); } catch { return; }
-    if (!isAppDataExchange(url, request.resourceType())) return;
-    outstandingRequests.add(request);
-    noteActivity();
-  };
-  const onRequestFailed = (request: Request): void => {
-    if (!outstandingRequests.delete(request)) return;
-    // A failed app data request can never produce a verifiable response;
-    // whether it leaves the visit unsettled is decided at grading time (a
-    // client-side cancel superseded by a completed same-URL request may
-    // still count as settled).
-    failedApiRequests.push({ method: request.method(), url: request.url(), errorText: request.failure()?.errorText ?? '' });
-    noteActivity();
-  };
-  const onRequestFinished = (request: Request): void => {
-    // The request lifecycle ends at body completion (or failure), never at
-    // response headers: a 200 whose body later dies must stay unsettled.
-    if (!outstandingRequests.delete(request)) return;
-    completedApiRequests.push({ method: request.method(), url: request.url() });
-    noteActivity();
-  };
-  const onResponse = (response: Response): void => {
-    let url: URL;
-    try { url = new URL(response.url()); } catch { return; }
-    if (!isAppDataExchange(url, response.request().resourceType())) return;
-    noteActivity();
-    // Headers only: collect status/address here; the request stays
-    // outstanding until requestfinished/requestfailed.
-    const pending = (async () => {
-      let remoteAddress: string | null = null;
-      let timeout: NodeJS.Timeout | undefined;
-      try {
-        remoteAddress = await Promise.race([
-          response.serverAddr().then((address) => address?.ipAddress ?? null),
-          new Promise<null>((resolve) => {
-            timeout = setTimeout(() => resolve(null), ENGINE_PAGE_VISIT_ADDRESS_TIMEOUT_MS);
-          }),
-        ]);
-      } catch {
-        // An unavailable peer address stays null and the shared grader
-        // refuses the response rather than crediting unverifiable data.
-      } finally {
-        clearTimeout(timeout);
-      }
-      apiResponses.push({ url: response.url(), status: response.status(), remoteAddress, proxied: remoteAddress !== null });
-    })();
-    pendingResponses.add(pending);
-    void pending.finally(() => pendingResponses.delete(pending));
-  };
   page.on('framenavigated', onNavigation);
   page.on('pageerror', onError);
-  page.on('request', onRequest);
-  page.on('requestfailed', onRequestFailed);
-  page.on('requestfinished', onRequestFinished);
-  page.on('response', onResponse);
+  let tracker: ApiSettlementTracker | undefined;
   try {
+    // Settlement completion comes from the browser's own network events (one
+    // CDP session per visited page): loadingFinished, or every declared
+    // Content-Length byte received — even when the page never reads the body.
+    tracker = await trackPageApiSettlement(page, {
+      isAppDataExchange,
+      onExchangeOpen: (exchange) => {
+        outstandingRequests.add(exchange);
+        noteActivity();
+      },
+      onExchangeHeaders: (_exchange, headers) => {
+        apiResponses.push({
+          url: headers.url,
+          status: headers.status,
+          remoteAddress: headers.remoteAddress,
+          proxied: headers.remoteAddress !== null,
+        });
+        noteActivity();
+      },
+      onExchangeSettled: (exchange, settlement) => {
+        if (!outstandingRequests.delete(exchange)) return;
+        if (settlement.kind === 'completed') {
+          completedApiRequests.push({ method: exchange.method, url: exchange.url });
+        } else {
+          // A failed app data request can never produce a verifiable
+          // response; whether it leaves the visit unsettled is decided at
+          // grading time (a client-side cancel superseded by a completed
+          // same-URL request may still count as settled).
+          failedApiRequests.push({ method: exchange.method, url: exchange.url, errorText: settlement.errorText });
+        }
+        noteActivity();
+      },
+      onActivity: noteActivity,
+    });
     await page.goto(destination.href, { waitUntil: 'domcontentloaded', timeout: ENGINE_PAGE_VISIT_STEP_TIMEOUT_MS });
     if (foreignNavigations.length > 0) {
       throw new EngineBrowserError(`browser.visit observed a navigation outside the trusted app origin: ${foreignNavigations[0]}`);
     }
-    // Wait for complete requests AND a quiet window after the last activity
-    // (request start/completion/failure, response, page error, navigation)
-    // within the SAME fixed API settle budget: the existing SETTLE window is
-    // spent AFTER completion, so body-driven JS/DOM and errors scheduled by
-    // completed responses land before grading. Fetches starting during the
-    // quiet window are drained again under the same deadline. Event-driven
-    // wakeups only — no retries, no busy polling. Worst case per route:
-    // STEP + API_SETTLE + ADDRESS + STEP <= the shared sweep budget.
+    // Wait for complete exchanges AND a quiet window after the last activity
+    // (request start/bytes/completion/failure, response headers, page error,
+    // navigation) within the SAME fixed API settle budget: the existing
+    // SETTLE window is spent AFTER completion, so body-driven JS/DOM and
+    // errors scheduled by completed responses land before grading. Fetches
+    // starting during the quiet window are drained again under the same
+    // deadline. Event-driven wakeups only — no retries, no busy polling.
+    // Worst case per route: STEP + API_SETTLE + STEP <= the shared sweep
+    // budget.
     const apiDeadline = Date.now() + ENGINE_PAGE_VISIT_API_SETTLE_TIMEOUT_MS;
     for (;;) {
       while (outstandingRequests.size > 0) {
@@ -216,11 +195,6 @@ export async function driveEngineVisit(
       if (activityVersion !== versionAtQuietStart || outstandingRequests.size > 0) continue;
       break;
     }
-    // Bounded response collections (address lookups) land before grading,
-    // so the visit never grades before its responses were collected.
-    while (pendingResponses.size > 0) {
-      await Promise.all([...pendingResponses]);
-    }
     const body = await page.locator('body').innerText({ timeout: ENGINE_PAGE_VISIT_STEP_TIMEOUT_MS });
     const visit: ObservedPageVisit = {
       url: page.url(),
@@ -241,10 +215,7 @@ export async function driveEngineVisit(
   } finally {
     page.off('framenavigated', onNavigation);
     page.off('pageerror', onError);
-    page.off('request', onRequest);
-    page.off('requestfailed', onRequestFailed);
-    page.off('requestfinished', onRequestFinished);
-    page.off('response', onResponse);
+    await tracker?.detach();
   }
 }
 

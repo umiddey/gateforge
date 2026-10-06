@@ -1198,7 +1198,11 @@ the last activity, bounded by the shared engine budget — a 500 arriving a
 second late, or a 200 whose body dies mid-flight, is no longer a clean
 page. A request the app itself cancels (`net::ERR_ABORTED`) counts as
 settled only when the same method and URL completed in the same visit; any
-other failure, or an unretried cancel, refuses the page.
+other failure, or an unretried cancel, refuses the page. In the engine's
+swept visits, completion is read from the browser's network events, so a
+response body the app never reads still counts once every declared byte
+(Content-Length) arrived; an unread body without a declared length stays
+unsettled.
 
 Per test, only a page's LATEST observation (`observationSequence`) counts.
 An early clean visit cannot hide a later refusal by the same test, and

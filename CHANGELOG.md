@@ -96,7 +96,10 @@
   whose body died mid-flight, was graded clean. A request the app itself
   cancels (`net::ERR_ABORTED`) counts as settled only when the same method
   and URL completed in the same visit; any other failure, or an unretried
-  cancel, refuses the page.
+  cancel, refuses the page. The referee's swept channel now reads
+  completion from the browser's own network events, so a response body the
+  app never reads still counts once every declared byte (Content-Length)
+  arrived; an unread body without a declared length stays unsettled.
 
 - **The latest page observation per test decides.** Per test, only a
   page's latest observation (`observationSequence`) counts: an early
