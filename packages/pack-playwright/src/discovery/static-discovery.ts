@@ -1180,10 +1180,78 @@ function findModuleMock(source: ts.SourceFile, file: string): Location | null {
   return found;
 }
 
+/** The storage mutations a storage-only init script may make. */
+const SAFE_STORAGE_METHODS: Record<string, true> = {
+  clear: true,
+  removeItem: true,
+  setItem: true,
+};
+
+/** `localStorage`/`sessionStorage`, optionally reached through `window`. */
+function storageReceiverName(node: ts.Expression): string | null {
+  if (
+    ts.isPropertyAccessExpression(node) &&
+    ts.isIdentifier(node.expression) &&
+    node.expression.text === 'window'
+  ) {
+    return node.name.text;
+  }
+  return ts.isIdentifier(node) ? node.text : null;
+}
+
+/** One `localStorage.setItem('k', 'v')`-shaped storage call, literals only. */
+function isSafeStorageCall(expression: ts.Expression): boolean {
+  if (!ts.isCallExpression(expression) || !ts.isPropertyAccessExpression(expression.expression)) return false;
+  const method = expression.expression.name.text;
+  if (SAFE_STORAGE_METHODS[method] !== true) return false;
+  const receiver = storageReceiverName(expression.expression.expression);
+  if (receiver !== 'localStorage' && receiver !== 'sessionStorage') return false;
+  if (method === 'setItem') {
+    return (
+      expression.arguments.length === 2 &&
+      ts.isStringLiteral(expression.arguments[0]) &&
+      ts.isStringLiteral(expression.arguments[1])
+    );
+  }
+  if (method === 'removeItem') {
+    return expression.arguments.length === 1 && ts.isStringLiteral(expression.arguments[0]);
+  }
+  return expression.arguments.length === 0;
+}
+
+/** An expression statement carrying exactly one safe storage call. */
+function isSafeStorageStatement(node: ts.Statement): boolean {
+  return ts.isExpressionStatement(node) && isSafeStorageCall(node.expression);
+}
+
+/**
+ * True when one `addInitScript(...)` call is a STORAGE-ONLY init
+ * script: exactly one argument that is a parameterless arrow/function
+ * whose body is made solely of literal-keyed localStorage/sessionStorage
+ * mutations (`setItem`/`removeItem`/`clear`, optional `window.`
+ * receiver). It mutates nothing the witness cannot verify solely from
+ * its independent observer, so it is not a tamper. Every other shape —
+ * extra arguments, template or identifier values, any other statement,
+ * a string/path script, an empty body — stays a tamper (fail closed).
+ */
+function isStorageOnlyInitScript(call: ts.CallExpression): boolean {
+  if (call.arguments.length !== 1) return false;
+  const script = call.arguments[0];
+  if (!ts.isArrowFunction(script) && !ts.isFunctionExpression(script)) return false;
+  if (script.parameters.length !== 0) return false;
+  if (ts.isBlock(script.body)) {
+    return script.body.statements.length > 0 && script.body.statements.every(isSafeStorageStatement);
+  }
+  return isSafeStorageCall(script.body);
+}
+
 /**
  * Finds one page-observation tamper API call in a parsed helper/spec.
  * Includes every browser mutation path the witness cannot verify solely
- * from its independent CDP observer.
+ * from its independent CDP observer — except a storage-only init script
+ * ({@link isStorageOnlyInitScript}), which mutates only
+ * localStorage/sessionStorage and is therefore not a tamper; the scan
+ * continues past it so a real tamper later in the file is still found.
  */
 function findRouteInterception(source: ts.SourceFile, file: string): Location | null {
   const tamperCalls: Record<string, true> = {
@@ -1205,6 +1273,10 @@ function findRouteInterception(source: ts.SourceFile, file: string): Location | 
       ts.isPropertyAccessExpression(node.expression) &&
       tamperCalls[node.expression.name.text] === true
     ) {
+      if (node.expression.name.text === 'addInitScript' && isStorageOnlyInitScript(node)) {
+        ts.forEachChild(node, visit);
+        return;
+      }
       found = locationOf(file, source, node);
       return;
     }

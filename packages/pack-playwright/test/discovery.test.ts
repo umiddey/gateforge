@@ -316,6 +316,88 @@ describe('static discovery', () => {
     expect(tamperRisk?.detail).toContain('e2e/page.spec.ts:3');
   });
 
+  it('a storage-only init script is not a tamper, and a later tamper is still found', () => {
+    const safeCalls = [
+      "page.addInitScript(() => localStorage.setItem('lang', 'en'))",
+      "page.addInitScript(() => { localStorage.setItem('lang', 'en'); sessionStorage.removeItem('tour_done'); })",
+      "context.addInitScript(() => { window.localStorage.setItem('lang', 'en'); window.sessionStorage.clear(); })",
+    ];
+    for (const call of safeCalls) {
+      const root = makeTempDir();
+      writeTree(root, {
+        'e2e/page.spec.ts': [
+          "import { test } from 'playwright/test';",
+          "test('opens orders', async ({ page }) => {",
+          `  ${call};`,
+          "  await page.goto('/orders');",
+          '});',
+          '',
+        ].join('\n'),
+      });
+      const result = scanTestFiles({ cwd: root, include: ['e2e/**/*.ts'], exclude: [] });
+      const test = rowFor(result.entries, 'e2e/page.spec.ts');
+      expect(test.facts.fileRouteInterception, call).toBeNull();
+      expect(
+        inferenceOf(test).mockSignals.some((signal) =>
+          signal.detail.startsWith('PAGE_OBSERVATION_TAMPER_RISK:'),
+        ),
+        call,
+      ).toBe(false);
+    }
+
+    const unsafeCalls = [
+      "page.addInitScript(() => localStorage.setItem('lang', lang))",
+      "page.addInitScript(() => localStorage.setItem(`lang`, 'en'))",
+      "page.addInitScript(() => { window.fetch = () => {}; })",
+      "page.addInitScript(() => { localStorage.setItem('lang', 'en'); page.route('**/*', route => route.continue()); })",
+      "page.addInitScript(() => localStorage.setItem('lang', 'en'), 5)",
+      "context.addInitScript('/scripts/bootstrap.js')",
+    ];
+    for (const call of unsafeCalls) {
+      const root = makeTempDir();
+      writeTree(root, {
+        'e2e/page.spec.ts': [
+          "import { test } from 'playwright/test';",
+          "test('opens orders', async ({ page }) => {",
+          `  ${call};`,
+          "  await page.goto('/orders');",
+          '});',
+          '',
+        ].join('\n'),
+      });
+      const result = scanTestFiles({ cwd: root, include: ['e2e/**/*.ts'], exclude: [] });
+      const test = rowFor(result.entries, 'e2e/page.spec.ts');
+      expect(test.facts.fileRouteInterception, call).not.toBeNull();
+      expect(
+        inferenceOf(test).mockSignals.some((signal) =>
+          signal.detail.startsWith('PAGE_OBSERVATION_TAMPER_RISK:'),
+        ),
+        call,
+      ).toBe(true);
+    }
+
+    // A safe init script does not stop the search: a real tamper after
+    // it is still reported, at its own line.
+    const root = makeTempDir();
+    writeTree(root, {
+      'e2e/page.spec.ts': [
+        "import { test } from 'playwright/test';",
+        "test('opens orders', async ({ page }) => {",
+        "  page.addInitScript(() => localStorage.setItem('lang', 'en'));",
+        "  await page.route('**/*', route => route.fulfill({ status: 200 }));",
+        '});',
+        '',
+      ].join('\n'),
+    });
+    const result = scanTestFiles({ cwd: root, include: ['e2e/**/*.ts'], exclude: [] });
+    const test = rowFor(result.entries, 'e2e/page.spec.ts');
+    expect(test.facts.fileRouteInterception).toMatchObject({ file: 'e2e/page.spec.ts', line: 4 });
+    const tamperRisk = inferenceOf(test).mockSignals.find((signal) =>
+      signal.detail.startsWith('PAGE_OBSERVATION_TAMPER_RISK:'),
+    );
+    expect(tamperRisk?.detail).toContain('e2e/page.spec.ts:4');
+  });
+
   it("a mocked/mock/mocks FOLDER segment mocks its specs (0.9.2)", () => {
     const root = makeTempDir();
     writeTree(root, {
