@@ -513,3 +513,141 @@ describe('detector integration: baseURL joining (phase 3 dogfood)', () => {
     }
   });
 });
+
+describe('trailing query-suffix holes', () => {
+  it('reads an inline conditional query suffix as the query, not a path segment', () => {
+    const files = new Map<string, string>([
+      ['src/a.ts', [
+        `fetch(\`/v1/buildings/\${buildingId}/meters\${code ? \`?code=\${code}\` : ''}\`);`,
+      ].join('\n')],
+    ]);
+    const calls = scanClientCalls('src/a.ts', files.get('src/a.ts') ?? '', {}, files);
+    expect(calls.calls.map((call) => call.rawPath)).toEqual(['/v1/buildings/${}/meters?']);
+    expect(calls.calls.map((call) => call.canonicalPath)).toEqual(['/v1/buildings/{}/meters']);
+    expect(calls.unresolved).toEqual([]);
+  });
+
+  it('reads a function-local const-bound suffix identifier as the query', () => {
+    const files = new Map<string, string>([
+      ['src/a.ts', [
+        `function loadMeters(buildingId: string, code?: string) {`,
+        `  const query = code ? \`?code=\${code}\` : '';`,
+        `  return fetch(\`/v1/buildings/\${buildingId}/meters\${query}\`);`,
+        `}`,
+      ].join('\n')],
+    ]);
+    const calls = scanClientCalls('src/a.ts', files.get('src/a.ts') ?? '', {}, files);
+    expect(calls.calls.map((call) => call.rawPath)).toEqual(['/v1/buildings/${}/meters?']);
+    expect(calls.unresolved).toEqual([]);
+  });
+
+  it('reads a module-scope const-bound suffix identifier as the query', () => {
+    const files = new Map<string, string>([
+      ['src/a.ts', [
+        `const suffix = code ? \`?code=\${code}\` : '';`,
+        `fetch(\`/v1/meters\${suffix}\`);`,
+      ].join('\n')],
+    ]);
+    const calls = scanClientCalls('src/a.ts', files.get('src/a.ts') ?? '', {}, files);
+    expect(calls.calls.map((call) => call.rawPath)).toEqual(['/v1/meters?']);
+    expect(calls.unresolved).toEqual([]);
+  });
+
+  it('reads a logical && suffix as the query', () => {
+    const files = new Map<string, string>([
+      ['src/a.ts', [
+        `fetch(\`/v1/buildings/\${id}/meters\${code && \`?code=\${code}\`}\`);`,
+      ].join('\n')],
+    ]);
+    const calls = scanClientCalls('src/a.ts', files.get('src/a.ts') ?? '', {}, files);
+    expect(calls.calls.map((call) => call.rawPath)).toEqual(['/v1/buildings/${}/meters?']);
+    expect(calls.unresolved).toEqual([]);
+  });
+
+  it('reads a logical || \'\' suffix over a const template as the query', () => {
+    const files = new Map<string, string>([
+      ['src/a.ts', [
+        `const query = \`?code=\${code}\`;`,
+        `fetch(\`/v1/meters\${query || ''}\`);`,
+      ].join('\n')],
+    ]);
+    const calls = scanClientCalls('src/a.ts', files.get('src/a.ts') ?? '', {}, files);
+    expect(calls.calls.map((call) => call.rawPath)).toEqual(['/v1/meters?']);
+    expect(calls.unresolved).toEqual([]);
+  });
+
+  it('reads a fragment (#) suffix as the query', () => {
+    const files = new Map<string, string>([
+      ['src/a.ts', [
+        `fetch(\`/v1/buildings/\${id}/meters\${section ? \`#\${section}\` : ''}\`);`,
+      ].join('\n')],
+    ]);
+    const calls = scanClientCalls('src/a.ts', files.get('src/a.ts') ?? '', {}, files);
+    expect(calls.calls.map((call) => call.rawPath)).toEqual(['/v1/buildings/${}/meters?']);
+    expect(calls.unresolved).toEqual([]);
+  });
+
+  it('reads a suffix passed through a wrapper parameter as the query', () => {
+    const files = new Map<string, string>([
+      ['src/a.ts', [
+        `const apiList = (query: string) => fetch(\`/v1/meters\${query}\`);`,
+        `apiList(code ? \`?code=\${code}\` : '');`,
+      ].join('\n')],
+    ]);
+    const config = { wrapperFunctions: [{ name: 'apiList', method: 'GET' as const }] };
+    const calls = scanClientCalls('src/a.ts', files.get('src/a.ts') ?? '', config, files);
+    expect(calls.calls.map((call) => call.rawPath)).toEqual(['/v1/meters?']);
+    expect(calls.unresolved).toEqual([]);
+  });
+
+  it('keeps a mid-path hole a positional slot', () => {
+    const files = new Map<string, string>([
+      ['src/a.ts', [`fetch(\`/items/\${id}/x\`);`].join('\n')],
+    ]);
+    const calls = scanClientCalls('src/a.ts', files.get('src/a.ts') ?? '', {}, files);
+    expect(calls.calls.map((call) => call.rawPath)).toEqual(['/items/${}/x']);
+    expect(calls.unresolved).toEqual([]);
+  });
+
+  it('keeps a trailing plain path value a positional slot', () => {
+    const files = new Map<string, string>([
+      ['src/a.ts', [`fetch(\`/items/\${id}\`);`].join('\n')],
+    ]);
+    const calls = scanClientCalls('src/a.ts', files.get('src/a.ts') ?? '', {}, files);
+    expect(calls.calls.map((call) => call.rawPath)).toEqual(['/items/${}']);
+    expect(calls.unresolved).toEqual([]);
+  });
+
+  it('keeps a conditional whose branch starts with / a positional slot', () => {
+    const files = new Map<string, string>([
+      ['src/a.ts', [`fetch(\`/items\${flag ? '/x' : ''}\`);`].join('\n')],
+    ]);
+    const calls = scanClientCalls('src/a.ts', files.get('src/a.ts') ?? '', {}, files);
+    expect(calls.calls.map((call) => call.rawPath)).toEqual(['/items${}']);
+    expect(calls.unresolved).toEqual([]);
+  });
+
+  it('keeps a non-last query-looking hole a positional slot', () => {
+    const files = new Map<string, string>([
+      ['src/a.ts', [
+        `const qs = code ? \`?a=\${code}\` : '';`,
+        `fetch(\`/items\${qs}/x\`);`,
+      ].join('\n')],
+    ]);
+    const calls = scanClientCalls('src/a.ts', files.get('src/a.ts') ?? '', {}, files);
+    expect(calls.calls.map((call) => call.rawPath)).toEqual(['/items${}/x']);
+    expect(calls.unresolved).toEqual([]);
+  });
+
+  it('keeps a suffix-shaped hole with a trailing literal a positional slot', () => {
+    const files = new Map<string, string>([
+      ['src/a.ts', [
+        `const qs = code ? \`?a=\${code}\` : '';`,
+        `fetch(\`/items\${qs}&more=1\`);`,
+      ].join('\n')],
+    ]);
+    const calls = scanClientCalls('src/a.ts', files.get('src/a.ts') ?? '', {}, files);
+    expect(calls.calls.map((call) => call.rawPath)).toEqual(['/items${}&more=1']);
+    expect(calls.unresolved).toEqual([]);
+  });
+});

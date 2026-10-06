@@ -16,7 +16,11 @@
  * - **Templates**: `${expr}` holes resolve through the same value table;
  *   rooted holes become positional `{}` slots without needing runtime
  *   values; an unresolvable hole before the path is rooted (host/base)
- *   makes the whole target `FRONTEND_CALL_TARGET_UNRESOLVED`.
+ *   makes the whole target `FRONTEND_CALL_TARGET_UNRESOLVED`. A trailing
+ *   hole that provably closes the path as a query/fragment suffix
+ *   (`?…`/`#…`/empty — conditionals, logical forms, const-bound names)
+ *   renders as a bare `?` so normalization strips the query instead of
+ *   gluing a positional segment.
  * - **Configured client symbols** (`apiClient.get(...)`) and **pure URL
  *   builders** (`buildApiPath('/v1/x')` with an optional declared base)
  *   are configuration-declared resolvable APIs — never coverage
@@ -1253,7 +1257,16 @@ class BoundTable implements Evaluator {
         const hole = this.evaluate(span.expression, file);
         if (hole.kind === 'unresolved') {
           if (!rooted) return { kind: 'unresolved', text: '' };
-          text += '${}';
+          // The wrapper's parameter stands for the callsite argument:
+          // a suffix is judged by the argument's shape, never the name.
+          const fromParameter =
+            ts.isIdentifier(span.expression) &&
+            span.expression.text === this.parameter &&
+            this.argument !== undefined;
+          const suffix = fromParameter
+            ? this.inner.trailingQuerySuffix(node, span, this.argument, this.argumentFile)
+            : this.inner.trailingQuerySuffix(node, span, span.expression, file);
+          text += suffix ? '?' : '${}';
         } else {
           text += hole.text;
           rooted = rooted || hole.text.startsWith('/');
@@ -1602,9 +1615,12 @@ class ValueTable {
         const hole = this.evaluate(span.expression, file);
         if (hole.kind === 'unresolved') {
           // Before the path is rooted, an unknown hole poisons the target
-          // (host/base unknown). After it, the hole is a positional slot.
+          // (host/base unknown). After it, the hole is a positional slot —
+          // unless it provably closes the path as a query/fragment suffix,
+          // which renders as `?` so normalization strips the query instead
+          // of gluing a positional segment.
           if (!rooted) return UNRESOLVED_VALUE;
-          text += '${}';
+          text += this.trailingQuerySuffix(node, span, span.expression, file) ? '?' : '${}';
         } else {
           text += hole.text;
           rooted = rooted || hole.text.startsWith('/');
@@ -1656,6 +1672,151 @@ class ValueTable {
       }
     }
     return UNRESOLVED_VALUE;
+  }
+
+  /**
+   * True when one unresolved template hole is a QUERY SUFFIX: the span
+   * is the template's LAST element (no trailing literal), and the
+   * hole's expression is provably a finite set of literal alternatives
+   * that are each the empty string or start with `?`/`#` — a
+   * conditional of string/template literals, a logical `c && A` /
+   * `A || B` over the same, or an identifier bound by const
+   * (function-local nearest binding, else the module machinery) to such
+   * an expression. Nested holes are allowed inside a `?`/`#`-headed
+   * branch: the rendered `?` collapses them, and normalization strips
+   * the query. Everything else — a branch starting with `/`, a
+   * mid-template hole, a trailing literal after the hole, an
+   * unresolvable name — stays a positional `${}` slot, exactly as
+   * before (fail closed, never guessed from names).
+   */
+  trailingQuerySuffix(
+    template: ts.TemplateExpression,
+    span: ts.TemplateSpan,
+    expression: ts.Expression,
+    file: string,
+  ): boolean {
+    const spans = template.templateSpans;
+    if (spans[spans.length - 1] !== span || span.literal.text !== '') return false;
+    const alternatives = this.querySuffixAlternatives(expression, file, new Set<string>());
+    if (alternatives === undefined) return false;
+    return alternatives.every(
+      (alternative) => alternative === '' || alternative.startsWith('?') || alternative.startsWith('#'),
+    );
+  }
+
+  /**
+   * The literal alternatives one expression provably takes when it is
+   * query-suffix-shaped, or undefined when the bounded model cannot
+   * prove the shape.
+   */
+  private querySuffixAlternatives(
+    node: ts.Expression,
+    file: string,
+    seen: Set<string>,
+  ): string[] | undefined {
+    if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return [node.text];
+    // A `?`/`#`-headed template stays suffix-shaped whatever its nested
+    // holes hold; a hole-headed one could become any path value.
+    if (ts.isTemplateExpression(node)) {
+      return node.head.text.startsWith('?') || node.head.text.startsWith('#')
+        ? [node.head.text]
+        : undefined;
+    }
+    if (ts.isParenthesizedExpression(node)) {
+      return this.querySuffixAlternatives(node.expression, file, seen);
+    }
+    if (ts.isConditionalExpression(node)) {
+      const whenTrue = this.querySuffixAlternatives(node.whenTrue, file, seen);
+      if (whenTrue === undefined) return undefined;
+      const whenFalse = this.querySuffixAlternatives(node.whenFalse, file, seen);
+      return whenFalse === undefined ? undefined : [...whenTrue, ...whenFalse];
+    }
+    if (ts.isBinaryExpression(node)) {
+      if (node.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken) {
+        // `c && A`: a falsey condition contributes the empty suffix.
+        const right = this.querySuffixAlternatives(node.right, file, seen);
+        return right === undefined ? undefined : ['', ...right];
+      }
+      if (node.operatorToken.kind === ts.SyntaxKind.BarBarToken) {
+        const left = this.querySuffixAlternatives(node.left, file, seen);
+        if (left === undefined) return undefined;
+        const right = this.querySuffixAlternatives(node.right, file, seen);
+        return right === undefined ? undefined : [...left, ...right];
+      }
+      return undefined;
+    }
+    if (ts.isIdentifier(node)) {
+      // A file-local binding shadows any imported/module one; only a
+      // `const` with an initializer proves the shape.
+      const local = this.localConstBinding(node);
+      if (local.state === 'found') {
+        const key = `${file}::${node.text}`;
+        if (seen.has(key)) return undefined; // cycle guard
+        seen.add(key);
+        const alternatives = this.querySuffixAlternatives(local.initializer, file, seen);
+        seen.delete(key);
+        return alternatives;
+      }
+      if (local.state === 'shadowed') return undefined;
+      const constant = this.resolveConstantInitializer(node.text, file, seen);
+      if (constant !== undefined) {
+        const [initializer, originFile] = constant;
+        const key = `${originFile}::${node.text}`;
+        if (seen.has(key)) return undefined; // cycle guard
+        seen.add(key);
+        const alternatives = this.querySuffixAlternatives(initializer, originFile, seen);
+        seen.delete(key);
+        return alternatives;
+      }
+      return undefined;
+    }
+    return undefined;
+  }
+
+  /**
+   * The nearest visible binding of `use`'s name: declared textually
+   * before it in the nearest enclosing function-like scopes, walking
+   * outward until a level names the identifier. Only `const` with an
+   * initializer counts; any closer `let`/`var`/initializer-less binding
+   * shadows fail-closed. Function-likes that do not enclose `use` are
+   * invisible from a level.
+   */
+  private localConstBinding(
+    use: ts.Identifier,
+  ): { state: 'found'; initializer: ts.Expression } | { state: 'shadowed' } | { state: 'absent' } {
+    let scope: ts.Node | undefined = use.parent;
+    while (scope !== undefined) {
+      if (ts.isFunctionLike(scope) || ts.isSourceFile(scope)) {
+        const declaration = this.nearestDeclarationBefore(use, scope);
+        if (declaration !== undefined) {
+          return (declaration.parent.flags & ts.NodeFlags.Const) !== 0 &&
+            declaration.initializer !== undefined
+            ? { state: 'found', initializer: declaration.initializer }
+            : { state: 'shadowed' };
+        }
+      }
+      scope = scope.parent;
+    }
+    return { state: 'absent' };
+  }
+
+  /** Nearest same-named declaration textually before `use` in `scope`. */
+  private nearestDeclarationBefore(use: ts.Identifier, scope: ts.Node): ts.VariableDeclaration | undefined {
+    let best: ts.VariableDeclaration | undefined;
+    const visit = (node: ts.Node): void => {
+      if (node !== scope && ts.isFunctionLike(node)) return;
+      if (
+        ts.isVariableDeclaration(node) &&
+        ts.isIdentifier(node.name) &&
+        node.name.text === use.text &&
+        node.name.getEnd() <= use.getStart()
+      ) {
+        if (best === undefined || node.name.getStart() > best.name.getStart()) best = node;
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(scope);
+    return best;
   }
 
   /**
