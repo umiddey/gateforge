@@ -60,13 +60,15 @@ export function gradePageVisit(input: {
   visit: ObservedPageVisit;
 }): PageVisitVerdict {
   const { visit } = input;
-
-  const page = input.pages.find(({ path }) => matchPageRoute(path, visit.url));
   const navigatedPaths = [...visit.navigations, visit.url].map(pathname).filter((value): value is string => value !== null);
-  const bounced = input.loginRoutes?.some((login) => {
-    const loginPath = pathname(login);
-    return loginPath !== null && navigatedPaths.includes(loginPath);
-  }) ?? false;
+  const loginPaths = (input.loginRoutes ?? []).map(pathname).filter((value): value is string => value !== null);
+  const bounced = loginPaths.some((loginPath) => navigatedPaths.includes(loginPath));
+  let page: PageRoute | undefined;
+  for (const url of [...visit.navigations, visit.url].reverse()) {
+    if (loginPaths.includes(pathname(url) ?? '')) continue;
+    page = input.pages.find(({ path }) => matchPageRoute(path, url));
+    if (page !== undefined) break;
+  }
   const loadsReasons: PageRefusalReason[] = [];
   if (page === undefined) loadsReasons.push('PAGE_ROUTE_UNMATCHED');
   if (bounced) loadsReasons.push('PAGE_BOUNCED_TO_LOGIN');
@@ -84,3 +86,5 @@ export function gradePageVisit(input: {
     dataOk: { satisfied: dataReasons.length === 0, refusalReasons: [...new Set(dataReasons)] },
   };
 }
+
+/** Browser-backed observer attached to an existing Chromium debugging port. */

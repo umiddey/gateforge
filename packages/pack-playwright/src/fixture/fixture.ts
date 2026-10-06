@@ -14,7 +14,12 @@
  * raw `playwright/test` bypasses the fixture and produces claims with no
  * records (the engine grades the obligation `missing`; GF-24).
  */
+import { chromium, firefox, webkit } from 'playwright';
 import type { Page } from 'playwright/test';
+import { createServer as createTcpServer } from 'node:net';
+import { once } from 'node:events';
+import type { Browser } from 'playwright/test';
+
 import { expect, test as base } from './consumer-runner.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { ENV_WITNESS_URL } from '../constants.js';
@@ -24,6 +29,18 @@ import {
   type SurfaceDescriptor,
 } from './evidence.js';
 import { WitnessClient } from './witness-client.js';
+const browserDebuggingPorts = new WeakMap<Browser, number>();
+
+async function availableDebuggingPort(): Promise<number> {
+  const server = createTcpServer();
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address();
+  if (address === null || typeof address === 'string') throw new Error('Could not allocate a Chromium debugging port.');
+  await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  return address.port;
+}
+
 
 /**
  * Routes browser requests for the configured app origin through the
@@ -172,7 +189,24 @@ export type EvidenceFixtures = {
  * was wired.
  */
 export const test = base.extend<EvidenceFixtures>({
-  page: async ({ page }, use, testInfo) => {
+  browser: async ({ browserName, launchOptions }, use) => {
+    const browserType = { chromium, firefox, webkit }[browserName];
+    const witnessed = Boolean(process.env[ENV_WITNESS_URL]) && browserName === 'chromium';
+    const debuggingPort = witnessed ? await availableDebuggingPort() : null;
+    const args = (launchOptions.args ?? []).filter((arg) => !arg.startsWith('--remote-debugging-port='));
+    const browser = await browserType.launch({
+      ...launchOptions,
+      args: [...args, ...(debuggingPort === null ? [] : [`--remote-debugging-port=${debuggingPort}`])],
+    });
+    if (debuggingPort !== null) browserDebuggingPorts.set(browser, debuggingPort);
+    try {
+      await use(browser);
+    } finally {
+      browserDebuggingPorts.delete(browser);
+      await browser.close();
+    }
+  },
+  page: async ({ page, browser }, use, testInfo) => {
     if (!process.env[ENV_WITNESS_URL]) {
       await use(page);
       return;
@@ -196,6 +230,28 @@ export const test = base.extend<EvidenceFixtures>({
     }
     if (session === null) {
       throw new Error(`No supervisor-issued witness session for ${testInfo.testId}.`);
+    }
+    const debuggingPort = browserDebuggingPorts.get(browser);
+    const pageObservationConfig = process.env['GATEFORGE_PAGE_OBSERVATION_CONFIG'];
+    if (debuggingPort !== undefined && pageObservationConfig !== undefined) {
+      const configured = JSON.parse(pageObservationConfig) as {
+        pages: Array<{ id: string; path: string }>;
+        loginRoutes: string[];
+        errorMarkers: string[];
+        appOrigins: string[];
+      };
+      if (Array.isArray(configured.pages) && configured.pages.length > 0) {
+        await witness.registerPageObserver({
+          sessionId: session.sessionId,
+          sessionToken: session.sessionToken,
+          testId: session.testId,
+          debuggingPort,
+          pages: configured.pages,
+          loginRoutes: configured.loginRoutes,
+          errorMarkers: configured.errorMarkers,
+          appOrigins: configured.appOrigins,
+        });
+      }
     }
     if (session.proxyUrl !== null) {
       // The reporter rides along so a page that loads ANOTHER origin

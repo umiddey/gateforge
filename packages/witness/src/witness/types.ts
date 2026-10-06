@@ -1149,6 +1149,18 @@ export interface SessionPageOriginResponse {
   recorded: true;
 }
 
+/** `POST /sessions/page-observer`: fixture registers its witnessed Chromium debugging port. */
+export interface SessionPageObserverRequest {
+  sessionId: string;
+  sessionToken: string;
+  testId: string;
+  debuggingPort: number;
+  pages: Array<{ id: string; path: string }>;
+  loginRoutes: string[];
+  errorMarkers: string[];
+  appOrigins: string[];
+}
+
 /** The transport handed to `read` (GET-only, engine-mediated). */
 export interface AdapterContext {
   /**

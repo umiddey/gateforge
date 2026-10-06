@@ -31,6 +31,7 @@ import type {
   SessionIdentityResponse,
   SessionPageOriginRequest,
   SessionPageOriginResponse,
+  SessionPageObserverRequest,
   SessionResolveRequest,
   SessionResolveResponse,
 } from '../witness/types.js';
@@ -196,6 +197,11 @@ export class WitnessClient {
     request: SessionPageOriginRequest,
   ): Promise<SessionPageOriginResponse> {
     return this.request<SessionPageOriginResponse>('/sessions/page-origins', request);
+  }
+
+  /** POST /sessions/page-observer registers the fixture-launched browser with the witness. */
+  async registerPageObserver(request: SessionPageObserverRequest): Promise<{ registered: true }> {
+    return this.request<{ registered: true }>('/sessions/page-observer', request);
   }
 
   /**

@@ -1,4 +1,4 @@
-import type { Browser, Page } from 'playwright';
+import type { Browser, BrowserContext, Page } from 'playwright';
 import type { ObservedPageVisit, PageRoute, PageVisitVerdict } from './page-observation.js';
 import { gradePageVisit } from './page-observation.js';
 
@@ -18,14 +18,16 @@ interface PageState {
   navigations: string[];
   exceptions: string[];
   apiResponses: ObservedPageVisit['apiResponses'];
-  settleTimer: ReturnType<typeof setTimeout> | null;
+  settleTimer: ReturnType<typeof setTimeout> | undefined;
   generation: number;
 }
 
-/** Attach the witness's independent Playwright/CDP client to an existing browser. */
-export async function observePageBrowser(options: PageObserverOptions): Promise<{
+export interface PageObserver {
   close(): Promise<void>;
-}> {
+}
+
+/** Attach the witness's independent Playwright/CDP client to an existing browser. */
+export async function observePageBrowser(options: PageObserverOptions): Promise<PageObserver> {
   if (!Number.isInteger(options.debuggingPort) || options.debuggingPort < 1 || options.debuggingPort > 65535) {
     throw new RangeError('debuggingPort must be a TCP port number');
   }
@@ -33,6 +35,7 @@ export async function observePageBrowser(options: PageObserverOptions): Promise<
   const { chromium } = await import('playwright');
   const browser: Browser = await chromium.connectOverCDP(`http://127.0.0.1:${options.debuggingPort}`);
   const states = new Map<Page, PageState>();
+  const contextsWatched = new Set<BrowserContext>();
   let closed = false;
   const isAppOrigin = (url: string): boolean => {
     try {
@@ -42,7 +45,7 @@ export async function observePageBrowser(options: PageObserverOptions): Promise<
     }
   };
   const settle = (state: PageState): void => {
-    if (state.settleTimer !== null) clearTimeout(state.settleTimer);
+    clearTimeout(state.settleTimer);
     const generation = ++state.generation;
     state.settleTimer = setTimeout(() => {
       void (async () => {
@@ -73,7 +76,7 @@ export async function observePageBrowser(options: PageObserverOptions): Promise<
   };
   const watch = (page: Page): void => {
     if (states.has(page)) return;
-    const state: PageState = { page, navigations: [], exceptions: [], apiResponses: [], settleTimer: null, generation: 0 };
+    const state: PageState = { page, navigations: [], exceptions: [], apiResponses: [], settleTimer: undefined, generation: 0 };
     states.set(page, state);
     page.on('framenavigated', (frame) => {
       if (frame === page.mainFrame()) {
@@ -106,20 +109,22 @@ export async function observePageBrowser(options: PageObserverOptions): Promise<
     });
     settle(state);
   };
-  for (const context of browser.contexts()) {
-    context.on('page', watch);
-    for (const page of context.pages()) watch(page);
-  }
-  browser.on('context', (context) => {
-    context.on('page', watch);
-    for (const page of context.pages()) watch(page);
-  });
+  const discoverPages = (): void => {
+    for (const context of browser.contexts()) {
+      if (!contextsWatched.has(context)) {
+        contextsWatched.add(context);
+        context.on('page', watch);
+      }
+      for (const page of context.pages()) watch(page);
+    }
+  };
+  discoverPages();
+  const discoveryTimer = setInterval(discoverPages, 100);
   return {
     async close(): Promise<void> {
       closed = true;
-      for (const state of states.values()) {
-        if (state.settleTimer !== null) clearTimeout(state.settleTimer);
-      }
+      clearInterval(discoveryTimer);
+      for (const state of states.values()) clearTimeout(state.settleTimer);
       await browser.close();
     },
   };

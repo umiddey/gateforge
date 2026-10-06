@@ -185,6 +185,7 @@ import {
   RUN_HEADER,
   VERIFIER_HEADER,
 } from '../constants.js';
+import { PageObserverRegistrationError, registerPageObserver } from './page-observer-registration.js';
 import { loadAdapters, makeAdapterContext } from './adapter-registry.js';
 import {
   AttestationError,
@@ -252,6 +253,7 @@ import type {
   SessionPageOriginReport,
   SessionReleaseRequest,
   SessionResolveRequest,
+  SessionPageObserverRequest,
   TestSession,
   TwinShapeReport,
   TwinShapesResponse,
@@ -611,6 +613,7 @@ interface WitnessState {
    * path.
    */
   sessionPageOrigins: Map<string, SessionPageOriginReport>;
+  pageObservers: Map<string, { close(): Promise<void> }>;
   /**
    * Trusted run context bound via `POST /run-context` (plan §11.4): the
    * frozen `{runId, invocationId, inputDigest}` the witness attests.
@@ -1254,6 +1257,13 @@ async function stopSessionProxy(session: TestSession): Promise<void> {
   });
 }
 
+/** Detaches the independent browser observer when its test session ends. */
+async function stopPageObserver(state: WitnessState, sessionId: string): Promise<void> {
+  const observer = state.pageObservers.get(sessionId);
+  state.pageObservers.delete(sessionId);
+  await observer?.close();
+}
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -1461,6 +1471,7 @@ export async function startWitness(options: WitnessOptions): Promise<WitnessHand
     workerSessions: new Map(),
     sessionIdentities: new Map(),
     sessionPageOrigins: new Map(),
+    pageObservers: new Map(),
     // The engine browser is OPTIONAL here and required only by the
     // ENGINE-BROWSER proof channel: this package is runner-neutral and
     // must not assume a browser is installed. A witness started without
@@ -2317,6 +2328,24 @@ async function handleRequest(
     }
     if (req.method === 'POST' && path === '/sessions/page-origins') {
       await handleSessionPageOrigins(state, res, (await readBody(req)) as Record<string, unknown>);
+      return;
+    }
+    if (req.method === 'POST' && path === '/sessions/page-observer') {
+      const body = (await readBody(req)) as SessionPageObserverRequest;
+      try {
+        await registerPageObserver({
+          state,
+          response: res,
+          body,
+          requireSession: (value) => requireOpenSession(state, value),
+          issueRecord: (obligationId, testId, payload) => {
+            issueRecord(state, obligationId, 'page.observed', testId, payload, 'engine-observed');
+          },
+        });
+      } catch (error) {
+        if (error instanceof PageObserverRegistrationError) throw new HttpError(error.status, error.message);
+        throw error;
+      }
       return;
     }
     if (req.method === 'POST' && path === '/sessions/intervals/open') {
@@ -3685,6 +3714,7 @@ async function handleSessionClose(
     state.observeSnapshots.delete(sessionId);
     state.sessionIdentities.delete(sessionId);
     state.sessionPageOrigins.delete(sessionId);
+    await stopPageObserver(state, sessionId);
     sendJson(res, 200, { sealed: true as const });
     return;
   }
@@ -3707,6 +3737,7 @@ async function handleSessionClose(
     // (or submit) through it afterwards. The engine browser context dies
     // too — a sealed session's pages are never driven again.
     await stopSessionProxy(session);
+    await stopPageObserver(state, sessionId);
     await state.engineBrowser?.closeSession(session.sessionId);
   }
   sendJson(res, 200, { sealed: true as const });
@@ -3924,6 +3955,7 @@ async function handleSessionRelease(
     // The dedicated channel dies with the release: no exchange can be
     // observed through this session after its test finished.
     await stopSessionProxy(session);
+    await stopPageObserver(state, sessionId);
     await state.engineBrowser?.closeSession(session.sessionId);
   }
   sendJson(res, 200, { released: true as const });
@@ -6359,6 +6391,9 @@ async function stopWitness(state: WitnessState): Promise<void> {
   }
   for (const session of state.sessions.values()) {
     await stopSessionProxy(session);
+  }
+  for (const sessionId of state.pageObservers.keys()) {
+    await stopPageObserver(state, sessionId);
   }
   // Phase 4 lifecycle shutdown: release every live fixture lease namespace.
   // Timeouts/failures release only their own namespace and never flip a

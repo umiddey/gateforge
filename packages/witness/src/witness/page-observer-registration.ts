@@ -1,0 +1,84 @@
+import type { ServerResponse } from 'node:http';
+import type { SessionPageObserverRequest } from './types.js';
+import { observePageBrowser, type PageObserver } from './page-observer.js';
+import type { PageVisitVerdict } from './page-observation.js';
+export interface PageObserverRegistrationState {
+  pageObservers: Map<string, PageObserver>;
+  observed: Array<{ seq: number; sessionId: string | null; path: string; status: number }>;
+}
+
+export class PageObserverRegistrationError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = 'PageObserverRegistrationError';
+  }
+}
+
+export async function registerPageObserver(input: {
+  state: PageObserverRegistrationState;
+  response: ServerResponse;
+  body: SessionPageObserverRequest;
+  requireSession(body: Record<string, unknown>): { sessionId: string; testId: string; activity: number };
+  issueRecord(obligationId: string, testId: string, payload: unknown): void;
+}): Promise<void> {
+  const { state, body } = input;
+  const session = input.requireSession(body as unknown as Record<string, unknown>);
+  if (body.testId !== session.testId) throw new PageObserverRegistrationError('page observer test identity does not match its session', 403);
+  if (!Number.isInteger(body.debuggingPort) || body.debuggingPort < 1 || body.debuggingPort > 65535) {
+    throw new PageObserverRegistrationError('page observer debuggingPort must be a valid TCP port', 400);
+  }
+  if (!Array.isArray(body.pages) || body.pages.some((page) =>
+    typeof page.id !== 'string' || page.id.length === 0 || page.id.includes(':') ||
+    typeof page.path !== 'string' || !page.path.startsWith('/'),
+  )) throw new PageObserverRegistrationError('page observer requires a valid page route table', 400);
+  if (!Array.isArray(body.loginRoutes) || body.loginRoutes.some((path) => typeof path !== 'string' || !path.startsWith('/')) ||
+    !Array.isArray(body.errorMarkers) || body.errorMarkers.some((marker) => typeof marker !== 'string' || marker.length === 0) ||
+    !Array.isArray(body.appOrigins) || body.appOrigins.some((origin) => {
+      try { return new URL(origin).origin !== origin; } catch { return true; }
+    })) {
+    throw new PageObserverRegistrationError('page observer configuration is invalid', 400);
+  }
+  if (state.pageObservers.has(session.sessionId)) {
+    throw new PageObserverRegistrationError('page observer is already registered for this session', 409);
+  }
+  const usedExchanges = new Set<number>();
+  let observer: PageObserver;
+  try {
+    observer = await observePageBrowser({
+      debuggingPort: body.debuggingPort,
+      pages: body.pages,
+      loginRoutes: body.loginRoutes,
+      errorMarkers: body.errorMarkers,
+      appOrigins: body.appOrigins,
+      isProxiedExchange(url, status) {
+        const path = new URL(url).pathname;
+        const exchange = state.observed.find((candidate) =>
+          candidate.sessionId === session.sessionId && candidate.path === path && candidate.status === status &&
+          !usedExchanges.has(candidate.seq),
+        );
+        if (exchange === undefined) return false;
+        usedExchanges.add(exchange.seq);
+        return true;
+      },
+      onVisit(visit, verdict: PageVisitVerdict) {
+        if (verdict.pageId === null) return;
+        input.issueRecord(`${verdict.pageId}:page:loads`, session.testId, {
+          routeId: verdict.pageId,
+          finalUrl: visit.url,
+          navigations: visit.navigations,
+          exceptions: visit.exceptions,
+          domMarkerHit: visit.domMarkerHit,
+          apiStatuses: visit.apiResponses.map(({ url, status, remoteAddress, proxied }) => ({ url, status, remoteAddress, proxied })),
+          loads: verdict.loads,
+          dataOk: verdict.dataOk,
+        });
+      },
+    });
+  } catch (error) {
+    throw new PageObserverRegistrationError(`could not attach page observer: ${error instanceof Error ? error.message : String(error)}`, 503);
+  }
+  state.pageObservers.set(session.sessionId, observer);
+  session.activity += 1;
+  input.response.writeHead(200, { 'content-type': 'application/json' });
+  input.response.end(JSON.stringify({ registered: true }));
+}

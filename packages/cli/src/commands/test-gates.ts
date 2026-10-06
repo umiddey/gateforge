@@ -3981,11 +3981,12 @@ async function runSupervisedTestGatesInner(
               GATEFORGE_QUEUE_OBSERVER: config.queueObserver.kind,
               GATEFORGE_QUEUE_OBSERVER_CONFIG: JSON.stringify(config.queueObserver),
             }),
-        // Suite-driven Observe claims need session-attributed traffic too.
-        // Engine-driven Playwright repositories without these declarations
-        // keep their existing proxy-free wiring.
+        // Page observation also requires a session-attributed proxy exchange so
+        // the witness can refuse browser responses the proxy never saw.
         ...(runnerName === 'pytest' || runnerName === 'vitest' || runnerName === 'cypress' ||
-        (runnerName === 'playwright' && observeObligations.length > 0)
+        (runnerName === 'playwright' &&
+          (observeObligations.length > 0 ||
+            (config.pages !== undefined && pipeline.graph.resources.some((resource) => resource.kind === 'ui.page'))))
           ? appBase !== ''
             ? { [ENV_PROXY_TARGET]: appBase }
             : {}
@@ -4251,6 +4252,23 @@ async function runSupervisedTestGatesInner(
   for (const name of ['GATEFORGE_APP_BASE_URL', 'GATEFORGE_TARGET_BASE_URL', 'GATEFORGE_TARGET_FINGERPRINT'] as const) {
     const value = io.env[name];
     if (typeof value === 'string' && value !== '') suiteEnv[name] = value;
+  }
+  if (runnerName === 'playwright' && io.env['GATEFORGE_APP_BASE_URL'] !== undefined) {
+    const pages = pipeline.graph.resources.flatMap((resource) => {
+      const path = resource.attributes['path'];
+      return resource.kind === 'ui.page' && resource.id !== null && typeof path === 'string'
+        ? [{ id: resource.id, path }]
+        : [];
+    });
+    if (pages.length > 0) {
+      const appOrigin = new URL(io.env['GATEFORGE_APP_BASE_URL']).origin;
+      suiteEnv['GATEFORGE_PAGE_OBSERVATION_CONFIG'] = JSON.stringify({
+        pages,
+        loginRoutes: (config.pages?.audiences ?? []).map((audience) => audience.loginRoute),
+        errorMarkers: config.pages?.errorMarkers ?? [],
+        appOrigins: [appOrigin],
+      });
+    }
   }
   if (declaredRunnerEnvNames !== undefined) {
     for (const name of declaredRunnerEnvNames) {
