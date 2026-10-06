@@ -1,23 +1,28 @@
 /** Bind only in a runner child or to an already-loaded runner; pack-root imports are trusted. */
 import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type * as PlaywrightTest from 'playwright/test';
 import { ENV_PLAYWRIGHT_CONFIG_DIR } from '../constants.js';
 import { localPlaywrightCliCandidates } from '../runner-resolution.js';
 
 type RunnerModule = Pick<typeof PlaywrightTest, 'test' | 'expect'>;
 
-function readRunner(namespace: unknown, origin: string): RunnerModule {
+function runnerFrom(namespace: unknown): RunnerModule | undefined {
   const loaded = namespace as (Partial<RunnerModule> & {
     default?: Partial<RunnerModule>;
   }) | null | undefined;
   const test = typeof loaded?.test === 'function' ? loaded.test : loaded?.default?.test;
   const expect = typeof loaded?.expect === 'function' ? loaded.expect : loaded?.default?.expect;
-  if (typeof test !== 'function' || typeof expect !== 'function') {
+  return typeof test === 'function' && typeof expect === 'function' ? { test, expect } : undefined;
+}
+
+function readRunner(namespace: unknown, origin: string): RunnerModule {
+  const runner = runnerFrom(namespace);
+  if (runner === undefined) {
     throw new Error(`The selected Playwright runner '${origin}' exposes no test/expect.`);
   }
-  return { test, expect };
+  return runner;
 }
 
 const childContext = process.env[ENV_PLAYWRIGHT_CONFIG_DIR];
@@ -30,8 +35,24 @@ if (cli !== undefined) {
   );
   const cached = requireFrom.cache[entry];
   if (cached !== undefined) {
-    // Plain Playwright has already loaded this module; reusing it executes no candidate code.
-    consumer = readRunner(cached.exports, entry);
+    // A worker loading a plain `playwright/test` spec can import this
+    // package while Playwright's CJS entry is still evaluating. Its
+    // cache record then has empty exports; use the core test API entry
+    // that public entry itself requires, preserving the same runner.
+    const cachedRunner = runnerFrom(cached.exports);
+    if (cachedRunner !== undefined) {
+      consumer = cachedRunner;
+    } else if (
+      cached.exports !== null &&
+      typeof cached.exports === 'object' &&
+      Object.keys(cached.exports).length === 0
+    ) {
+      const playwrightEntry = requireFrom.resolve('playwright/test');
+      const coreEntry = join(dirname(playwrightEntry), 'lib', 'index.js');
+      consumer = readRunner(requireFrom(coreEntry), entry);
+    } else {
+      consumer = readRunner(cached.exports, entry);
+    }
   } else if (childContext) {
     // Only engine-created runner children may load a previously unloaded consumer module.
     // Load/shape errors propagate: a broken selected runner never falls back to a second copy.

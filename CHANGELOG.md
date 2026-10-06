@@ -26,6 +26,11 @@
   channel; reports, `explain`, and `next` show page status and the cheapest
   route, seed, or refusal fix.
 
+- **Plain Playwright test compatibility.** The Playwright fixture now reuses
+  the runner's initialized core API if a raw test imports it while the public
+  CommonJS entry is still loading; raw tests keep running without requiring
+  Gateforge fixtures or producing page records.
+
 ## 0.12.0
 
 ### Added
