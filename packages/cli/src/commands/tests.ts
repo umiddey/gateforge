@@ -38,6 +38,7 @@ import {
   canonicalJson,
   compareStrings,
   mappingSuggestions,
+  RunManifestSchema,
   TestKindSchema,
   businessRuleClaimId,
   BUSINESS_RULE_TYPE_TABLE,
@@ -61,11 +62,19 @@ import {
 } from '@gate-forge/core';
 import {
   discoverTestCatalog,
+  readRunnerOutcomes,
   TestDiscoveryError,
   scanTestFiles,
   type DiscoverResult,
   type StaticRegistrationWarning,
 } from '@gate-forge/pack-playwright';
+import {
+  exchangesFromRecords,
+  inventoryRoutes,
+  suggestFromRunEvidence,
+  testKeyResolver,
+  type RunTestIdentity,
+} from '../run-evidence.js';
 import { parseArgs, stringFlag } from '../args.js';
 import { diagnosticsJson, renderDiagnosticsText, runDiagnosticSuites } from '../diagnostics.js';
 import { UsageError } from '../errors.js';
@@ -91,7 +100,7 @@ import {
 } from '../mapping.js';
 import { runPipeline, sourcesByResourceId } from '../pipeline.js';
 import { resolveProvider } from '../providers.js';
-import { httpRoutesView, resolveStateDir } from '../state.js';
+import { httpRoutesView, readJsonArray, resolveStateDir } from '../state.js';
 import { engineGeneratedStateFileFilter } from '../state-artifacts.js';
 import { loadConfigAt, rejectUnknownFlags } from './common.js';
 import { installedPlaywrightCompatibilityError } from '../package-compatibility.js';
@@ -101,7 +110,7 @@ export const TESTS_USAGE = `\
 usage: gateforge tests discover [--json] [--pytest]
        gateforge tests catalog [--json]
        gateforge tests surface-doctor [--json]
-       gateforge tests suggest [--changed] [--json]
+       gateforge tests suggest [--changed] [--from-run [--run-dir <dir>]] [--json]
        gateforge tests mark --test <key> --kind <kind> [--category <c>]... \\
          (--obligation <id>... | --rule <ruleId>/<caseId>) --reason "<text>"
        gateforge tests sync [--json]
@@ -440,9 +449,18 @@ async function suggestSubcommand(
   io: Io,
   options: Record<string, string | boolean | string[]>,
 ): Promise<number> {
-  rejectUnknownFlags(options, ['changed', 'json', 'help'], TESTS_USAGE);
+  rejectUnknownFlags(options, ['changed', 'json', 'help', 'from-run', 'run-dir'], TESTS_USAGE);
   const asJson = options['json'] === true;
   const diffScoped = options['changed'] === true;
+  const fromRun = options['from-run'] === true;
+  const runDirFlag = stringFlag(options, 'run-dir');
+  if (runDirFlag !== undefined && !fromRun) {
+    throw new UsageError('tests suggest: --run-dir requires --from-run');
+  }
+  if (fromRun && diffScoped) {
+    throw new UsageError('tests suggest: --from-run reads a completed run and cannot be combined with --changed');
+  }
+  if (fromRun) return suggestFromRunSubcommand(io, asJson, runDirFlag);
   const config = loadConfigAt(io.cwd);
   const stateDir = resolveStateDir(io.cwd);
 
@@ -635,6 +653,213 @@ async function suggestSubcommand(
           `    ... and ${String(hidden)} more candidate(s) — run \`gateforge tests suggest --json\` for the full ranked list`,
         );
       }
+    }
+  }
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// tests suggest --from-run (witnessed-run evidence)
+// ---------------------------------------------------------------------------
+
+/**
+ * Reads the obligation ids the run's own report graded satisfied or
+ * waived. Advisory input for `--from-run`: an absent or unreadable
+ * report (the report is written last, so an interrupted run may leave
+ * none) simply excludes nothing — the evidence still speaks, and the
+ * mark command stays valid either way.
+ *
+ * Args:
+ *   runDir: the run state directory holding report.json.
+ *
+ * Returns:
+ *   Set<string>: satisfied or waived obligation ids.
+ */
+function readRunReportSatisfied(runDir: string): Set<string> {
+  const satisfied = new Set<string>();
+  let document: unknown;
+  try {
+    document = JSON.parse(readFileSync(join(runDir, 'report.json'), 'utf8'));
+  } catch {
+    return satisfied;
+  }
+  const verdicts = typeof document === 'object' && document !== null && 'verdicts' in document ? document.verdicts : null;
+  if (!Array.isArray(verdicts)) return satisfied;
+  for (const entry of verdicts) {
+    if (typeof entry !== 'object' || entry === null || !('obligationId' in entry) || !('verdict' in entry)) continue;
+    const obligationId: unknown = entry.obligationId;
+    const verdict: unknown = entry.verdict;
+    if (typeof obligationId === 'string' && (verdict === 'satisfied' || verdict === 'waived')) {
+      satisfied.add(obligationId);
+    }
+  }
+  return satisfied;
+}
+
+/**
+ * The runner-side test identities the run sealed: the runner-outcomes
+ * document rows, plus the execution envelope rows for adapters that
+ * return structured outcomes without that document — the SAME identity
+ * join (`execution.ts`) every existing command uses. Both sources are
+ * advisory here: a missing file contributes nothing.
+ *
+ * Args:
+ *   runDir: the run state directory.
+ *
+ * Returns:
+ *   RunTestIdentity[]: identity rows keyed by the runner's test id.
+ */
+function runTestIdentities(runDir: string): RunTestIdentity[] {
+  const rows: RunTestIdentity[] = [];
+  const outcomes = readRunnerOutcomes(join(runDir, 'runner-outcomes.json'));
+  for (const outcome of outcomes?.outcomes ?? []) {
+    rows.push({ testId: outcome.testId, file: outcome.file, titlePath: outcome.titlePath, project: outcome.project });
+  }
+  try {
+    const envelope: unknown = JSON.parse(readFileSync(join(runDir, 'execution-result.json'), 'utf8'));
+    const outcomes =
+      typeof envelope === 'object' && envelope !== null && 'outcomes' in envelope ? envelope.outcomes : null;
+    if (!Array.isArray(outcomes)) return rows;
+    for (const entry of outcomes) {
+      if (typeof entry !== 'object' || entry === null) continue;
+      const testId =
+        'frameworkId' in entry && typeof entry.frameworkId === 'string'
+          ? entry.frameworkId
+          : 'logicalKey' in entry && typeof entry.logicalKey === 'string'
+            ? entry.logicalKey
+            : null;
+      const file = 'file' in entry && typeof entry.file === 'string' ? entry.file : null;
+      const titlePath =
+        'titlePath' in entry && Array.isArray(entry.titlePath)
+          ? entry.titlePath.filter((title: unknown): title is string => typeof title === 'string')
+          : null;
+      if (testId === null || testId === '' || file === null || titlePath === null) continue;
+      const project: string | null =
+        'project' in entry && typeof entry.project === 'string' ? entry.project : null;
+      rows.push({ testId, file, titlePath, project });
+    }
+  } catch {
+    // An absent or unreadable envelope leaves the outcome rows above.
+  }
+  return rows;
+}
+
+/**
+ * Implements `tests suggest --from-run [--run-dir <dir>]`: the run
+ * already observed, per test, every API request each page made, so the
+ * observation obligations a test exercised become EVIDENCE-BASED
+ * suggestions — the tests that made the calls, the exchange lines, and
+ * the exact `tests mark` command. Name-based ranking (`tests suggest`
+ * without `--from-run`) never loads the run. Inspection only: nothing
+ * here writes the test map, and the exit code is always 0 when the run
+ * state reads.
+ *
+ * Args:
+ *   io: process context.
+ *   asJson: print the same data as the canonical json document.
+ *   runDirFlag: `--run-dir` override; the default run state directory
+ *     (`resolveStateDir`) is the directory every supervised run writes.
+ *
+ * Returns:
+ *   Promise<number>: always 0; the suggestions are data, never a gate.
+ * @throws UsageError when the directory has no run manifest (it is not
+ *   a completed run) or the state files are malformed.
+ */
+async function suggestFromRunSubcommand(io: Io, asJson: boolean, runDirFlag: string | undefined): Promise<number> {
+  const config = loadConfigAt(io.cwd);
+  const stateDir = resolveStateDir(io.cwd);
+  const runDir = runDirFlag === undefined ? stateDir : resolveStateDir(io.cwd, runDirFlag);
+  let runId: string;
+  try {
+    runId = RunManifestSchema.parse(JSON.parse(readFileSync(join(runDir, 'manifest.json'), 'utf8'))).runId;
+  } catch {
+    throw new UsageError(
+      `tests suggest --from-run: no run manifest at '${join(runDir, 'manifest.json')}' — ` +
+        'run gateforge test-gates first (or point --run-dir at a completed run state directory)',
+    );
+  }
+
+  // The same pipeline every gate command runs: the endpoint inventory and
+  // the obligations come from the discovered graph, and the mapping
+  // resolution says which obligations a test already declares.
+  const pipeline = await runPipeline({ cwd: io.cwd, env: io.env, config, provider: 'all-files', stateDir });
+  const discovered = await runDiscovery(io.cwd, config, stateDir, true);
+  writeRegistrationWarnings(io, discovered.registrationWarnings, 'tests suggest --from-run');
+  const mapped = await resolveRepositoryMappings({
+    cwd: io.cwd,
+    config,
+    obligations: pipeline.policy.obligations,
+    catalog: discovered.catalog,
+    nativeClaims: discovered.nativeClaims,
+    nativeErrors: discovered.nativeErrors,
+    nativeInstances: discovered.nativeInstances,
+    behaviorCatalog: pipeline.behaviorCatalog,
+  });
+  const mappedObligationIds = new Set<string>();
+  for (const group of mapped.resolution.obligations) {
+    if (!group.bindings.some((binding) => binding.origin === 'native' || binding.origin === 'sidecar')) continue;
+    mappedObligationIds.add(group.obligationId);
+  }
+
+  const observed = exchangesFromRecords(readJsonArray(runDir, 'records.json'));
+  const result = suggestFromRunEvidence({
+    runId,
+    routes: inventoryRoutes(pipeline.graph),
+    obligations: pipeline.policy.obligations,
+    exchanges: observed.exchanges,
+    satisfiedObligationIds: readRunReportSatisfied(runDir),
+    mappedObligationIds,
+    testKeyOf: testKeyResolver(discovered.catalog, runTestIdentities(runDir)),
+  });
+
+  if (asJson) {
+    writeLine(
+      io.stdout,
+      canonicalJson({
+        schemaVersion: 1,
+        run: { dir: runDir, runId: result.runId },
+        considered: result.considered,
+        observedRecords: observed.records,
+        suggestions: result.suggestions,
+        unmatched: result.unmatched,
+        ambiguous: result.ambiguous,
+      } as unknown as JsonValue),
+    );
+    return 0;
+  }
+
+  writeLine(
+    io.stdout,
+    `from-run ${result.runId}: ${String(observed.records)} observed page record(s), ` +
+      `${String(result.considered)} app API exchange(s), ${String(result.suggestions.length)} evidence-backed suggestion(s), ` +
+      `${String(result.unmatched.length)} unmatched, ${String(result.ambiguous.length)} ambiguous`,
+  );
+  for (const suggestion of result.suggestions) {
+    writeLine(io.stdout, `[run-evidence] ${suggestion.obligationIds.join(' ')}`);
+    writeLine(io.stdout, `  endpoint: ${suggestion.route} (${suggestion.resourceId})`);
+    for (const row of suggestion.evidence) {
+      writeLine(
+        io.stdout,
+        `  evidence: ${row.method} ${row.path} -> ${String(row.status)} (run ${result.runId}) — by ${row.testResolved ?? row.testId}`,
+      );
+    }
+    writeLine(
+      io.stdout,
+      suggestion.command === null
+        ? `  next action: no current catalog test owns '${suggestion.evidence[0]?.testId ?? ''}' — run gateforge tests discover and re-check`
+        : `  next action:\n    ${suggestion.command}`,
+    );
+  }
+  if (result.unmatched.length > 0) {
+    writeLine(io.stdout, 'matched no endpoint (a call to a route the backend does not serve is usually an app bug):');
+    for (const row of result.unmatched) {
+      writeLine(io.stdout, `  - ${row.testResolved ?? row.testId}: ${row.method} ${row.path} -> ${String(row.status)}`);
+    }
+  }
+  if (result.ambiguous.length > 0) {
+    writeLine(io.stdout, 'ambiguous (several endpoints match equally; never guessed):');
+    for (const row of result.ambiguous) {
+      writeLine(io.stdout, `  - ${row.testResolved ?? row.testId}: ${row.method} ${row.path} -> ${String(row.status)} — ${row.candidates.join(', ')}`);
     }
   }
   return 0;

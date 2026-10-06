@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+- **`tests suggest --from-run`: suggestions from a witnessed run's own page
+  observations.** A witnessed run already records, per test, every API
+  request each page made; the suggestion engine no longer has to guess from
+  names. The witness now stamps each recorded exchange with its method (the
+  additive `method` field on `page.observed` payloads' `apiStatuses`
+  entries, in both the observed and the swept channel), and
+  `gateforge tests suggest --from-run [--run-dir <dir>]` reads that ledger
+  from the run state directory, matches every same-origin app API exchange
+  (status under 400) against the current endpoint inventory with the
+  shared router semantics — a literal segment beats a parameter; more than
+  one equal match is reported as ambiguous, never guessed — and prints,
+  per observation obligation no test declares and the run did not satisfy,
+  the tests that exercised it, the evidence lines
+  (`METHOD path -> status (run <runId>)`), and the exact
+  `tests mark --kind observed-e2e` command. Advisory only: nothing is
+  written. Exchanges that matched no endpoint (usually an app bug) and the
+  ambiguous ones are listed separately with the test and path.
+
 ## 0.13.1
 
 - **Frontend detector: a trailing query-string hole is read as a query, not a

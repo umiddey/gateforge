@@ -370,7 +370,9 @@ npx gateforge tests mark --test <key> --kind browser-e2e \
 ```
 
 Marking a test never satisfies an obligation; it only says which existing
-test is *about* it. New proof goes in `tests/e2e/gateforge/`.
+test is *about* it. New proof goes in `tests/e2e/gateforge/`. After a
+witnessed run, `tests suggest --from-run` names tests by evidence — the API
+calls each test's page really made — instead of by name.
 
 ### 6a. Base an existing suite on Gateforge's fixture
 

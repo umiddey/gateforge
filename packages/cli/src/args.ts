@@ -18,6 +18,7 @@ export interface ParsedArgs {
 const BOOLEAN_FLAGS: Record<string, true> = {
   json: true,
   changed: true,
+  'from-run': true,
   staged: true,
   help: true,
   version: true,
