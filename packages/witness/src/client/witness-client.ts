@@ -5,6 +5,7 @@ import {
   ENV_RUN_TOKEN,
   ENV_STATE_DIR,
   ENV_WITNESS_URL,
+  PAGE_OBSERVER_FLUSH_TIMEOUT_MS,
   RUN_HEADER,
   WITNESS_URL_FILE,
 } from '../constants.js';
@@ -36,6 +37,8 @@ import type {
   SessionResolveRequest,
   SessionResolveResponse,
 } from '../witness/types.js';
+
+export type { SessionPageObserverFlushRequest };
 
 /** A witness call that failed (status + single-cause diagnostic). */
 export class WitnessRequestError extends Error {
@@ -206,8 +209,11 @@ export class WitnessClient {
   }
 
   /** POST /sessions/page-observer/flush persists every quiet visit before the runner closes Chromium. */
-  async flushPageObserver(request: SessionPageObserverFlushRequest): Promise<{ flushed: true }> {
-    return this.request<{ flushed: true }>('/sessions/page-observer/flush', request);
+  async flushPageObserver(
+    request: SessionPageObserverFlushRequest,
+    timeoutMs: number = PAGE_OBSERVER_FLUSH_TIMEOUT_MS,
+  ): Promise<{ flushed: true }> {
+    return this.request<{ flushed: true }>('/sessions/page-observer/flush', request, timeoutMs);
   }
 
   /**
@@ -407,9 +413,9 @@ export class WitnessClient {
 		return { records: records as IssuedLedgerRecord[] };
 	}
 
-  private async request<T>(path: string, payload: unknown): Promise<T> {
+  private async request<T>(path: string, payload: unknown, timeoutMs: number = this.timeoutMs): Promise<T> {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     let response: Response;
     try {
       response = await fetch(`${this.url}${path}`, {

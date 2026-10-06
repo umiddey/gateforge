@@ -4,6 +4,7 @@ import { once } from 'node:events';
 import { chromium } from 'playwright';
 import { afterEach, describe, expect, it } from 'vitest';
 import { observePageBrowser } from '../src/witness/page-observer.js';
+import { PAGE_OBSERVER_FLUSH_TIMEOUT_MS } from '../src/constants.js';
 import type { ObservedPageVisit, PageVisitVerdict } from '../src/witness/page-observation.js';
 
 const html = `<!doctype html><html><body><main id="app"></main><script>
@@ -838,6 +839,111 @@ fetch(location.pathname === "/customers" ? "/api/customers" : "/api/orders").cat
       const page = await browser.newPage();
       await page.goto(`${appOrigin}/orders`);
       await expect.poll(() => visits.length, { timeout: 20_000 }).toBe(1);
+      expect(visits[0]!.observed.apiRequestsSettled).toBe(false);
+      expect(visits[0]!.observed.apiResponses.map(({ status }) => status)).toEqual([200]);
+      expect(visits[0]!.verdict.loads.refusalReasons).toContain('PAGE_API_UNSETTLED');
+      expect(visits[0]!.verdict.dataOk.refusalReasons).toContain('PAGE_API_UNSETTLED');
+    } finally {
+      await observer.close();
+    }
+  });
+
+  it('settles an unread Content-Length 401 body and flushes well under the derived timeout', async () => {
+    // Real app shape (the CP failure): the page keeps the response of an
+    // auth probe but never reads its Content-Length body. Real browser
+    // network behavior fake timers cannot drive (rule exception).
+    const app = createServer((request, response) => {
+      if (request.url === '/api/unread') {
+        response.writeHead(401, { 'content-type': 'text/plain', 'content-length': '6' });
+        response.end('denied');
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'text/html' });
+      response.end('<!doctype html><html><body><main id="app"></main><script>fetch("/api/unread").then((response) => { window.k = response; }).catch(() => {});</script></body></html>');
+    });
+    app.listen(0, '127.0.0.1');
+    await once(app, 'listening');
+    const appAddress = app.address();
+    if (appAddress === null || typeof appAddress === 'string') throw new Error('app server did not bind');
+    const appOrigin = `http://127.0.0.1:${appAddress.port}`;
+    const debugPort = await freePort();
+    const browser = await chromium.launch({ args: [`--remote-debugging-port=${debugPort}`] });
+    stop = async () => { await browser.close(); await new Promise<void>((resolve) => app.close(() => resolve())); };
+    const visits: Array<{ observed: ObservedPageVisit; verdict: PageVisitVerdict }> = [];
+    const observer = await observePageBrowser({
+      debuggingPort: debugPort,
+      pages: [{ id: 'tenant.page-orders', path: '/orders' }],
+      loginRoutes: ['/login'],
+      errorMarkers: [],
+      appOrigins: [appOrigin],
+      isProxiedExchange: () => true,
+      quietMs: 300,
+      onVisit: (observed, verdict) => {
+        visits.push({ observed, verdict });
+      },
+    });
+    try {
+      const page = await browser.newPage();
+      await page.goto(`${appOrigin}/orders`);
+      // The emission must not wait out the whole app-data settle budget:
+      // the poll bound is a fraction of the derived flush timeout.
+      await expect.poll(() => visits.length, { timeout: 5_000 }).toBe(1);
+      expect(visits[0]!.observed.apiRequestsSettled).toBe(true);
+      expect(visits[0]!.observed.apiResponses.map(({ status }) => status)).toEqual([401]);
+      expect(visits[0]!.verdict.loads.satisfied).toBe(true);
+      expect(visits[0]!.verdict.dataOk.satisfied).toBe(false);
+      expect(visits[0]!.verdict.dataOk.refusalReasons).toEqual(['PAGE_API_ERROR']);
+      // The flush RPC's server side is bounded by the shared budget; the
+      // observed flush must return well under the derived client timeout.
+      const flushStart = Date.now();
+      await observer.flush();
+      expect(Date.now() - flushStart).toBeLessThan(PAGE_OBSERVER_FLUSH_TIMEOUT_MS);
+    } finally {
+      await observer.close();
+    }
+  });
+
+  it('refuses an unread truncated Content-Length body as unsettled', async () => {
+    // Real socket teardown: the declared Content-Length can never arrive;
+    // only the platform can produce this failure shape (rule exception:
+    // fake timers cannot drive the browser's network stack).
+    const app = createServer((request, response) => {
+      if (request.url === '/api/unread') {
+        response.writeHead(200, { 'content-length': '100' });
+        response.write('0123456789');
+        setTimeout(() => { response.socket?.destroy(); }, 300);
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'text/html' });
+      response.end('<!doctype html><html><body><main id="app"></main><script>fetch("/api/unread").then((response) => { window.k = response; }).catch(() => {});</script></body></html>');
+    });
+    app.listen(0, '127.0.0.1');
+    await once(app, 'listening');
+    const appAddress = app.address();
+    if (appAddress === null || typeof appAddress === 'string') throw new Error('app server did not bind');
+    const appOrigin = `http://127.0.0.1:${appAddress.port}`;
+    const debugPort = await freePort();
+    const browser = await chromium.launch({ args: [`--remote-debugging-port=${debugPort}`] });
+    stop = async () => { await browser.close(); await new Promise<void>((resolve) => app.close(() => resolve())); };
+    const visits: Array<{ observed: ObservedPageVisit; verdict: PageVisitVerdict }> = [];
+    const observer = await observePageBrowser({
+      debuggingPort: debugPort,
+      pages: [{ id: 'tenant.page-orders', path: '/orders' }],
+      loginRoutes: ['/login'],
+      errorMarkers: [],
+      appOrigins: [appOrigin],
+      isProxiedExchange: () => true,
+      quietMs: 300,
+      onVisit: (observed, verdict) => {
+        visits.push({ observed, verdict });
+      },
+    });
+    try {
+      const page = await browser.newPage();
+      await page.goto(`${appOrigin}/orders`);
+      await expect.poll(() => visits.length, { timeout: 5_000 }).toBe(1);
+      // 10 of the 100 declared bytes arrived: fewer bytes than declared
+      // never upgrade a request to settled.
       expect(visits[0]!.observed.apiRequestsSettled).toBe(false);
       expect(visits[0]!.observed.apiResponses.map(({ status }) => status)).toEqual([200]);
       expect(visits[0]!.verdict.loads.refusalReasons).toContain('PAGE_API_UNSETTLED');

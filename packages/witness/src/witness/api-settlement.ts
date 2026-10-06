@@ -63,7 +63,7 @@ export type TrackedApiSettlement =
 export interface ApiSettlementHost {
   /** The app-origin/resource-type filter (the channels' existing rule). */
   isAppDataExchange(url: URL, resourceType: string): boolean;
-  /** A tracked exchange started (the channel attributes it to its window). */
+  /** A tracked exchange hop started (the channel attributes it to its window). */
   onExchangeOpen(exchange: TrackedApiExchange): void;
   /** Response headers arrived; every redirect hop is reported separately. */
   onExchangeHeaders(exchange: TrackedApiExchange, headers: TrackedApiResponseHeaders): void;
@@ -136,9 +136,11 @@ export async function trackPageApiSettlement(page: Page, host: ApiSettlementHost
     if (existing !== undefined) {
       // Redirect hop of an already-tracked exchange: attribution (and the
       // record identity) stay with the exchange; only the current hop's
-      // method/URL move forward.
+      // method/URL move forward. Every hop counts as an open so channel
+      // correlation per method+URL sees exactly one open per hop.
       existing.method = params.request.method;
       existing.url = params.request.url;
+      host.onExchangeOpen(existing);
       return;
     }
     const record: ExchangeRecord = {

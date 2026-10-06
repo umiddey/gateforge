@@ -240,6 +240,20 @@ export const ENGINE_PAGE_VISIT_BUDGET_MS =
   ENGINE_PAGE_VISIT_SETTLE_MS +
   ENGINE_PAGE_VISIT_API_SETTLE_TIMEOUT_MS;
 
+/**
+ * Bounded server-side page-observer flush: one quiet window, the app-data
+ * settle budget, the peer-address lookup, and the settled DOM read — the
+ * longest wait the observer's flush RPC can legitimately spend.
+ */
+export const PAGE_OBSERVER_FLUSH_BUDGET_MS =
+  ENGINE_PAGE_VISIT_SETTLE_MS +
+  ENGINE_PAGE_VISIT_ADDRESS_TIMEOUT_MS +
+  1_000 +
+  ENGINE_PAGE_VISIT_API_SETTLE_TIMEOUT_MS;
+
+/** Client per-call timeout for the flush RPC: the bounded flush plus a stated 2 s margin. */
+export const PAGE_OBSERVER_FLUSH_TIMEOUT_MS = PAGE_OBSERVER_FLUSH_BUDGET_MS + 2_000;
+
 /** The loopback hostname the witness, proxy, and fixture servers bind. */
 export const LOOPBACK_HOSTNAME = '127.0.0.1';
 

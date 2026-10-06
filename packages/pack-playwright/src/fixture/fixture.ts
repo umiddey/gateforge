@@ -28,8 +28,27 @@ import {
   type EvidenceApi,
   type SurfaceDescriptor,
 } from './evidence.js';
-import { WitnessClient } from './witness-client.js';
+import { WitnessClient, type SessionPageObserverFlushRequest } from './witness-client.js';
 const browserDebuggingPorts = new WeakMap<Browser, number>();
+
+/**
+ * Flushes this test's page observations to the witness. A flush failure
+ * must never fail the app's own passing test: the failure is surfaced as
+ * one diagnostic line and page proof stays fail closed (a missing record
+ * is an unproven obligation, never a satisfied one).
+ */
+export async function flushPageObserverEvidence(
+  witness: Pick<WitnessClient, 'flushPageObserver'>,
+  request: SessionPageObserverFlushRequest,
+): Promise<void> {
+  try {
+    await witness.flushPageObserver(request);
+  } catch (error) {
+    console.error(
+      `gateforge: page observation flush failed (${error instanceof Error ? error.message : String(error)}); page proof for this test stays missing`,
+    );
+  }
+}
 
 async function availableDebuggingPort(): Promise<number> {
   const server = createTcpServer();
@@ -262,7 +281,7 @@ export const test = base.extend<EvidenceFixtures>({
     }
     const flushPageObserver = async (): Promise<void> => {
       if (!pageObserverRegistered) return;
-      await witness.flushPageObserver({
+      await flushPageObserverEvidence(witness, {
         sessionId: session.sessionId,
         sessionToken: session.sessionToken,
         testId: session.testId,

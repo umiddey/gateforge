@@ -18,7 +18,7 @@
  *   claims (Phase 4 claim injection, plan E02) routes its evidence onto
  *   those claims; with neither, construction fails closed.
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { Page, TestInfo } from 'playwright/test';
 import {
   createEvidence,
@@ -26,7 +26,8 @@ import {
   SURFACE_DESCRIPTOR_VERSION_2,
   type SurfaceDescriptor,
 } from '../src/fixture/evidence.js';
-import { WitnessClient, resolveWitnessUrl } from '../src/fixture/witness-client.js';
+import { flushPageObserverEvidence } from '../src/fixture/fixture.js';
+import { WitnessClient, resolveWitnessUrl, type SessionPageObserverFlushRequest } from '../src/fixture/witness-client.js';
 import { startWitness } from '../src/witness/server.js';
 import { startMarkerServer } from './marker-server.js';
 import {
@@ -478,3 +479,43 @@ describe('finalize fail-fast', () => {
 });
 
 void resolveWitnessUrl;
+
+describe('page observation flush (never fails the app test)', () => {
+  it('logs one line and continues when the witness flush fails', async () => {
+    const errors: string[] = [];
+    const spy = vi.spyOn(console, 'error').mockImplementation((line: unknown) => {
+      errors.push(String(line));
+    });
+    try {
+      const witness = {
+        flushPageObserver: async (_request: SessionPageObserverFlushRequest): Promise<{ flushed: true }> => {
+          throw new Error('This operation was aborted');
+        },
+      };
+      await expect(
+        flushPageObserverEvidence(witness, { sessionId: 'session-1', sessionToken: 'token', testId: 'test-1' }),
+      ).resolves.toBeUndefined();
+      // The failure is surfaced, never thrown into the app's test: page
+      // proof stays missing (fail closed), the test stays green.
+      expect(errors).toEqual([
+        'gateforge: page observation flush failed (This operation was aborted); page proof for this test stays missing',
+      ]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('forwards the flush request to the witness client untouched', async () => {
+    const calls: Array<SessionPageObserverFlushRequest> = [];
+    const witness = {
+      flushPageObserver: async (request: SessionPageObserverFlushRequest): Promise<{ flushed: true }> => {
+        calls.push(request);
+        return { flushed: true as const };
+      },
+    };
+    await expect(
+      flushPageObserverEvidence(witness, { sessionId: 'session-1', sessionToken: 'token', testId: 'test-1' }),
+    ).resolves.toBeUndefined();
+    expect(calls).toEqual([{ sessionId: 'session-1', sessionToken: 'token', testId: 'test-1' }]);
+  });
+});

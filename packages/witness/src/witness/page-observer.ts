@@ -8,6 +8,7 @@ import {
   type PageRoute,
   type PageVisitVerdict,
 } from './page-observation.js';
+import { trackPageApiSettlement, type ApiSettlementTracker } from './api-settlement.js';
 import {
   ENGINE_PAGE_VISIT_ADDRESS_TIMEOUT_MS,
   ENGINE_PAGE_VISIT_API_SETTLE_TIMEOUT_MS,
@@ -44,6 +45,14 @@ interface PageWindow {
   failedRequests: ObservedApiRequestFailure[];
   /** Tracked app data requests of this window that reached completion. */
   completedRequests: ObservedApiRequestCompletion[];
+  /** Playwright request opens per key (method + full URL). */
+  playwrightOpens: Map<string, number>;
+  /** Playwright requestfinished count per key. */
+  playwrightFinished: Map<string, number>;
+  /** CDP requestWillBeSent count per key (the completion session). */
+  cdpSends: Map<string, number>;
+  /** CDP completed exchanges per key (loadingFinished or declared bytes). */
+  cdpCompletes: Map<string, number>;
   /** Bounded response collections (address lookups) still in flight. */
   pendingResponses: Set<Promise<void>>;
   /** Last REAL DOM marker reading of this window's document. */
@@ -64,6 +73,8 @@ interface PageState {
   settleResolve: (() => void) | undefined;
   /** Associates each tracked request with the window that captured it. */
   requestWindows: Map<Request, PageWindow>;
+  /** The page's CDP completion session once it is live (extra signal). */
+  cdp: ApiSettlementTracker | undefined;
   /** Salvage emissions of windows closed by a navigation boundary. */
   pendingFinalizations: Set<Promise<void>>;
   generation: number;
@@ -86,6 +97,42 @@ function sameWindowUrl(previous: string, next: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** The correlation key of one app data request (method + full URL). */
+function apiExchangeKey(method: string, url: string): string {
+  return `${method} ${url}`;
+}
+
+/**
+ * Counts this window's still-outstanding Playwright requests that the
+ * CDP completion session proves done. Per key (method + full URL) the
+ * upgrade requires the CDP session to have seen AT LEAST as many
+ * requestWillBeSent events as Playwright saw requests (a late attach or
+ * a session that never opened saw fewer and upgrades nothing — fail
+ * closed, never a false settle) AND at least as many completed
+ * exchanges (loadingFinished, or every declared Content-Length byte
+ * received) as Playwright requests of that key it has not finished.
+ */
+function cdpSettledCount(window: {
+  outstanding: Set<Request>;
+  playwrightOpens: Map<string, number>;
+  playwrightFinished: Map<string, number>;
+  cdpSends: Map<string, number>;
+  cdpCompletes: Map<string, number>;
+}): number {
+  const outstandingByKey = new Map<string, number>();
+  for (const request of window.outstanding) {
+    const key = apiExchangeKey(request.method(), request.url());
+    outstandingByKey.set(key, (outstandingByKey.get(key) ?? 0) + 1);
+  }
+  let settled = 0;
+  for (const [key, count] of outstandingByKey) {
+    if ((window.cdpSends.get(key) ?? 0) < (window.playwrightOpens.get(key) ?? 0)) continue;
+    const unfinished = (window.playwrightOpens.get(key) ?? 0) - (window.playwrightFinished.get(key) ?? 0);
+    if ((window.cdpCompletes.get(key) ?? 0) >= unfinished) settled += count;
+  }
+  return settled;
 }
 
 /** Attach the witness's independent Playwright/CDP client to an existing browser. */
@@ -140,9 +187,12 @@ export async function observePageBrowser(options: PageObserverOptions): Promise<
       void (async () => {
         if (closed || state.generation !== generation || state.page.url() === 'about:blank') return;
         const window = state.window;
-        // Wait for in-flight app data requests, bounded (fail closed on hang).
+        // Wait for in-flight app data requests, bounded (fail closed on
+        // hang). A request the CDP completion session proves done (unread
+        // Content-Length body the browser finished) no longer holds the
+        // window — see cdpSettledCount.
         const deadline = Date.now() + ENGINE_PAGE_VISIT_API_SETTLE_TIMEOUT_MS;
-        while (window.outstanding.size > 0) {
+        while (window.outstanding.size - cdpSettledCount(window) > 0) {
           if (closed || state.generation !== generation) return;
           const remaining = deadline - Date.now();
           if (remaining <= 0) break;
@@ -187,7 +237,7 @@ export async function observePageBrowser(options: PageObserverOptions): Promise<
           domMarkerHit,
           apiResponses: [...window.apiResponses],
           apiRequestsSettled: apiRequestsSettled({
-            outstandingCount: window.outstanding.size,
+            outstandingCount: Math.max(0, window.outstanding.size - cdpSettledCount(window)),
             failures: window.failedRequests,
             completions: window.completedRequests,
           }),
@@ -233,7 +283,7 @@ export async function observePageBrowser(options: PageObserverOptions): Promise<
         domMarkerHit: window.domMarkerHit,
         apiResponses: [...window.apiResponses],
         apiRequestsSettled: apiRequestsSettled({
-          outstandingCount: window.outstanding.size,
+          outstandingCount: Math.max(0, window.outstanding.size - cdpSettledCount(window)),
           failures: window.failedRequests,
           completions: window.completedRequests,
         }),
@@ -271,6 +321,10 @@ export async function observePageBrowser(options: PageObserverOptions): Promise<
         settleNotify: undefined,
         failedRequests: [],
         completedRequests: [],
+        playwrightOpens: new Map(),
+        playwrightFinished: new Map(),
+        cdpSends: new Map(),
+        cdpCompletes: new Map(),
         pendingResponses: new Set(),
         domMarkerHit: false,
         domGraded: false,
@@ -281,10 +335,41 @@ export async function observePageBrowser(options: PageObserverOptions): Promise<
       settlePromise: undefined,
       settleResolve: undefined,
       requestWindows: new Map(),
+      cdp: undefined,
       pendingFinalizations: new Set(),
       generation: 0,
     };
     states.set(page, state);
+    // Extra COMPLETION signal only: a per-page CDP session shares the
+    // browser's own network events with the Playwright request ledger. The
+    // shared settlement rule (loadingFinished, or every declared
+    // Content-Length byte received) upgrades an unread body once the
+    // browser finished it; correlation is conservative per window and per
+    // method+URL (see cdpSettledCount), so a late or failed session can
+    // never mint a false settle — it only leaves requests unsettled.
+    void trackPageApiSettlement(page, {
+      isAppDataExchange: (url, resourceType) => apiExchangeUrl(url.href, resourceType) !== null,
+      onExchangeOpen: (exchange) => {
+        const window = state.window;
+        const key = apiExchangeKey(exchange.method, exchange.url);
+        window.cdpSends.set(key, (window.cdpSends.get(key) ?? 0) + 1);
+        settle(state);
+      },
+      onExchangeHeaders: () => settle(state),
+      onExchangeSettled: (exchange, settlement) => {
+        if (settlement.kind !== 'completed') return;
+        const window = state.window;
+        const key = apiExchangeKey(exchange.method, exchange.url);
+        window.cdpCompletes.set(key, (window.cdpCompletes.get(key) ?? 0) + 1);
+        if (window.outstanding.size - cdpSettledCount(window) <= 0) window.settleNotify?.();
+        // Completion lets body-driven JS/DOM/next fetches run; the same
+        // quiet window restarts before any emission grades them.
+        settle(state);
+      },
+      onActivity: () => settle(state),
+    }).then((tracker) => {
+      state.cdp = tracker;
+    }).catch(() => undefined);
     page.on('framenavigated', (frame) => {
       if (frame !== page.mainFrame()) return;
       const url = frame.url();
@@ -303,6 +388,10 @@ export async function observePageBrowser(options: PageObserverOptions): Promise<
           settleNotify: undefined,
           failedRequests: [],
           completedRequests: [],
+          playwrightOpens: new Map(),
+          playwrightFinished: new Map(),
+          cdpSends: new Map(),
+          cdpCompletes: new Map(),
           pendingResponses: new Set(),
           domMarkerHit: false,
           domGraded: false,
@@ -329,6 +418,8 @@ export async function observePageBrowser(options: PageObserverOptions): Promise<
       const window = state.window;
       window.outstanding.add(request);
       state.requestWindows.set(request, window);
+      const key = apiExchangeKey(request.method(), request.url());
+      window.playwrightOpens.set(key, (window.playwrightOpens.get(key) ?? 0) + 1);
       window.dirty = true;
       settle(state);
     });
@@ -354,6 +445,8 @@ export async function observePageBrowser(options: PageObserverOptions): Promise<
       if (window === undefined) return;
       state.requestWindows.delete(request);
       window.outstanding.delete(request);
+      const key = apiExchangeKey(request.method(), request.url());
+      window.playwrightFinished.set(key, (window.playwrightFinished.get(key) ?? 0) + 1);
       window.completedRequests.push({ method: request.method(), url: request.url() });
       if (window.outstanding.size === 0) window.settleNotify?.();
       // Body completion lets body-driven JS/DOM/next fetches run; the same
@@ -422,7 +515,10 @@ export async function observePageBrowser(options: PageObserverOptions): Promise<
         await flush();
       } finally {
         closed = true;
-        for (const state of states.values()) clearTimeout(state.settleTimer);
+        for (const state of states.values()) {
+          clearTimeout(state.settleTimer);
+          await state.cdp?.detach();
+        }
         await browser.close();
       }
     },

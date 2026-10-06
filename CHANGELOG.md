@@ -96,10 +96,17 @@
   whose body died mid-flight, was graded clean. A request the app itself
   cancels (`net::ERR_ABORTED`) counts as settled only when the same method
   and URL completed in the same visit; any other failure, or an unretried
-  cancel, refuses the page. The referee's swept channel now reads
-  completion from the browser's own network events, so a response body the
-  app never reads still counts once every declared byte (Content-Length)
-  arrived; an unread body without a declared length stays unsettled.
+  cancel, refuses the page. Both proof channels now read completion from
+  the browser's own network events, so a response body the app never reads
+  still counts once every declared byte (Content-Length) arrived; an
+  unread body without a declared length stays unsettled. The observed
+  channel keeps Playwright as its request ledger and adds the browser's
+  network events only as a completion signal, correlated per method and
+  URL — a request the network events did not observe is never upgraded.
+  A failed page-observation flush no longer fails the app's own passing
+  test: the fixture logs one line and moves on (page proof stays missing,
+  never fabricated), and the flush call's timeout now derives from the
+  shared engine budget instead of the ordinary 5 s call deadline.
 
 - **The latest page observation per test decides.** Per test, only a
   page's latest observation (`observationSequence`) counts: an early
