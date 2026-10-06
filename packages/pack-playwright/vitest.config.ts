@@ -7,5 +7,8 @@ export default defineConfig({
     // through the loopback witness; give the honest+cheat runs room.
     testTimeout: 240_000,
     hookTimeout: 60_000,
+    // Running from a package directory must not fan out to one worker per CPU.
+    maxWorkers: 2,
+    minWorkers: 1,
   },
 });

@@ -22,5 +22,8 @@ export default defineConfig({
     // Verifier-keyring isolation: the suite must never read the developer's
     // real `~/.config/gateforge/verifier-keyring.json` (see the file).
     setupFiles: ['test/setup-verifier-isolation.ts'],
+    // Running from a package directory must not fan out to one worker per CPU.
+    maxWorkers: 2,
+    minWorkers: 1,
   },
 });
