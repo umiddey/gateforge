@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.13.4
+
+- **A suite that mixes the fixture's `test` with Playwright's own runs in
+  file order again.** Since 0.13.0 the fixture replaced Playwright's
+  worker-scoped `browser` to open a debugging port for page observation.
+  Playwright schedules tests whose runners differ in a worker-scoped
+  fixture in separate worker groups, so every fixture test ran after the
+  plain ones, and a suite whose later tests relied on state an earlier
+  fixture test created failed after upgrading. The replacement is now
+  registered only when the supervisor enables page observation (the only
+  reader of the port). With page observation on, a mixed suite still runs
+  in two groups: take `test` from the fixture everywhere to keep one
+  order.
+
 ## 0.13.3
 
 - **Hooks on the fixture's `test` receive their fixtures again.** 0.13.2
