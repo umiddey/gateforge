@@ -372,6 +372,84 @@ describe('gateforge tests mark', () => {
       expect(report.verdicts.every((v) => v.verdict !== 'satisfied')).toBe(true);
     });
   }, 120_000);
+
+  it('a second mark for the same test ADDS its claims instead of replacing them (fresh-clone snag 5f)', async () => {
+    await withTempRepo({}, async (repo) => {
+      installConsumer(repo);
+      const first = await runCli(repo, markArgv(OBLIGATION_ACCOUNTS));
+      expect(first.code, first.stderr).toBe(0);
+
+      // A second mark for the SAME test key, SAME kind, SAME categories:
+      // the declaration is unioned, never a silent replacement.
+      const second = await runCli(repo, markArgv(OBLIGATION_ORDERS));
+      expect(second.code, second.stderr).toBe(0);
+      const sidecarPath = join(repo.root, '.gateforge/test-map.yml');
+      const afterSecond = readFileSync(sidecarPath, 'utf8');
+      expect(afterSecond).toContain(`- ${OBLIGATION_ACCOUNTS}`);
+      expect(afterSecond).toContain(`- ${OBLIGATION_ORDERS}`);
+      // The resulting claim list is printed, naming the full union.
+      expect(second.stdout).toContain(`now claims 2 claim(s): ${OBLIGATION_ACCOUNTS}, ${OBLIGATION_ORDERS}`);
+      // The diff shows only the added claim — the first mark's claim is not removed.
+      const addedClaimLine = second.stdout.split('\n').find((line) => line.startsWith('+') && line.includes(OBLIGATION_ORDERS));
+      expect(addedClaimLine, second.stdout).toBeTruthy();
+      expect(second.stdout.split('\n').some((line) => line.startsWith('-') && line.includes(OBLIGATION_ACCOUNTS))).toBe(false);
+
+      // Repeating an identical mark is STILL a no-op (byte-identical file).
+      const third = await runCli(repo, markArgv(OBLIGATION_ORDERS));
+      expect(third.code).toBe(0);
+      expect(third.stdout).toContain('no changes');
+      expect(readFileSync(sidecarPath, 'utf8')).toBe(afterSecond);
+    });
+  }, 120_000);
+
+  it('a second mark that declares a different kind is refused, naming both and the edit (snag 5f)', async () => {
+    await withTempRepo({}, async (repo) => {
+      installConsumer(repo);
+      expect((await runCli(repo, markArgv(OBLIGATION_ACCOUNTS))).code).toBe(0);
+      const sidecarPath = join(repo.root, '.gateforge/test-map.yml');
+      const before = readFileSync(sidecarPath, 'utf8');
+
+      const refused = await runCli(repo, [
+        'tests', 'mark',
+        '--test', DELETE_KEY,
+        '--kind', 'observed-e2e',
+        '--category', 'persistence.delete',
+        '--obligation', OBLIGATION_ORDERS,
+        '--reason', 'The same journey, deliberately declared with another kind.',
+      ]);
+      expect(refused.code).toBe(2);
+      expect(refused.stderr).toContain(`'${DELETE_KEY}'`);
+      expect(refused.stderr).toContain("kind 'browser-e2e'");
+      expect(refused.stderr).toContain("kind 'observed-e2e'");
+      expect(refused.stderr).toContain('.gateforge/test-map.yml');
+      // Nothing was rewritten: the refusal never touches the sidecar.
+      expect(readFileSync(sidecarPath, 'utf8')).toBe(before);
+    });
+  }, 120_000);
+
+  it('a second mark that declares different categories is refused, naming both and the edit (snag 5f)', async () => {
+    await withTempRepo({}, async (repo) => {
+      installConsumer(repo);
+      expect((await runCli(repo, markArgv(OBLIGATION_ACCOUNTS))).code).toBe(0);
+      const sidecarPath = join(repo.root, '.gateforge/test-map.yml');
+      const before = readFileSync(sidecarPath, 'utf8');
+
+      const refused = await runCli(repo, [
+        'tests', 'mark',
+        '--test', DELETE_KEY,
+        '--kind', 'browser-e2e',
+        '--category', 'persistence.read',
+        '--obligation', OBLIGATION_ORDERS,
+        '--reason', 'The same journey, deliberately declared with another category.',
+      ]);
+      expect(refused.code).toBe(2);
+      expect(refused.stderr).toContain(`'${DELETE_KEY}'`);
+      expect(refused.stderr).toContain('persistence.delete');
+      expect(refused.stderr).toContain('persistence.read');
+      expect(refused.stderr).toContain('.gateforge/test-map.yml');
+      expect(readFileSync(sidecarPath, 'utf8')).toBe(before);
+    });
+  }, 120_000);
 });
 
 describe('gateforge tests explain', () => {

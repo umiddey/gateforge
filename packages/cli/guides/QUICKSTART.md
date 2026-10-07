@@ -213,6 +213,14 @@ gateforge tests mark \
 
 `tests mark` writes `.gateforge/test-map.yml`. Commit that file so `check`, hooks, and CI can read the declaration without listing the suite. Replace the example values with exact values from your catalog and suggestion output. Never mark a test that does not perform the claimed behavior.
 
+`--obligation` is repeatable — one mark can declare several claims for one
+test (`--obligation '<id-a>' --obligation '<id-b>'`). A second `tests mark` for
+the same test ADDS its claims to the existing declaration (it never replaces
+them) and prints the full resulting claim list. A repeat that declares a
+DIFFERENT `--kind` or a different `--category` set is refused, naming both —
+edit the entry's `kind:`/`categories:` in `.gateforge/test-map.yml` yourself to
+change a declaration's meaning.
+
 **You should see:** the sidecar diff, or a current annotation in the test. A repeated identical `tests mark` reports no changes.
 
 **If not:** rerun discovery, copy the exact test key and obligation ID, and resolve any mapping contradiction. Do not use a declaration to silence a blocker.
