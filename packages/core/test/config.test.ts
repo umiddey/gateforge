@@ -288,6 +288,13 @@ clock:
     }).success).toBe(false);
   });
 
+  it('accepts an owner-declared expect timeout and rejects out-of-range values', () => {
+    expect(RuntimeConfigSchema.parse({ schemaVersion: 1, expectTimeoutSeconds: 15 }).expectTimeoutSeconds).toBe(15);
+    for (const seconds of [0, 601, 1.5]) {
+      expect(RuntimeConfigSchema.safeParse({ schemaVersion: 1, expectTimeoutSeconds: seconds }).success).toBe(false);
+    }
+  });
+
   it('rejects history retention above ninety days', () => {
     expect(() => parseConfig({ ...validConfig, history: { retentionDays: 91 } })).toThrow(GateforgeConfigError);
   });

@@ -524,5 +524,21 @@ describe('staged-runtime supervision', () => {
       writeFileSync(join(root, 'runtime.yml'), ['schemaVersion: 1', 'stallTimeoutSeconds: 90.5'].join('\n'), 'utf8');
       expect(load(root, 'runtime.yml')).toThrow(/stallTimeoutSeconds/);
     });
+
+    it('carries the owner-declared expect timeout', () => {
+      const root = tempDir();
+      writeFileSync(join(root, 'runtime.yml'), ['schemaVersion: 1', 'expectTimeoutSeconds: 15'].join('\n'), 'utf8');
+      expect(loadRuntimeConfigAt(root, 'runtime.yml')?.expectTimeoutSeconds).toBe(15);
+    });
+
+    it('a fractional or out-of-range expect timeout is a typed schema violation', () => {
+      const root = tempDir();
+      writeFileSync(
+        join(root, 'runtime.yml'),
+        ['schemaVersion: 1', 'expectTimeoutSeconds: 1.5'].join('\n'),
+        'utf8',
+      );
+      expect(load(root, 'runtime.yml')).toThrow(/expectTimeoutSeconds/);
+    });
   });
 });
