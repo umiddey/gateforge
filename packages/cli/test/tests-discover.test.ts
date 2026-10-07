@@ -385,33 +385,30 @@ describe('gateforge tests discover', () => {
 
       /** The shipped bin: the way an owner (and `npx`) actually runs it. */
       const REAL_BIN = fileURLToPath(new URL('../bin/gateforge.js', import.meta.url));
-      const runThroughClosedPipe = (): Promise<{ code: number; stderr: string }> => {
-        const { promise, resolve: resolveTest, reject: rejectTest } = Promise.withResolvers<{
-          code: number;
-          stderr: string;
-        }>();
-        const child = spawn(process.execPath, [REAL_BIN, 'tests', 'discover'], {
-          cwd: repo.root,
-          env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' },
-          stdio: ['ignore', 'pipe', 'pipe'],
+      const runThroughClosedPipe = (): Promise<{ code: number; stderr: string }> =>
+        // Executor form: the repo's TS lib predates `Promise.withResolvers`.
+        new Promise((resolveTest, rejectTest) => {
+          const child = spawn(process.execPath, [REAL_BIN, 'tests', 'discover'], {
+            cwd: repo.root,
+            env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' },
+            stdio: ['ignore', 'pipe', 'pipe'],
+          });
+          let stderr = '';
+          let detached = false;
+          child.stdout.on('data', () => {
+            // The reader goes away after the first chunk arrives; every
+            // later line used to explode as an unhandled stream error.
+            if (!detached) {
+              detached = true;
+              child.stdout.destroy();
+            }
+          });
+          child.stderr.on('data', (chunk: Buffer) => {
+            stderr += chunk.toString('utf8');
+          });
+          child.once('error', rejectTest);
+          child.once('close', (code) => resolveTest({ code: code ?? -1, stderr }));
         });
-        let stderr = '';
-        let detached = false;
-        child.stdout.on('data', () => {
-          // The reader goes away after the first chunk arrives; every
-          // later line used to explode as an unhandled stream error.
-          if (!detached) {
-            detached = true;
-            child.stdout.destroy();
-          }
-        });
-        child.stderr.on('data', (chunk: Buffer) => {
-          stderr += chunk.toString('utf8');
-        });
-        child.once('error', rejectTest);
-        child.once('close', (code) => resolveTest({ code: code ?? -1, stderr }));
-        return promise;
-      };
 
       const first = await runThroughClosedPipe();
       const second = await runThroughClosedPipe();
