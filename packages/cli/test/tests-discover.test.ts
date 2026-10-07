@@ -422,4 +422,38 @@ describe('gateforge tests discover', () => {
       expect(second.stderr).not.toContain('EPIPE');
     });
   }, 240_000);
+
+  it('never parses a JSON import as JavaScript (fresh-clone snag 5b: translations flood)', async () => {
+    await withTempRepo({}, async (repo) => {
+      installConsumer(repo);
+      repo.writeFiles({
+        'e2e/messages.json': `${JSON.stringify({ nav: { home: 'Home' }, errors: { notFound: 'Not found' } }, null, 2)}\n`,
+        'e2e/i18n.spec.js': [
+          "import { test } from 'playwright/test';",
+          "import messages from './messages.json';",
+          "test('shows the translated home label', async ({ page }) => {",
+          "  if (messages.nav.home !== 'Home') throw new Error('translations');",
+          "  await page.goto('/');",
+          '});',
+          '',
+        ].join('\n'),
+      });
+
+      const result = await runCli(repo, ['tests', 'discover', '--json']);
+      expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
+      const catalog = JSON.parse(result.stdout) as {
+        entries: Array<{ logicalKey: string }>;
+        parseErrors: Array<{ file: string; message: string }>;
+      };
+      // The JSON asset is data, not a script: zero parse errors, and the
+      // spec itself still resolves its playwright test normally.
+      expect(catalog.parseErrors).toEqual([]);
+      expect(catalog.entries.some((entry) => entry.logicalKey.includes('i18n.spec.js'))).toBe(true);
+
+      const text = await runCli(repo, ['tests', 'discover']);
+      expect(text.code).toBe(0);
+      expect(text.stdout).toContain('parseErrors=0');
+      expect(text.stdout).not.toContain('parse errors (');
+    });
+  }, 240_000);
 });
