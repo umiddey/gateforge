@@ -1,6 +1,6 @@
 {
   "name": "@gate-forge/pack-playwright",
-  "version": "0.13.5",
+  "version": "0.13.6",
   "gateforgeCompatibility": {
     "supervisedFixtureProtocol": "gateforge.supervised-playwright.v1"
   },
@@ -56,8 +56,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@gate-forge/core": "^0.13.5",
-    "@gate-forge/witness": "^0.13.5",
+    "@gate-forge/core": "^0.13.6",
+    "@gate-forge/witness": "^0.13.6",
     "playwright": "1.58.2",
     "typescript": "^5.9.2",
     "yaml": "^2.8.1"

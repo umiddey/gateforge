@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.13.6
 
 - **A literal-vs-parameter route overlap resolves by the framework's own
   registration order.** `resolveHttpRoute` marked an observed exchange
