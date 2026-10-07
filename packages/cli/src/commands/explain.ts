@@ -1,6 +1,11 @@
 /**
- * `gateforge explain <resourceId|path>`: the complete signal/rule/obligation
- * trace for one resource (plan phase 5). A repo-relative PATH is also a
+ * `gateforge explain <resourceId|obligationId|path>`: the complete
+ * signal/rule/obligation trace for one resource (plan phase 5). An
+ * OBLIGATION id (`<resourceId>:<contract>` — the exact id `tests suggest`,
+ * `check` and `next` print) resolves to that obligation's resource, so the
+ * trace an owner is pointed at is always reachable; the requested
+ * obligation is named in the printed obligation list. A repo-relative PATH
+ * is also a
  * first-class target: when no discovered resource matches it, the command
  * prints what the file IS and what governs it (Gateforge-owned policy
  * input, declared gate input, owner-declared documentation folder, known
@@ -26,7 +31,7 @@ import { runPipeline } from '../pipeline.js';
 import { resolveStateDir } from '../state.js';
 import { loadConfigAt, rejectUnknownFlags } from './common.js';
 
-export const EXPLAIN_USAGE = 'usage: gateforge explain <resourceId|path> [--json]';
+export const EXPLAIN_USAGE = 'usage: gateforge explain <resourceId|obligationId|path> [--json]';
 
 /**
  * Runs the explain subcommand.
@@ -64,14 +69,14 @@ export async function explainCommand(io: Io, argv: readonly string[]): Promise<n
     stateDir: resolveStateDir(io.cwd),
   });
 
-  const pageObligation = pipeline.policy.obligations.find(
-    (obligation) => obligation.id === target && (obligation.contract === 'page:loads' || obligation.contract === 'page:data-ok'),
+  const requestedObligation = pipeline.policy.obligations.find(
+    (obligation) => obligation.id === target,
   );
   const resource = pipeline.graph.resources.find(
     (candidate) =>
       candidate.id === target ||
       candidate.name === target ||
-      (pageObligation !== undefined && candidate.id === pageObligation.resourceId),
+      (requestedObligation !== undefined && candidate.id === requestedObligation.resourceId),
   );
   if (resource === undefined) {
     // 0.9.0 problem 26: a repo-relative path is a first-class target. When no
@@ -124,9 +129,14 @@ export async function explainCommand(io: Io, argv: readonly string[]): Promise<n
   const obligations = pipeline.policy.obligations.filter(
     (obligation) => obligation.resourceId === resource.id,
   );
+  const pageObligationId =
+    requestedObligation !== undefined &&
+    (requestedObligation.contract === 'page:loads' || requestedObligation.contract === 'page:data-ok')
+      ? requestedObligation.id
+      : null;
   const pageProof =
     resource.kind === 'ui.page'
-      ? loadPageProof(resolveStateDir(io.cwd), resource.id, pageObligation?.id ?? null)
+      ? loadPageProof(resolveStateDir(io.cwd), resource.id, pageObligationId)
       : null;
 
   if (asJson) {
@@ -228,7 +238,8 @@ export async function explainCommand(io: Io, argv: readonly string[]): Promise<n
   for (const obligation of obligations) {
     writeLine(
       io.stdout,
-      `  ${obligation.id} (policy ${obligation.policyId}, fingerprint ${fingerprintObligation(obligation)})`,
+      `  ${obligation.id} (policy ${obligation.policyId}, fingerprint ${fingerprintObligation(obligation)})` +
+        (obligation.id === target ? ' <- requested' : ''),
     );
   }
   if (pageProof !== null) {
