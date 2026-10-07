@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.13.5
 
 - **Supervised runs honour a project's declared test timeout.** The
   generated config the supervised run executes under always set a 60 s

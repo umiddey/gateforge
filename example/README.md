@@ -22,9 +22,9 @@ run in `behavior/` is driven through it). Keep every direct
 
 ```sh
 npm i -D \
-  @gate-forge/cli@0.13.4 \
-  @gate-forge/pack-playwright@0.13.4 \
-  @gate-forge/pack-http@0.13.4
+  @gate-forge/cli@0.13.5 \
+  @gate-forge/pack-playwright@0.13.5 \
+  @gate-forge/pack-http@0.13.5
 ```
 
 **If your release is not on the registry yet** (a pre-publish set of
