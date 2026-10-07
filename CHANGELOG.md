@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **Supervised runs honour an owner-declared assertion timeout.** The
+  generated config a supervised Playwright run executes under set no
+  `expect.timeout`, so an assertion without an explicit timeout got
+  Playwright's 5-second default even when the consumer's own config
+  raised it — and the consumer config itself is never loaded, so the
+  value was unreachable. `runtime.yml expectTimeoutSeconds` (integer,
+  1–600) is now carried into the generated config as `expect.timeout`
+  (`test-gates` and the commit hook alike). When the key is absent,
+  nothing is emitted and Playwright's default stands.
+
 - **A red selected run keeps its Playwright failure artifacts.**
   `test-gates --result-only` without `--witness-url` ran in a temporary
   state directory and deleted it with everything Playwright wrote for a

@@ -202,6 +202,12 @@ export interface TrustedConfigInput {
   controlSpecPath?: string;
   /** Per-test timeout ms for projects with no raised timeout (default 60_000). */
   testTimeoutMs?: number;
+  /**
+   * Assertion (`expect`) timeout ms, written as the generated config's
+   * `expect.timeout`. Undefined emits no `expect` key, so Playwright's
+   * own 5-second default stands, exactly as before.
+   */
+  expectTimeoutMs?: number;
 }
 
 /** One named project and the repo-relative files the plan attributed to it. */
@@ -561,6 +567,11 @@ export function synthesizeTrustedConfig(input: TrustedConfigInput): {
     '  retries: 0,',
     '  forbidOnly: true,',
     `  timeout: ${String(input.testTimeoutMs ?? DEFAULT_TEST_TIMEOUT_MS)},`,
+    // The owner-declared assertion timeout (runtime.yml
+    // expectTimeoutSeconds): the consumer config is never loaded, so this
+    // is the only way an `expect.timeout` above the engine's 5-second
+    // default reaches the supervised run. Unset, nothing is emitted.
+    ...(input.expectTimeoutMs === undefined ? [] : [`  expect: { timeout: ${String(input.expectTimeoutMs)} },`]),
     '  reporter: [',
     "    ['list'],",
     `    [${JSON.stringify(input.reporterEntry)}, ${JSON.stringify(reporterOptions)}],`,

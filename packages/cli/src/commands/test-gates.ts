@@ -474,6 +474,7 @@ export async function testGatesCommand(io: Io, argv: readonly string[]): Promise
         runTimeoutMs:
           parseRunTimeoutMin(stringFlag(options, 'run-timeout-min')) ?? runtimeRunTimeoutMs(io.cwd),
         stallTimeoutMs: runtimeStallTimeoutMs(io.cwd),
+        expectTimeoutMs: runtimeExpectTimeoutMs(io.cwd),
         progress: progressFlag,
         scope,
         resultOnly,
@@ -600,6 +601,32 @@ function runtimeRunTimeoutMs(cwd: string): number | undefined {
 function runtimeStallTimeoutMs(cwd: string): number | undefined {
   try {
     const seconds = loadRuntimeConfigAt(cwd, loadConfigAt(cwd).runtime)?.stallTimeoutSeconds;
+    return seconds === undefined ? undefined : seconds * 1_000;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The assertion timeout the OWNER declared in the staged runtime
+ * document, in milliseconds, or undefined when the document declares
+ * none.
+ *
+ * `runtime.yml`'s `expectTimeoutSeconds` is the owner's answer to "how
+ * long may an assertion wait": the consumer config is never loaded, so
+ * this declaration is the only way a raised `expect.timeout` reaches
+ * the supervised run's generated config. A document that cannot be read
+ * declares nothing, and Playwright's 5-second default stands.
+ *
+ * Args:
+ *   cwd: absolute repository root.
+ *
+ * Returns:
+ *   number | undefined: milliseconds, or undefined for the engine default.
+ */
+function runtimeExpectTimeoutMs(cwd: string): number | undefined {
+  try {
+    const seconds = loadRuntimeConfigAt(cwd, loadConfigAt(cwd).runtime)?.expectTimeoutSeconds;
     return seconds === undefined ? undefined : seconds * 1_000;
   } catch {
     return undefined;
@@ -969,6 +996,13 @@ export interface SupervisedOptions {
    * then the engine default (15 min) inside the supervised path.
    */
   stallTimeoutMs?: number;
+  /**
+   * Assertion timeout ms, written as `expect.timeout` in the generated
+   * config the supervised run executes under. Undefined resolves from
+   * `runtime.yml expectTimeoutSeconds`; when neither declares a value no
+   * `expect` key is emitted and Playwright's own 5-second default stands.
+   */
+  expectTimeoutMs?: number;
   /**
    * `--progress` target (additive): `stderr`, `file:<path>`, `off`, or
    * undefined for the `run.progress` config key and then the CI-aware
@@ -2449,6 +2483,10 @@ async function runSupervisedTestGatesInner(
   // caller that has no value of its own (the commit hook), and the
   // engine default stands when neither declares one.
   const stallTimeoutMs = options.stallTimeoutMs ?? runtimeStallTimeoutMs(io.cwd);
+  // The assertion timeout: same rule as the stall bound — the caller's
+  // value wins, the document is re-read for an in-process caller, and
+  // neither declaring one means no `expect` key in the generated config.
+  const expectTimeoutMs = options.expectTimeoutMs ?? runtimeExpectTimeoutMs(io.cwd);
   // The reuse digest is the IDENTITY of the dependency bytes this run
   // executes against, and it must be the same value whoever computes it.
   // ONE resolver owns that value: the commit hook hands over the digest
@@ -4522,6 +4560,7 @@ async function runSupervisedTestGatesInner(
           // the kill timer moves). The stall bound is the default backstop.
           ...(runTimeoutMs !== undefined ? { timeoutMs: runTimeoutMs } : {}),
           ...(stallTimeoutMs !== undefined ? { stallTimeoutMs } : {}),
+          ...(expectTimeoutMs !== undefined ? { expectTimeoutMs } : {}),
           activity: runActivity,
         },
       })

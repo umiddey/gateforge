@@ -134,6 +134,13 @@ export interface SupervisedRunOptions {
    */
   stallTimeoutMs?: number;
   /**
+   * Assertion (`expect`) timeout in milliseconds, written into the
+   * synthesized trusted config as `expect.timeout` (see
+   * {@link synthesizeTrustedConfig}). Undefined emits no `expect` key,
+   * so Playwright's own 5-second default stands.
+   */
+  expectTimeoutMs?: number;
+  /**
    * The parent-side per-test completion sink (see {@link RunActivity}).
    * Omit it and the run still applies its stall bound, it simply never
    * sees a completion — so nothing reports progress and the bound
@@ -425,6 +432,7 @@ export async function executeSupervisedPlaywright(
     ...(options.storageState !== undefined ? { storageState: options.storageState } : {}),
     ...(options.testFiles !== undefined ? { testFiles: options.testFiles } : {}),
     ...(options.projects !== undefined ? { projects: options.projects } : {}),
+    ...(options.expectTimeoutMs !== undefined ? { expectTimeoutMs: options.expectTimeoutMs } : {}),
     ...(freeze === null
       ? options.projectScopes === undefined
         ? {}

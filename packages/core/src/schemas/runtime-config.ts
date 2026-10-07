@@ -236,6 +236,13 @@ export const RuntimeConfigSchema = z
      * dies here, a merely slow one does not.
      */
     stallTimeoutSeconds: z.number().int().min(1).max(3600).optional(),
+    /**
+     * Assertion timeout handed to the synthesized trusted config as
+     * `expect.timeout`. The consumer config is never loaded, so an owner
+     * who raised Playwright's 5-second assertion default must declare the
+     * seconds here for the supervisor to honour them.
+     */
+    expectTimeoutSeconds: z.number().int().min(1).max(600).optional(),
   })
   .strict()
   .superRefine((runtime, ctx) => {

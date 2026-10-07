@@ -318,6 +318,14 @@ rides the same per-test completion signal the `--progress` stream already
 consumes, so a run carries one completion signal, not two. A suite that keeps
 finishing tests is never killed, however long it takes.
 
+Assertions get their own declaration: `runtime.yml expectTimeoutSeconds`
+(integer, 1–600) is written as `expect.timeout` in the generated config a
+supervised Playwright run executes under. The consumer config is never
+loaded, so an owner who raised Playwright's 5-second assertion default in
+their own config must repeat the value here — without it, Playwright's
+default applies to every assertion that does not set an explicit timeout.
+When the key is absent, nothing is emitted and Playwright's default stands.
+
 **Playwright only, and here is why.** A stall bound needs a stream of per-test
 completions; today only the Playwright pack reads one. The pytest, Vitest,
 Cypress and other supervisors keep their historical 30-minute whole-run
