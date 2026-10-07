@@ -318,6 +318,7 @@ import {
 import { pruneRunHistory, recordRunHistory } from '../history.js';
 import { ProgressStream, resolveProgressTarget, type ProgressOutcome, type ProgressTarget } from '../progress.js';
 import { writeRunScopeView, writeStateFile, writeTestFailures } from '../state.js';
+import { keepFailureArtifacts } from '../failure-artifacts.js';
 
 export const TEST_GATES_USAGE =
   'usage: gateforge test-gates [--changed] [--scope full|changed] [--suite <command>] [--out <dir>] ' +
@@ -481,7 +482,13 @@ export async function testGatesCommand(io: Io, argv: readonly string[]): Promise
         verifierKeyring,
       });
     } finally {
-      if (isolatedStateDir !== undefined) rmSync(isolatedStateDir, { recursive: true, force: true });
+      if (isolatedStateDir !== undefined) {
+        // The temporary run directory goes; a failed test's Playwright
+        // artifacts (error context, screenshots) stay diagnosable.
+        const kept = keepFailureArtifacts(isolatedStateDir, resolveStateDir(io.cwd));
+        if (kept !== null) io.stderr.write(`test-gates: Playwright failure artifacts of this run: ${kept}\n`);
+        rmSync(isolatedStateDir, { recursive: true, force: true });
+      }
     }
   }
   return legacyTestGates(io, {

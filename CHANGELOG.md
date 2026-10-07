@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **A red selected run keeps its Playwright failure artifacts.**
+  `test-gates --result-only` without `--witness-url` ran in a temporary
+  state directory and deleted it with everything Playwright wrote for a
+  failed test (error context, screenshots), so a test that failed only
+  under the supervisor could not be diagnosed. The artifacts are now
+  copied to `<state dir>/last-failures/` (replaced every run, removed
+  after a run without failures) and the path is printed on stderr.
+
 - **A blocked transport claim names the call that blocked it.** When a
   test's witnessed session held an exchange of another endpoint (a login
   before the real call) and the obligation's own call was blocked (a
