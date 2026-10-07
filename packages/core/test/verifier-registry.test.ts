@@ -1420,6 +1420,142 @@ describe('F4 route attribution over the complete inventory (plan §9, D2)', () =
   });
 });
 
+describe('registration-order precedence over ambiguous attribution (0.14)', () => {
+  // Starlette/FastAPI match routes in REGISTRATION order: include_router
+  // copies a router's routes at the call, depth-first in call order, and a
+  // router's own routes keep decorator source order. When the detectors
+  // prove that order (same scope, distinct orders, no typed convertor
+  // ahead of the winner), the smallest order IS the serving route and the
+  // ambiguity that used to block the claim resolves.
+  const SCOPE = 'app.main:app';
+
+  function registered(
+    resourceId: string,
+    canonicalPath: string,
+    order: number,
+    options: { scope?: string; typedPathParams?: boolean } = {},
+  ): HttpRouteCandidate {
+    return {
+      resourceId,
+      method: 'GET',
+      canonicalPath,
+      registration: { scope: options.scope ?? SCOPE, order },
+      ...(options.typedPathParams ? { typedPathParams: true } : {}),
+    };
+  }
+
+  function exportObligation(): Obligation {
+    return {
+      ...transportObligation,
+      id: 'tenant.accounts-export:http:request-observed',
+      resourceId: 'tenant.accounts-export',
+    };
+  }
+
+  it('literal declared first wins: the literal obligation satisfies', () => {
+    const inventory: readonly HttpRouteCandidate[] = [
+      registered('tenant.accounts-export', '/accounts/export', 0),
+      registered('tenant.accounts', '/accounts/{}', 1),
+    ];
+    const outcome = httpOutcome(
+      exportObligation(),
+      [anchor(exportObligation().id), observed(exportObligation().id, 'GET', '/accounts/export')],
+      inventory,
+    );
+    expect(outcome.verdict).toBe('satisfied');
+  });
+
+  it('literal declared first: the parameter obligation grades invalid on the literal route', () => {
+    const inventory: readonly HttpRouteCandidate[] = [
+      registered('tenant.accounts-export', '/accounts/export', 0),
+      registered('tenant.accounts', '/accounts/{}', 1),
+    ];
+    const outcome = httpOutcome(
+      transportObligation,
+      [anchor(transportObligation.id), observed(transportObligation.id, 'GET', '/accounts/export')],
+      inventory,
+    );
+    expect(outcome.verdict).toBe('invalid');
+    expect(outcome.reason).toContain(
+      'uniquely matches route GET /accounts/export (tenant.accounts-export)',
+    );
+    expect(outcome.reason).toContain("requires endpoint 'tenant.accounts'");
+  });
+
+  it('parameter declared first wins: the literal obligation grades invalid on the param route', () => {
+    const inventory: readonly HttpRouteCandidate[] = [
+      registered('tenant.accounts', '/accounts/{}', 0),
+      registered('tenant.accounts-export', '/accounts/export', 1),
+    ];
+    const outcome = httpOutcome(
+      exportObligation(),
+      [anchor(exportObligation().id), observed(exportObligation().id, 'GET', '/accounts/export')],
+      inventory,
+    );
+    expect(outcome.verdict).toBe('invalid');
+    expect(outcome.reason).toContain('uniquely matches route GET /accounts/{} (tenant.accounts)');
+    expect(outcome.reason).toContain("requires endpoint 'tenant.accounts-export'");
+  });
+
+  it('mixed scopes stay ambiguous', () => {
+    const inventory: readonly HttpRouteCandidate[] = [
+      registered('tenant.accounts-export', '/accounts/export', 0, { scope: 'app.admin:admin' }),
+      registered('tenant.accounts', '/accounts/{}', 1),
+    ];
+    const outcome = httpOutcome(
+      transportObligation,
+      [anchor(transportObligation.id), observed(transportObligation.id, 'GET', '/accounts/export')],
+      inventory,
+    );
+    expect(outcome.verdict).toBe('invalid');
+    expect(outcome.reason).toContain('ambiguous route attribution');
+  });
+
+  it('a missing registration on one candidate stays ambiguous', () => {
+    const inventory: readonly HttpRouteCandidate[] = [
+      registered('tenant.accounts-export', '/accounts/export', 0),
+      { resourceId: 'tenant.accounts', method: 'GET', canonicalPath: '/accounts/{}' },
+    ];
+    const outcome = httpOutcome(
+      transportObligation,
+      [anchor(transportObligation.id), observed(transportObligation.id, 'GET', '/accounts/export')],
+      inventory,
+    );
+    expect(outcome.verdict).toBe('invalid');
+    expect(outcome.reason).toContain('ambiguous route attribution');
+  });
+
+  it('a typed convertor ordered before the winner stays ambiguous', () => {
+    // `/accounts/{n:int}` at order 0 matches the canonical shape but its
+    // convertor may reject the observed segment, letting the later
+    // literal serve — precedence is not certain, fail closed.
+    const inventory: readonly HttpRouteCandidate[] = [
+      registered('tenant.accounts', '/accounts/{}', 0, { typedPathParams: true }),
+      registered('tenant.accounts-export', '/accounts/export', 1),
+    ];
+    const outcome = httpOutcome(
+      exportObligation(),
+      [anchor(exportObligation().id), observed(exportObligation().id, 'GET', '/accounts/export')],
+      inventory,
+    );
+    expect(outcome.verdict).toBe('invalid');
+    expect(outcome.reason).toContain('ambiguous route attribution');
+  });
+
+  it('a typed convertor ordered after the literal winner does not block attribution', () => {
+    const inventory: readonly HttpRouteCandidate[] = [
+      registered('tenant.accounts-export', '/accounts/export', 0),
+      registered('tenant.accounts', '/accounts/{}', 1, { typedPathParams: true }),
+    ];
+    const outcome = httpOutcome(
+      exportObligation(),
+      [anchor(exportObligation().id), observed(exportObligation().id, 'GET', '/accounts/export')],
+      inventory,
+    );
+    expect(outcome.verdict).toBe('satisfied');
+  });
+});
+
 describe('F6 deterministic aggregation over repeated requests (plan §10)', () => {
   const transportObligation: Obligation = {
     schemaVersion: 1,
