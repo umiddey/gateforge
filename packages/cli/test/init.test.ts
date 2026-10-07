@@ -782,6 +782,41 @@ describe('gateforge init scan-and-choose (Phase 1: scan, recommend, choose)', ()
     });
   });
 
+  it('a nested frontend declaring react-router-dom recommends the React Router pack (fresh-clone snag 6)', async () => {
+    await withTempRepo({}, async (repo) => {
+      // Exactly the fresh-clone shape: the manifest lives in the nested
+      // frontend workspace, not at the root.
+      repo.writeFiles({
+        'frontend/package.json':
+          '{ "name": "frontend", "private": true, "dependencies": { "react-router-dom": "^7.18.2" } }\n',
+      });
+      const { code, stdout } = await runCli(repo, ['init']);
+      expect(code, stdout).toBe(0);
+      expect(stdout).toContain('signals: react-router');
+      // One reason, naming the concrete evidence file.
+      expect(stdout).toMatch(
+        /gateforge\.pack-react-router — .*'react-router-dom'.*frontend\/package\.json/,
+      );
+      const config = loadConfig(join(repo.root, '.gateforge.yml'));
+      expect(config.plugins.map((plugin) => plugin.id)).toEqual(['gateforge.pack-react-router']);
+    });
+  });
+
+  it('react-router in devDependencies recommends the pack too (fresh-clone snag 6)', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({
+        'package.json':
+          '{ "name": "root", "private": true, "devDependencies": { "react-router": "^7.18.2" } }\n',
+      });
+      const { code, stdout } = await runCli(repo, ['init']);
+      expect(code, stdout).toBe(0);
+      expect(stdout).toContain('signals: react-router');
+      expect(stdout).toMatch(/gateforge\.pack-react-router — .*'react-router'.*package\.json/);
+      const config = loadConfig(join(repo.root, '.gateforge.yml'));
+      expect(config.plugins.map((plugin) => plugin.id)).toEqual(['gateforge.pack-react-router']);
+    });
+  });
+
   it('creates GATEFORGE.md and the overlay README, never overwriting user edits', async () => {
     await withTempRepo({}, async (repo) => {
       const first = await runCli(repo, ['init']);
