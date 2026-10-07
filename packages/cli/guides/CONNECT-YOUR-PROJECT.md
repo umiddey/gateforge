@@ -123,7 +123,12 @@ verdict a guess.
   `x-gateforge-env-fingerprint: <value>` on every route the adapters
   read. Export the same value as `GATEFORGE_TARGET_FINGERPRINT` in the
   environment that runs the gate. The witness refuses evidence from a
-  different environment than the UI under test (GF-13).
+  different environment than the UI under test (GF-13). The marker is
+  checked at STARTUP, against `GATEFORGE_APP_BASE_URL` itself — the
+  origin the browser loads — not only against adapter routes: an app
+  that adds the header only on its API routes fails that startup check,
+  so every origin behind the base URL (frontend and backend) must
+  answer it.
 
 Full rules, including what never belongs in a test environment:
 `TEST-ENVIRONMENT.md`.
@@ -382,6 +387,17 @@ directly, the witness observes nothing, and its claims finalize with "no HTTP
 exchange passed through this session's observation proxy" — while the test
 itself passes.
 
+One whole class stays invisible even after the rebase: a test that calls the
+API through Playwright's request channel — `request.newContext(...)` (the
+`request` fixture), `page.request`, or `context.request`. That traffic
+bypasses `page.route`, so it NEVER reaches the observation proxy (measured:
+routed=0 across all three forms). An API-side spec can only prove
+`observed-e2e` claims by driving the call from the page — an in-page
+`fetch`/XHR the browser actually sends — so the proxy sees the exchange.
+Keep such specs for smoke purposes; route their assertions through
+`page.evaluate`-driven requests or a page journey when the claim must be
+witnessed.
+
 When the suite has one shared fixture file, that is a one-line rebase and
 nothing else in the suite changes:
 
@@ -413,8 +429,12 @@ observation proxy" while the tests pass.
 
 So, for the suite you just rebased:
 
-- list its base-URL variable in `runtime.yml` `envAllowlist` (see
-  `TEST-ENVIRONMENT.md`), or have the helpers read `GATEFORGE_APP_BASE_URL`;
+- list its base-URL variable in `runtime.yml` `envAllowlist` — the
+  two-block recipe in `TEST-ENVIRONMENT.md`: declare
+  `runtime: .gateforge/runtime.yml` in `.gateforge.yml`, then
+  `envAllowlist:` in `.gateforge/runtime.yml` (the file alone, without the
+  `.gateforge.yml` block, is silently ignored) — or have the helpers read
+  `GATEFORGE_APP_BASE_URL`;
 - and make that origin the one the tests actually load.
 
 When the origins disagree, the witness's zero-traffic note now names both —

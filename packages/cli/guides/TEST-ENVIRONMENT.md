@@ -73,6 +73,27 @@ reaches the test process
 That sentence is a diagnostic: it names the cause, it decides nothing. A
 claim that stays missing stays missing.
 
+## Present the environment marker on the app origin itself
+
+**Rule:** The app behind `GATEFORGE_APP_BASE_URL` must answer
+`x-gateforge-env-fingerprint: <value>` — the same value exported as
+`GATEFORGE_TARGET_FINGERPRINT` in the environment that runs the gate — and
+the witness checks the marker at STARTUP against `GATEFORGE_APP_BASE_URL`
+itself: the origin the browser loads, not only the adapter routes that
+read the header. An app with several origins behind that base URL
+(frontend and backend) needs a front that adds the header on ALL of them.
+
+**Why:** The run refuses to start with `AttestationError` GF-13
+("presents no 'x-gateforge-env-fingerprint' marker") when the base URL's
+first response carries no marker — before any test executes. An app that
+sets the header only on its API routes fails that startup check exactly
+like an app that never heard of the marker; the failure names the origin
+it checked.
+
+**Example:** a small reverse proxy in front of `GATEFORGE_APP_BASE_URL`
+that sets the header on every proxied response, frontend and backend
+alike.
+
 ## Create login state against the app
 
 **Rule:** Mint the Playwright login state by connecting directly to the app, not through the witness proxy. Reuse one session file instead of repeatedly logging in. Set `GATEFORGE_SESSION_STATE` to that file for the supervised run.

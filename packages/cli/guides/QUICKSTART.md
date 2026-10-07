@@ -282,6 +282,14 @@ one source, never both.
 
 The command prints a key ID, not the secret. Set the app URL and any session state the suite needs. The application and test environment must already be running; see [Test environment](TEST-ENVIRONMENT.md).
 
+If the suite reads its own environment variables (a base URL, a test mail
+box, a seeded password), the supervised runner forwards ONLY the names
+declared in `.gateforge/runtime.yml`'s `envAllowlist` — and that file
+counts only when `.gateforge.yml` also declares
+`runtime: .gateforge/runtime.yml`. Both blocks together are the recipe in
+[Test environment → Declare test-service environment variables](TEST-ENVIRONMENT.md#declare-test-service-environment-variables); a suite whose variables never reach the test process silently falls
+back to its own defaults.
+
 **You should see:** `verifier key ring created` and an active key ID.
 
 **If a ring already exists:** the command says so — it names the ring, the active
@@ -315,7 +323,7 @@ and a build that is installed but cannot start names the loader's own line and
 
 **You should see:** the selected tests pass and the run seals a receipt.
 
-**If not:** use the first typed blocker. Check the changed-file base, mapping, app readiness, seed data, and verifier key. A test declaration or a plain passing test run is not a receipt.
+**If not:** use the first typed blocker. Check the changed-file base, mapping, app readiness, seed data, and verifier key. A test that fails on an environment variable the raw runner saw — `ECONNREFUSED` on a stale default host, an empty token — is the env recipe: list the name in `.gateforge/runtime.yml` `envAllowlist` AND declare `runtime: .gateforge/runtime.yml` in `.gateforge.yml` (the file without the `.gateforge.yml` block is silently ignored) — [Test environment → Declare test-service environment variables](TEST-ENVIRONMENT.md#declare-test-service-environment-variables). A test declaration or a plain passing test run is not a receipt.
 
 ## 8. Check the changed code
 
