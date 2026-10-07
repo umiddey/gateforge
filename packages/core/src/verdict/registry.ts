@@ -40,6 +40,21 @@ export interface HttpRouteCandidate {
   linkedResourceName?: string;
   /** Detector-derived CRUD capabilities declared for this route. */
   capabilities?: readonly string[];
+  /**
+   * Static registration position (0.14): the route's index in the
+   * serving app's flattened registration sequence (FastAPI packs only —
+   * Starlette matches routes in registration order). Present only when
+   * the detector PROVED the position; absent leaves the route outside
+   * registration-order attribution (fail closed).
+   */
+  registration?: { scope: string; order: number };
+  /**
+   * The route's raw path carries a typed convertor (`{id:int}`,
+   * `{p:path}`): it matches narrower than the canonical slot shape, so a
+   * route ordered before others is only a PROBABLE winner — attribution
+   * past it stays uncertain. Absent means the plain whole-slot match.
+   */
+  typedPathParams?: boolean;
 }
 
 /** Lenient record view (same shape the verdict engine reads). */

@@ -506,7 +506,33 @@ function contractFactCandidate(resource: Resource): Record<string, unknown> {
   ) {
     candidate['responseSchemaSymbols'] = [attributes['responseModel']];
   }
+  // Registration-order metadata (0.14): projected only in the exact shape
+  // the shared fact schema accepts — anything malformed stays ABSENT, so
+  // the route grades as unregistered (fail closed) instead of passing a
+  // half-validated position downstream.
+  const registration = attributes['registration'];
+  if (isRouteRegistration(registration)) candidate['registration'] = registration;
+  if (attributes['typedPathParams'] === true) candidate['typedPathParams'] = true;
   return candidate;
+}
+
+/** The strict registration shape the shared fact schema accepts (0.14). */
+export interface RouteRegistration {
+  scope: string;
+  order: number;
+}
+
+function isRouteRegistration(value: unknown): value is RouteRegistration {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  if (!('scope' in value) || !('order' in value)) return false;
+  const { scope, order } = value;
+  return (
+    typeof scope === 'string' &&
+    scope.length > 0 &&
+    typeof order === 'number' &&
+    Number.isInteger(order) &&
+    order >= 0
+  );
 }
 
 /** Extracts and validates contract facts from every contribution. */
@@ -1038,6 +1064,22 @@ export function compileEndpointContribution(
     capabilities.sort(compareText);
     capabilityTrace.sort((a, b) => compareText(JSON.stringify(a), JSON.stringify(b)));
 
+    // Registration-order metadata (0.14): an identity joins several
+    // detector facts (same method+path, possibly several files). The
+    // compiled endpoint carries `registration` only when EVERY fact
+    // behind it proves the SAME (scope, order) — one dissenting or
+    // absent proof would guess which declaration serves. `typedPathParams`
+    // is set when ANY fact behind the identity carries a typed convertor:
+    // the canonical shape matches the whole slot, but a typed route may
+    // not, so attribution must treat the identity as positionally
+    // uncertain (fail closed).
+    const registrationTexts = new Set(
+      endpointRoutes.map((route) => JSON.stringify(route.registration ?? null)),
+    );
+    const firstRegistration = endpointRoutes[0]?.registration;
+    const registration: RouteRegistration | null =
+      firstRegistration !== undefined && registrationTexts.size === 1 ? firstRegistration : null;
+
     const record: EndpointRecord = {
       method,
       canonicalPath,
@@ -1078,6 +1120,10 @@ export function compileEndpointContribution(
         ].sort(compareText),
         capabilities,
         capabilityTrace,
+        ...(registration !== null ? { registration } : {}),
+        ...(endpointRoutes.some((route) => route.typedPathParams === true)
+          ? { typedPathParams: true }
+          : {}),
         ...(linkedResourceName !== null ? { linkedResourceName } : {}),
         frontendConsumed: consumed,
         ...(deleteSemantics !== null ? { deleteSemantics } : {}),

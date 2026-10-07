@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+- **A literal-vs-parameter route overlap resolves by the framework's own
+  registration order.** `resolveHttpRoute` marked an observed exchange
+  `ambiguous` whenever more than one inventoried route matched
+  method+path, so `GET /x/actions` — matching both the literal
+  `GET /x/actions` and a `GET /x/{event_id}` parameter route — could
+  never satisfy its claim even when the app really serves the literal
+  route: Starlette, and therefore FastAPI, matches routes in
+  REGISTRATION order (each router's routes copy at its `include_router`
+  call, depth-first in call order, decorator source order within a
+  router; the first full match — path AND method — serves). The FastAPI
+  detector now proves that order statically: every endpoint it can place
+  carries `registration: {scope, order}` (`scope` is the serving app's
+  uvicorn-style `module:var` identity, `order` the 0-based position in
+  the app's flattened registration sequence) plus `typedPathParams: true`
+  when the path string carries a typed convertor (`{n:int}`, `{p:path}` —
+  a convertor matches narrower than the canonical single-slot shape; a
+  function annotation such as `event_id: UUID` never affects routing and
+  is correctly ignored). The compiled inventory carries both through to
+  the resolver, which resolves a multi-match overlap ONLY when every
+  matched route carries a registration in the SAME app with distinct
+  orders and no route ordered ahead of the winner is typed — the
+  smallest order then grades like any unique match (match for its own
+  obligation, mismatch for every other endpoint's). Routes whose
+  position is not statically provable — appended to a router after it
+  was included, declared inside a function body, reachable from more
+  than one app, mounted through a call-time (registry-function)
+  include — carry no registration, and other packs emit none, so every
+  overlap they produce stays `ambiguous` exactly as before.
+
 - **Supervised runs honour an owner-declared assertion timeout.** The
   generated config a supervised Playwright run executes under set no
   `expect.timeout`, so an assertion without an explicit timeout got

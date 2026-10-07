@@ -349,11 +349,99 @@ function candidateIdentityText(candidate: HttpRouteCandidate): string {
 }
 
 /**
+ * The validated `registration` of one candidate, or null when the field
+ * is absent or malformed (host-derived inventory — never trusted).
+ */
+function routeRegistration(
+  candidate: HttpRouteCandidate,
+): { scope: string; order: number } | null {
+  const registration = candidate.registration;
+  if (
+    registration === undefined ||
+    typeof registration.scope !== 'string' ||
+    registration.scope.length === 0 ||
+    typeof registration.order !== 'number' ||
+    !Number.isInteger(registration.order) ||
+    registration.order < 0
+  ) {
+    return null;
+  }
+  return registration;
+}
+
+/**
+ * The registration-order winner over multiple matched candidates, or
+ * null when precedence cannot be proven (0.14).
+ *
+ * Starlette (and therefore FastAPI) matches routes in REGISTRATION
+ * order: each router's routes copy at its `include_router` call,
+ * depth-first in call order, decorator source order within one router;
+ * the first FULL match (path AND method) serves. When the detector
+ * proved that order for the whole matched set, the smallest order IS
+ * the serving route — the claim resolves against it instead of
+ * blocking forever. Precedence applies ONLY when
+ *
+ * - every matched candidate carries a well-formed `registration` (a
+ *   single missing or malformed proof keeps the whole overlap
+ *   ambiguous),
+ * - all proven scopes are the SAME app (two apps' flattened orders do
+ *   not compare),
+ * - the orders are DISTINCT (a tie is not an order),
+ * - and the smallest-order candidate carries NO `typedPathParams`: a
+ *   typed convertor (`{id:int}`, `{p:path}`) matches narrower than the
+ *   canonical slot shape, so the convertor might reject the observed
+ *   segment and let a later route serve — the "candidate ordered before
+ *   the winner" of the framework's own match loop is exactly that
+ *   smallest-order route, and precedence past it is not certain.
+ *
+ * A plain `{name}` parameter is the `str` convertor and matches any
+ * single segment (the canonical shape's whole meaning), so a plain
+ * winner is certain. A function annotation (`event_id: UUID`) never
+ * affects routing — it validates after the match (422) — so it is
+ * correctly absent from this decision.
+ */
+function registrationOrderWinner(
+  distinct: readonly HttpRouteCandidate[],
+): HttpRouteCandidate | null {
+  let winner: HttpRouteCandidate | null = null;
+  let winnerOrder = Number.POSITIVE_INFINITY;
+  const scopes = new Set<string>();
+  const orders = new Set<number>();
+  for (const candidate of distinct) {
+    const registration = routeRegistration(candidate);
+    if (registration === null) return null;
+    scopes.add(registration.scope);
+    orders.add(registration.order);
+    if (registration.order < winnerOrder) {
+      winner = candidate;
+      winnerOrder = registration.order;
+    }
+  }
+  if (
+    winner === null ||
+    scopes.size !== 1 ||
+    orders.size !== distinct.length ||
+    winner.typedPathParams === true
+  ) {
+    return null;
+  }
+  return winner;
+}
+
+/**
  * Deterministic runtime route attribution over the COMPLETE candidate
- * set (plan §9 steps 4-9, D2). No literal-precedence shortcut: when
- * both `/accounts/export` and `/accounts/{}` match the observation,
- * the transport status is known but handler attribution is ambiguous
- * and the claim blocks.
+ * set (plan §9 steps 4-9, D2; 0.14 registration-order precedence).
+ * When more than one candidate matches the observation — the literal
+ * `/accounts/export` against the parameter `/accounts/{}` — attribution
+ * resolves by the framework's OWN registration order, but only when the
+ * detector proved it for the whole matched set: same scope, distinct
+ * orders, no typed path convertor on the smallest-order candidate (see
+ * {@link registrationOrderWinner}). The winner then grades like any
+ * unique match — `match` for its own obligation, `mismatch` for every
+ * other endpoint's. Without a proven order (other packs, unprovable
+ * constructs, mixed scopes, a missing or tied proof, a typed convertor
+ * ahead of the field) the transport status is still known but handler
+ * attribution is ambiguous and the claim blocks, exactly as before.
  *
  * Args:
  *   observedMethod: the witnessed record's method (any case).
@@ -368,11 +456,12 @@ function candidateIdentityText(candidate: HttpRouteCandidate): string {
  *     cannot be established);
  *   - `{status: 'nomatch', reason}` when zero candidates match;
  *   - `{status: 'ambiguous', candidates}` with the sorted identity
- *     texts when more than one distinct resource matches;
+ *     texts when more than one distinct resource matches and no proven
+ *     registration order singles one out;
  *   - `{status: 'mismatch', matched}` when exactly one candidate
- *     matches but it is a different endpoint;
- *   - `{status: 'match', matched}` when the unique match is the
- *     obligation's own endpoint.
+ *     matches (or the proven order winner is) a different endpoint;
+ *   - `{status: 'match', matched}` when the unique match (or the
+ *     proven order winner) is the obligation's own endpoint.
  */
 export function resolveHttpRoute(
   observedMethod: string,
@@ -426,6 +515,18 @@ export function resolveHttpRoute(
     };
   }
   if (distinct.length > 1) {
+    // Registration-order precedence (0.14): when the detector proved the
+    // framework's own match order for the whole matched set, the
+    // smallest order IS the serving route and the overlap resolves;
+    // otherwise the transport status is known but handler attribution
+    // stays ambiguous.
+    const winner = registrationOrderWinner(distinct);
+    if (winner !== null) {
+      if (winner.resourceId !== obligationResourceId) {
+        return { status: 'mismatch', matched: winner };
+      }
+      return { status: 'match', matched: winner };
+    }
     return {
       status: 'ambiguous',
       candidates: distinct.map(candidateIdentityText).sort(compareStrings),

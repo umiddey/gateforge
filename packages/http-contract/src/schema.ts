@@ -114,6 +114,37 @@ export const HttpContractFactSchema = z
     responseReads: z.array(ResponseReadSchema).min(1).optional(),
     /** Frontend callsite identifiers (frontend-call facts only). */
     callsites: z.array(z.string().min(1)).min(1).optional(),
+    /**
+     * Static registration position of a server route (0.14): the route's
+     * index in the app's flattened registration sequence — Starlette (and
+     * therefore FastAPI) matches routes in REGISTRATION order, each
+     * router's routes copying at its `include_router` call, depth-first
+     * in call order, decorator source order within one router. `scope`
+     * names the serving app (uvicorn-style `module:var`); `order` is the
+     * 0-based position in that app's flattened sequence. Present ONLY
+     * when the detector can prove the position statically — a route
+     * appended to its router after an include call, declared inside a
+     * function body, reachable from more than one scope, or mounted
+     * through a call-time (registry-function) include stays ABSENT, and
+     * registration-order attribution treats the inventory as unprovable
+     * (fail closed).
+     */
+    registration: z
+      .object({
+        scope: z.string().min(1),
+        order: z.number().int().min(0),
+      })
+      .strict()
+      .optional(),
+    /**
+     * The route's raw path string carries a typed convertor
+     * (`{id:int}`, `{id:uuid}`, `{p:path}` — never the plain `{name}`
+     * `str` convertor): the route matches NARROWER than its canonical
+     * single-slot shape suggests, so registration-order attribution
+     * treats it as positionally uncertain. Present only as `true` —
+     * absent means "plain, matches its whole slot".
+     */
+    typedPathParams: z.literal(true).optional(),
     /** Where the fact was found. */
     source: HttpLocationSchema,
   })

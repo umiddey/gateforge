@@ -54,6 +54,24 @@ export function resolveStateDir(cwd: string, override?: string): string {
 }
 
 /**
+ * The validated `registration` attribute of an `http.endpoint` resource,
+ * or undefined when absent or malformed: the inventory stays fail-closed
+ * (an unprovable route never carries a half-validated position).
+ */
+function endpointRegistration(value: unknown): { scope: string; order: number } | undefined {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  if (!('scope' in value) || !('order' in value)) return undefined;
+  const { scope, order } = value;
+  return typeof scope === 'string' &&
+    scope.length > 0 &&
+    typeof order === 'number' &&
+    Number.isInteger(order) &&
+    order >= 0
+    ? { scope, order }
+    : undefined;
+}
+
+/**
  * Builds the COMPLETE runtime route inventory for HTTP attribution
  * (plan §9, D2): one candidate per `http.endpoint` graph resource —
  * including routes with no frontend consumer and no generated
@@ -64,6 +82,13 @@ export function resolveStateDir(cwd: string, override?: string): string {
  * A malformed endpoint resource (missing method/canonicalPath) is
  * NEVER dropped: it is carried with empty fields so the core resolver
  * flags the inventory incomplete instead of claiming completeness.
+ *
+ * The detector-proven registration-order metadata (0.14) rides along:
+ * `registration` (the route's static position in its serving app's
+ * flattened registration sequence) and `typedPathParams` (the raw path
+ * carries a typed convertor, so the route matches narrower than its
+ * canonical shape). Both are optional; the resolver treats their
+ * absence as "no provable order".
  *
  * Args:
  *   graph: built resource graph.
@@ -79,6 +104,7 @@ export function httpRoutesView(graph: ResourceGraph): HttpRouteCandidate[] {
     const canonicalPath = resource.attributes['canonicalPath'];
     const linkedResourceName = resource.attributes['linkedResourceName'];
     const capabilities = resource.attributes['capabilities'];
+    const registration = endpointRegistration(resource.attributes['registration']);
     routes.push({
       resourceId: resource.id,
       method: typeof method === 'string' ? method : '',
@@ -87,6 +113,8 @@ export function httpRoutesView(graph: ResourceGraph): HttpRouteCandidate[] {
       ...(Array.isArray(capabilities)
         ? { capabilities: capabilities.filter((value): value is string => typeof value === 'string') }
         : {}),
+      ...(registration !== undefined ? { registration } : {}),
+      ...(resource.attributes['typedPathParams'] === true ? { typedPathParams: true } : {}),
     });
   }
   routes.sort((a, b) => compareStrings(a.resourceId, b.resourceId));

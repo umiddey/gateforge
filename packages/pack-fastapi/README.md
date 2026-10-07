@@ -35,6 +35,19 @@ the subprocess transport runs, so one detector implementation serves both.
 - Per fact: handler symbol, `isAsync`, `response_model`, request schema
   symbols (non-primitive, non-path parameter annotations), `tags`,
   `operationId`, and `mountProvenance` (`include-chain` | `standalone`).
+- **Registration order** (0.14): every endpoint the detector can place
+  statically in an app's flattened registration sequence carries
+  `registration: {scope, order}` — `scope` names the app
+  (`module:var`), `order` is its 0-based position: include call order
+  across routers, decorator source order within one router (Starlette
+  matches routes in registration order, so the smallest order IS the
+  serving route). Fail closed: a route appended to its router after an
+  `include_router` call in the same file, declared inside a function
+  body, reachable from more than one app, or mounted through a
+  registry-function include carries NO `registration`. A typed path
+  convertor in the raw path string (`{n:int}`, `{p:path}`) sets
+  `typedPathParams: true` — the route matches narrower than its
+  canonical slot shape.
 
 ## Configuration: `.gateforge/fastapi.json`
 

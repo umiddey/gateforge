@@ -47,8 +47,10 @@ export {
 /**
  * Deterministic runtime route attribution (plan §9, D2): the single
  * path interpretation plus the complete-inventory resolver the HTTP
- * transport verifier grades against. No literal-precedence shortcut;
- * ambiguity blocks.
+ * transport verifier grades against. Multiple matches resolve by the
+ * framework's own registration order ONLY when the detector proved it
+ * (same scope, distinct orders, no typed path convertor ahead of the
+ * field — 0.14); otherwise ambiguity blocks.
  */
 export {
   registerPackVerifiers,

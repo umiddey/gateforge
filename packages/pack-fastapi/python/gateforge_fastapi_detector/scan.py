@@ -16,6 +16,18 @@ Detector vocabulary (frozen with the pack):
   ``framework`` (``fastapi``), ``handlerSymbol``, ``isAsync``,
   ``responseModel``, ``requestSchemaSymbols``, ``tags``, ``operationId``,
   and ``mountProvenance`` (``include-chain`` or ``standalone``).
+- Registration order (0.14): every endpoint the detector can place
+  statically in an app's flattened registration sequence also carries
+  ``registration`` ``{scope, order}`` (``scope``: the app's
+  ``<module>:<var>`` identity; ``order``: 0-based position — include
+  call order across routers, decorator source order within one router,
+  the order Starlette matches in) and ``typedPathParams: true`` when the
+  raw path string carries a typed convertor (``{n:int}``, ``{p:path}``).
+  Fail closed: a route appended to its router after a same-file include
+  call, declared inside a function body, reachable from more than one
+  app, or mounted through a materialized (registry-function) include
+  carries NO ``registration`` — so does every route of an app-less
+  (standalone) router.
 - One fact per (effective mounted path, concrete method): an
   ``api_route(methods=[...])`` yields one fact per listed method, and a
   router mounted twice yields one fact per mount (plan phase 2.3).
@@ -99,6 +111,7 @@ Detector vocabulary (frozen with the pack):
 from __future__ import annotations
 
 import ast
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -129,6 +142,13 @@ _DECORATOR_METHODS = {
 # the contract method set: decorated routes are reported as typed
 # unresolved entries instead of silently vanishing.
 _UNSUPPORTED_METHODS = {"trace": "TRACE"}
+
+# A typed path convertor in the route path string (``{id:int}``,
+# ``{id:uuid}``, ``{p:path}``): unlike a plain ``{name}`` (the ``str``
+# convertor, matching any single segment), a convertor narrows WHAT the
+# route matches, so the route's registration position alone does not
+# decide attribution. Emitted as ``typedPathParams`` on the fact.
+_TYPED_PARAM_RE = re.compile(r"\{[^{}:]+:[^{}]+\}")
 
 _PRIMITIVE_ANNOTATIONS = {
     "str", "int", "float", "bool", "bytes", "dict", "list", "set", "tuple",
@@ -191,6 +211,10 @@ class RouteDef:
     tags: list[str]
     operation_id: str | None
     file: str = ""               # file the decorator lives in (survives alias merge)
+    # True when the decorator sits on a def nested inside another function:
+    # the route registers when the ENCLOSING function runs, at a time no
+    # static pass can order — the route carries no ``registration``.
+    nested: bool = False
 
 
 @dataclass
@@ -232,6 +256,11 @@ class IncludeEdge:
     prefix: str | None                   # literal include prefix ('' absent; None computed)
     node: ast.AST
     file: str = ""                       # file the include call lives in
+    # True for registry-function includes rewired onto a real instance: the
+    # edge executes when the enclosing function is CALLED, at a time no
+    # static pass can order — blocks mounted through it carry no
+    # ``registration``.
+    materialized: bool = False
 
 
 @dataclass
@@ -641,6 +670,7 @@ class _ModuleVisitor(ast.NodeVisitor):
                     is_async=is_async, response_model=None,
                     effective_response_model=None, request_schemas=[],
                     tags=[], operation_id=None,
+                    nested=self._function is not None,
                 ))
             return
         elif method_attr == "api_route":
@@ -669,6 +699,7 @@ class _ModuleVisitor(ast.NodeVisitor):
                 ) if s is not None
             ],
             operation_id=_static_string(_keyword(node, "operation_id")),
+            nested=self._function is not None,
         )
         router = self.index.routers.get(owner.id)
         if router is None:
@@ -1018,16 +1049,33 @@ class _Resolver:
         self.models = _ModelIndex(indexes, import_roots)
         self.facts: list[dict] = []
         self.unresolved: list[dict] = []
+        # Registration bookkeeping (0.14): ``include_positions`` maps each
+        # provably-included (file, router var) to the (file, line, col) of
+        # every include edge targeting it; ``registration_claims`` collects
+        # the flattened (scope, order) a fact was reached at — a fact with
+        # EXACTLY ONE claim carries ``registration``, anything reachable
+        # twice stays unregistered (fail closed). ``_scope``/``_order`` are
+        # the walk cursor of the app currently being flattened.
+        self.include_positions: dict[tuple[str, str], list[tuple[str, int, int]]] = {}
+        self.registration_claims: dict[str, list[dict]] = {}
+        self._scope: str | None = None
+        self._order = 0
 
     def resolve(self) -> None:
         self._materialize_function_includes()
         self._merge_aliases()
-        included = self._collect_included()
+        included, include_positions = self._collect_included()
+        self.include_positions = include_positions
         unmounted: list[tuple[str, str, RouterDef]] = []
         for relpath in sorted(self.indexes):
             index = self.indexes[relpath]
             for var in sorted(index.apps):
-                self._walk(relpath, var, "", (), "include-chain", included)
+                # Each app is its own registration scope: the flattened
+                # sequence restarts at order 0 (uvicorn-style identity:
+                # ``<module>:<var>``).
+                self._scope = f"{_module_of(relpath)}:{var}"
+                self._order = 0
+                self._walk(relpath, var, "", (), "include-chain", included, True)
             for name in sorted(index.routers):
                 router = index.routers[name]
                 if router.alias_of is not None:
@@ -1036,12 +1084,30 @@ class _Resolver:
                     continue  # app-owned routes emit through the apps loop
                 if (relpath, name) in included:
                     continue
-                self._walk(relpath, name, "", (), "standalone", included)
+                # Standalone fallback: the router is provably served by no
+                # scanned app, so there is no scope to register under.
+                self._scope = None
+                self._walk(relpath, name, "", (), "standalone", included, True)
                 if router.routes:
                     unmounted.append((relpath, name, router))
         self._report_unmounted_routers(
             unmounted, apps_present=any(index.apps for index in self.indexes.values()),
         )
+        self._attach_registrations()
+
+    def _attach_registrations(self) -> None:
+        """Attaches provable registrations to the emitted facts.
+
+        A fact reached at exactly ONE (scope, order) — one app, one
+        flattened position — carries ``registration``. A fact reachable
+        twice (two apps include the same router, a double include, a
+        diamond) keeps NO registration: which copy would serve the
+        observed request is not statically decidable (fail closed).
+        """
+        for fact in self.facts:
+            claims = self.registration_claims.get(fact["id"], [])
+            if len(claims) == 1:
+                fact["attributes"]["registration"] = claims[0]
 
     def _report_unmounted_routers(
         self,
@@ -1276,6 +1342,7 @@ class _Resolver:
                         prefix=edge.prefix,
                         node=edge.node,
                         file=edge.file,
+                        materialized=True,
                     )
                     for edge in edges
                 )
@@ -1358,15 +1425,30 @@ class _Resolver:
             if not changed:
                 return
 
-    def _collect_included(self) -> set[tuple[str, str]]:
-        """(file, var) pairs that are the target of a resolvable include."""
+    def _collect_included(
+        self,
+    ) -> tuple[set[tuple[str, str]], dict[tuple[str, str], list[tuple[str, int, int]]]]:
+        """(file, var) pairs that are the target of a resolvable include,
+        plus where each was included from.
+
+        The second value maps every provably-included ``(file, var)`` to
+        the ``(file, line, col)`` of each include edge targeting it — the
+        fail-closed anchor for routes appended to a router AFTER an
+        include call in the same file (Starlette copies routes at the
+        include call, so those routes register after the copied block at
+        a position no flat per-route order can state).
+        """
         targets: set[tuple[str, str]] = set()
+        positions: dict[tuple[str, str], list[tuple[str, int, int]]] = {}
         for relpath in sorted(self.indexes):
             for edge in self.indexes[relpath].include_edges:
                 found, _ = self._resolve_target(edge.file or relpath, edge)
                 if found is not None:
                     targets.add(found)
-        return targets
+                    positions.setdefault(found, []).append(
+                        (edge.file or relpath, edge.node.lineno, getattr(edge.node, "col_offset", 0)),
+                    )
+        return targets, positions
 
     def _resolve_target(
         self, relpath: str, edge: IncludeEdge,
@@ -1518,8 +1600,15 @@ class _Resolver:
         chain: tuple[str, ...],
         mount: str,
         included: set[tuple[str, str]],
+        certain: bool,
     ) -> None:
-        """Depth-first mount-graph walk emitting facts with composed prefixes."""
+        """Depth-first mount-graph walk emitting facts with composed prefixes.
+
+        ``certain`` carries the registration certainty of the mount chain:
+        a block reached through a materialized (registry-function) include
+        executes at call time, so everything below it emits NO
+        ``registration`` while still emitting its facts exactly as before.
+        """
         index = self.indexes[relpath]
         node_key = f"{relpath}:{var}"
         if node_key in chain:
@@ -1558,7 +1647,7 @@ class _Resolver:
                             "location": loc(relpath, router.prefix_node),
                         })
                     return
-                self._walk(target[0], target[1], prefix, chain + (node_key,), mount, included)
+                self._walk(target[0], target[1], prefix, chain + (node_key,), mount, included, certain)
                 return
             if router.prefix is None:
                 self.unresolved.append({
@@ -1579,54 +1668,164 @@ class _Resolver:
                 self._report_computed_paths(relpath, router)
                 return
             prefix = prefix + router.prefix
-            self._emit_routes(index, router, prefix, mount)
-        elif var not in index.apps:
+            self._emit_ordered(
+                relpath, index, var, router, prefix, mount, chain, node_key, included, certain,
+            )
             return
+        if var not in index.apps:
+            return
+        # Defensive: an app instance with no RouterDef entry (the visitor
+        # always creates one, so this is unreachable today) — walk its
+        # edges unordered, nothing to register.
         for edge in index.include_edges:
-            if edge.owner_var != var:
-                continue
-            # Materialized (registry-function) edges resolve and locate at
-            # the file the include call is written in, not the instance's.
-            edge_home = edge.file or relpath
-            target, resolution = self._resolve_target(edge_home, edge)
-            if target is None:
-                if resolution is not None and resolution.ambiguous is not None:
-                    self.unresolved.append({
-                        "code": FASTAPI_PREFIX_UNRESOLVED,
-                        "detail": (
-                            f"include_router target "
-                            f"'{edge.target_var or (edge.target_attrs[0] if edge.target_attrs else None)}' "
-                            f"in {edge_home} matches multiple scanned files under the configured "
-                            f"import roots ({', '.join(resolution.ambiguous)}); the target "
-                            "router cannot be proven uniquely"
-                        ),
-                        "location": loc(edge_home, edge.node),
-                    })
-                    continue
+            if edge.owner_var == var:
+                self._walk_edge(relpath, edge, prefix, chain, node_key, included, certain)
+
+    def _walk_edge(
+        self,
+        relpath: str,
+        edge: IncludeEdge,
+        prefix: str,
+        chain: tuple[str, ...],
+        node_key: str,
+        included: set[tuple[str, str]],
+        certain: bool,
+    ) -> None:
+        """Resolves and walks one include edge owned by ``relpath``'s router.
+
+        Materialized (registry-function) edges resolve and locate at the
+        file the include call is written in, not the instance's.
+        """
+        edge_home = edge.file or relpath
+        target, resolution = self._resolve_target(edge_home, edge)
+        if target is None:
+            if resolution is not None and resolution.ambiguous is not None:
                 self.unresolved.append({
                     "code": FASTAPI_PREFIX_UNRESOLVED,
                     "detail": (
                         f"include_router target "
-                        f"'{edge.target_var or (edge.target_attrs[0] if edge.target_attrs else None)}' in {edge_home} "
-                        "cannot be resolved in the scanned set"
+                        f"'{edge.target_var or (edge.target_attrs[0] if edge.target_attrs else None)}' "
+                        f"in {edge_home} matches multiple scanned files under the configured "
+                        f"import roots ({', '.join(resolution.ambiguous)}); the target "
+                        "router cannot be proven uniquely"
                     ),
                     "location": loc(edge_home, edge.node),
                 })
-                continue
-            if edge.prefix is None:
-                self.unresolved.append({
-                    "code": "FASTAPI_PREFIX_UNRESOLVED",
-                    "detail": (
-                        f"include_router prefix in {edge_home} is computed; "
-                        "the effective path cannot be proven statically"
-                    ),
-                    "location": loc(edge_home, edge.node),
-                })
-                continue
-            self._walk(
-                target[0], target[1], prefix + edge.prefix,
-                chain + (node_key,), "include-chain", included,
-            )
+                return
+            self.unresolved.append({
+                "code": FASTAPI_PREFIX_UNRESOLVED,
+                "detail": (
+                    f"include_router target "
+                    f"'{edge.target_var or (edge.target_attrs[0] if edge.target_attrs else None)}' in {edge_home} "
+                    "cannot be resolved in the scanned set"
+                ),
+                "location": loc(edge_home, edge.node),
+            })
+            return
+        if edge.prefix is None:
+            self.unresolved.append({
+                "code": "FASTAPI_PREFIX_UNRESOLVED",
+                "detail": (
+                    f"include_router prefix in {edge_home} is computed; "
+                    "the effective path cannot be proven statically"
+                ),
+                "location": loc(edge_home, edge.node),
+            })
+            return
+        self._walk(
+            target[0], target[1], prefix + edge.prefix,
+            chain + (node_key,), "include-chain", included, certain,
+        )
+
+    def _emit_ordered(
+        self,
+        relpath: str,
+        index: FileIndex,
+        var: str,
+        router: RouterDef,
+        prefix: str,
+        mount: str,
+        chain: tuple[str, ...],
+        node_key: str,
+        included: set[tuple[str, str]],
+        certain: bool,
+    ) -> None:
+        """Emits one mounted router's routes and include blocks in the
+        app's flattened registration order.
+
+        Within ONE file, module-level statements execute in source order,
+        so the router's route decorators and its own ``include_router``
+        calls merge by (line, col): decorator source order within the
+        router, include call order across routers, depth-first — the same
+        order Starlette registers routes in (each router's routes copy at
+        the ``include_router`` call). Every provable route consumes the
+        scope's next ``registration.order``. Routes whose position is not
+        statically provable — declared in a function body, appended after
+        a same-file include of this router, or reached through a
+        multi-file merge — emit NO registration, and blocks mounted
+        through materialized (registry-function) includes walk with
+        ``certain=False``. Nothing else changes: facts and unresolved
+        outcomes are exactly the unordered walk's.
+        """
+        routes = router.routes
+        owned = [edge for edge in index.include_edges if edge.owner_var == var]
+        route_files = {route.file for route in routes}
+        edge_files = {edge.file or relpath for edge in owned}
+        mergeable = (
+            len(route_files) <= 1
+            and len(edge_files) <= 1
+            and (not route_files or not edge_files or route_files == edge_files)
+        )
+        if not mergeable:
+            # Cross-file items in one router (routes merged from import
+            # aliases, or an include written against an alias name):
+            # source positions from different files do not order against
+            # each other. Routes emit WITHOUT registration in list order
+            # and every sub-block is uncertain (fail closed).
+            for edge in owned:
+                self._walk_edge(relpath, edge, prefix, chain, node_key, included, False)
+            self._emit_routes(index, router, prefix, mount, {})
+            return
+        route_claims: dict[int, tuple[str, int]] = {}
+        items: list[tuple[tuple[int, int], str, int]] = [
+            ((route.node.lineno, getattr(route.node, "col_offset", 0)), "route", position)
+            for position, route in enumerate(routes)
+        ] + [
+            ((edge.node.lineno, getattr(edge.node, "col_offset", 0)), "edge", position)
+            for position, edge in enumerate(owned)
+        ]
+        items.sort(key=lambda item: item[0])
+        for _position, kind, position in items:
+            if kind == "route":
+                route = routes[position]
+                if (
+                    certain
+                    and self._scope is not None
+                    and not route.nested
+                    and not self._route_added_after_include(relpath, var, route)
+                ):
+                    route_claims[id(route)] = (self._scope, self._order)
+                    self._order += 1
+            else:
+                edge = owned[position]
+                self._walk_edge(
+                    relpath, edge, prefix, chain, node_key, included,
+                    certain and not edge.materialized,
+                )
+        self._emit_routes(index, router, prefix, mount, route_claims)
+
+    def _route_added_after_include(self, relpath: str, var: str, route: RouteDef) -> bool:
+        """True when a same-file include of this router executes BEFORE the
+        route's decorator: Starlette copies the router's routes at the
+        include call, so the route registers after that copied block at a
+        position no flat per-route order can state (fail closed). Includes
+        from OTHER files always execute after the router's own module body
+        has finished — they never invalidate a same-file route."""
+        route_position = (route.node.lineno, getattr(route.node, "col_offset", 0))
+        for file, line, col in self.include_positions.get((relpath, var), ()):
+            if file == relpath and (line, col) < route_position:
+                return True
+        return False
 
     def _report_computed_paths(self, relpath: str, router: RouterDef) -> None:
         """Reports computed route paths even when the prefix already failed,
@@ -1642,7 +1841,16 @@ class _Resolver:
                     "location": loc(relpath, route.node),
                 })
 
-    def _emit_routes(self, index: FileIndex, router: RouterDef, prefix: str, mount: str) -> None:
+    def _emit_routes(
+        self,
+        index: FileIndex,
+        router: RouterDef,
+        prefix: str,
+        mount: str,
+        route_claims: dict[int, tuple[str, int]],
+    ) -> None:
+        """Emits one fact per (route, concrete method); a route with a
+        proven registration claim stamps every fact it emits."""
         for route in router.routes:
             if not route.methods:
                 if not any(node is route.node for node, _ in index.unsupported):
@@ -1665,10 +1873,14 @@ class _Resolver:
                     "location": loc(route.file, route.node),
                 })
                 continue
+            claim = route_claims.get(id(route))
             for method in route.methods:
-                self.facts.append(
-                    _fact(route.file, route, method, prefix + route.path, mount, self.models)
-                )
+                fact = _fact(route.file, route, method, prefix + route.path, mount, self.models)
+                if claim is not None:
+                    self.registration_claims.setdefault(fact["id"], []).append(
+                        {"scope": claim[0], "order": claim[1]},
+                    )
+                self.facts.append(fact)
 
 
 def _fact(
@@ -1695,6 +1907,13 @@ def _fact(
         "operationId": route.operation_id,
         "mountProvenance": mount,
     }
+    # A typed path convertor in the raw path string (``{n:int}``,
+    # ``{p:path}``): the route matches NARROWER than its canonical
+    # single-slot shape suggests, so registration-order attribution
+    # treats the route as positionally uncertain. Present only when the
+    # path actually carries a convertor — absent means "plain".
+    if route.path is not None and _TYPED_PARAM_RE.search(route.path):
+        attributes["typedPathParams"] = True
     # Wire names the response model answers to (plan 2026-09-25 Phase 4b
     # item 5). Absent whenever the model is not statically provable — an
     # unresolvable symbol, an alias generator, an unprovable base, a
