@@ -1,5 +1,54 @@
 # Changelog
 
+## Unreleased
+
+- **A `.gateforge/runtime.yml` that `.gateforge.yml` never references now
+  warns instead of being silently ignored.** The supervised runner forwards
+  only the environment variables listed in that file's `envAllowlist`, and
+  only when the config declares the file with a `runtime:` key. A
+  `runtime.yml` alone was read by nothing, so a witnessed run failed on
+  missing variables with no hint why. `check`, `next`, `test-gates` and the
+  commit hook now print one warning naming the missing `runtime:`
+  declaration.
+
+- **A second `tests mark` for the same test adds to its claims instead of
+  replacing them.** The first mark's obligations survive; the resulting
+  claim list is printed. A repeat that declares a different `--kind` or a
+  different `--category` set is refused, naming both and the sidecar edit
+  that changes them. The repeatable `--obligation <id> --obligation <id>`
+  form is documented in QUICKSTART §5 and REFERENCE.
+
+- **`gateforge explain` accepts the obligation ids other commands print**
+  (`<resourceId>:<contract>`, including transport/http ids such as
+  `…:http:request-observed`): it resolves the obligation's resource, shows
+  its trace, and names the requested obligation in the obligation list. A
+  truly unknown target still reports `no discovered resource matches`.
+
+- **init's no-terminal notice names the edit that works.** It now says to
+  set `mode:` in `.gateforge.yml` (per preset: `warn`, `changed`,
+  `strict`) instead of "re-run with `--preset`" — that re-run exits 2,
+  because init never rewrites an existing config. QUICKSTART §2 says the
+  same.
+
+- **`tests discover` exits with its own verdict when the output reader
+  goes away.** Reading a large catalog through `| head` (or any reader
+  that closes early) killed the process with an unhandled `write EPIPE`
+  and exit 1 after discovery had already succeeded — the same repository
+  exited 0 on one run and 1 on the next. The exit code is now always the
+  command's own.
+
+- **The test scan parses only script extensions, never JSON files.** A
+  spec importing a translations `en.json` flooded the catalog with
+  thousands of parse-error rows (18,658 on one real app) because the
+  import edge pulled the JSON document into the JavaScript parser. The
+  scan now resolves only `.js .cjs .mjs .ts .cts .mts .jsx .tsx` files.
+
+- **init recommends `@gate-forge/pack-react-router` when the app uses
+  React Router.** Any scanned `package.json` — root or nested like
+  `frontend/` — declaring `react-router` or `react-router-dom` in
+  dependencies or devDependencies recommends the pack, with the declaring
+  file as the printed reason.
+
 ## 0.13.1
 
 - **Frontend detector: a trailing query-string hole is read as a query, not a
