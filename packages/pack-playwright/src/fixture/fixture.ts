@@ -414,6 +414,14 @@ const HOOK_REGISTRARS = new Set(['beforeAll', 'beforeEach', 'afterEach', 'afterA
  * so hook callbacks run inside the tracker above. The proxy forwards
  * every other read untouched — the runner object stays the consumer's
  * own (extend/describe/info all behave identically).
+ *
+ * Playwright picks the fixtures a hook receives by reading the hook
+ * function's source (`fn.toString()`, first parameter). The forwarder
+ * therefore reports the consumer callback's source as its own: a
+ * zero-parameter forwarder would make Playwright build NO fixtures, and
+ * `test.beforeEach(async ({ page }) => …)` would get `page === undefined`.
+ * The optional hook title (`test.beforeEach('title', fn)`) passes through
+ * unchanged; only the function argument is wrapped.
  */
 function withHookTracking<T extends object>(extended: T): T {
   return new Proxy(extended, {
@@ -421,27 +429,35 @@ function withHookTracking<T extends object>(extended: T): T {
       if (typeof property !== 'string' || !HOOK_REGISTRARS.has(property)) {
         return Reflect.get(target, property, receiver);
       }
-      const register = Reflect.get(target, property, target) as (callback: unknown, timeout?: number) => unknown;
-      return (callback: unknown, timeout?: number): unknown =>
-        // A ZERO-PARAMETER forwarder is what Playwright sees: its spec
-        // transform inspects hook callbacks and rejects rest parameters
-        // ("First argument must use the object destructuring pattern").
-        register(function (this: unknown) {
-          const hookArgs = Array.from(arguments);
-          workerHookDepth += 1;
-          try {
-            return Promise.resolve(
-              (callback as (...args: unknown[]) => unknown).apply(this, hookArgs),
-            ).finally(() => {
-              workerHookDepth -= 1;
-            });
-          } catch (error) {
-            workerHookDepth -= 1;
-            throw error;
-          }
-        }, timeout);
+      const register = Reflect.get(target, property, target) as (...args: unknown[]) => unknown;
+      return (...registration: unknown[]): unknown =>
+        register(
+          ...registration.map((argument) =>
+            typeof argument === 'function' ? trackedHook(argument as (...args: unknown[]) => unknown) : argument,
+          ),
+        );
     },
   });
+}
+
+/** Wraps one hook callback in the depth tracker, keeping its fixture signature visible. */
+function trackedHook(callback: (...args: unknown[]) => unknown): (...args: unknown[]) => unknown {
+  // No rest parameter in the forwarder: Playwright's spec transform rejects
+  // one ("First argument must use the object destructuring pattern").
+  const forwarder = function (this: unknown) {
+    const hookArgs = Array.from(arguments);
+    workerHookDepth += 1;
+    try {
+      return Promise.resolve(callback.apply(this, hookArgs)).finally(() => {
+        workerHookDepth -= 1;
+      });
+    } catch (error) {
+      workerHookDepth -= 1;
+      throw error;
+    }
+  };
+  Object.defineProperty(forwarder, 'toString', { value: () => callback.toString() });
+  return forwarder;
 }
 
 export const test: typeof extended = withHookTracking(extended);
