@@ -74,11 +74,12 @@ hard the gate blocks; it never waives an obligation and never hides code
 from the scan.
 
 An AI agent or CI run with no terminal and no `--preset` writes `light` only
-and says so on ONE line, together with the flag that changes it:
+and says so on ONE line, together with the edit that changes it:
 `no terminal: writing the light preset (report everything, block nothing) — a
-human must choose the goal: re-run with --preset <light|normal|strict>`. The
-closing summary then reports what was written without naming the goal again.
-Gateforge will not guess `normal` or `strict` for someone who is not there.
+human must choose the goal: edit `mode:` in .gateforge.yml (light: `mode: warn`,
+normal: `mode: changed`, strict: `mode: strict`)`. The closing summary then
+reports what was written without naming the goal again. Gateforge will not guess
+`normal` or `strict` for someone who is not there.
 
 **You should see:** the goal you asked for, followed by a summary of what was
 written and an `undo:` command.

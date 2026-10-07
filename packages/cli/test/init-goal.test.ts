@@ -99,21 +99,43 @@ describe('init without a preset, without a terminal', () => {
     });
   });
 
-  it('states the chosen preset once, on the line that names --preset (F5)', async () => {
+  it('states the chosen preset once, on the line that names the goal remedy (F5)', async () => {
     await withTempRepo({}, async (repo) => {
       const { code, stdout } = await runCli(repo, ['init', '--no-scan']);
       expect(code, stdout).toBe(0);
-      const advice = stdout.split('\n').filter((line) => line.includes('--preset'));
-      // Exactly ONE line tells a headless owner how to choose another
-      // preset, and it is the same line that names the one written.
+      const advice = stdout.split('\n').filter((line) => line.includes('a human must choose the goal'));
+      // Exactly ONE line tells a headless owner how to choose
+      // another goal, and it is the same line that names the
+      // one written.
       expect(advice).toHaveLength(1);
       expect(advice[0]).toContain('writing the light preset');
-      expect(advice[0]).toContain('--preset <');
+      expect(advice[0]).toContain('edit `mode:` in .gateforge.yml');
       // The closing summary no longer restates the choice a second time.
       expect(stdout).not.toContain('preset light:');
       // What the run actually did is still reported.
       expect(stdout).toContain('wrote mode: warn');
       expect(stdout).toContain('undo: rm -rf');
+    });
+  });
+
+  it('names the edit that works, not a --preset re-run that exits 2 (fresh-clone snag 3b)', async () => {
+    await withTempRepo({}, async (repo) => {
+      const { code, stdout } = await runCli(repo, ['init', '--no-scan']);
+      expect(code, stdout).toBe(0);
+      // The headless run WROTE .gateforge.yml, so the printed
+      // remedy must be the action that works on it: editing
+      // `mode:`. A `--preset` re-run exits 2 (init never
+      // rewrites an existing config) — the notice must not
+      // advise it.
+      const advice = stdout
+        .split('\n')
+        .filter((line) => line.includes('a human must choose the goal'));
+      expect(advice).toHaveLength(1);
+      expect(advice[0]).toContain('edit `mode:` in .gateforge.yml');
+      expect(advice[0]).toContain('light: `mode: warn`');
+      expect(advice[0]).toContain('normal: `mode: changed`');
+      expect(advice[0]).toContain('strict: `mode: strict`');
+      expect(advice[0]).not.toContain('re-run with --preset');
     });
   });
 });
