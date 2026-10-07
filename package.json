@@ -1,6 +1,6 @@
 {
   "name": "gateforge",
-  "version": "0.13.1",
+  "version": "0.13.2",
   "private": true,
   "description": "Converts recognized source artifacts into explicit, machine-verifiable test obligations.",
   "type": "module",
