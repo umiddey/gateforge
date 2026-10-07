@@ -68,7 +68,7 @@ import {
   materializeStagedCandidate,
   releaseStagedCandidate,
 } from '../staged-candidate.js';
-import { loadConfigAt, rejectUnknownFlags } from './common.js';
+import { loadConfigAt, rejectUnknownFlags, warnUndeclaredRuntime } from './common.js';
 import { resolveStateDir } from '../state.js';
 import { resolveVerifierKeyring } from '../verifier-keys.js';
 import {
@@ -1194,6 +1194,44 @@ export async function buildDoctorReport(io: Io): Promise<DoctorReport> {
     configDetail = `.gateforge.yml could not be loaded: ${(error as Error).message.split('\n')[0] ?? 'unknown'}`;
   }
   checks.push({ id: 'config', status: configOk ? 'ok' : 'fail', detail: configDetail });
+
+  // The runtime document is a trusted policy input the gates
+  // read ONLY when `.gateforge.yml` declares it: a
+  // `.gateforge/runtime.yml` that exists but is undeclared is
+  // silently ignored (its envAllowlist, prepare and services
+  // never apply), and the owner learns it in a failed witnessed
+  // run unless this row fails loudly with the one-line fix.
+  if (loadedConfig === null) {
+    checks.push({
+      id: 'runtime-declaration',
+      status: 'warn',
+      detail: 'runtime declaration not evaluated (.gateforge.yml could not be loaded)',
+    });
+  } else {
+    warnUndeclaredRuntime(io, loadedConfig);
+    if (loadedConfig.runtime !== undefined) {
+      checks.push({
+        id: 'runtime-declaration',
+        status: 'ok',
+        detail: `declared as \`runtime: ${loadedConfig.runtime}\` — its envAllowlist, prepare and services apply`,
+      });
+    } else if (existsSync(join(io.cwd, '.gateforge', 'runtime.yml'))) {
+      checks.push({
+        id: 'runtime-declaration',
+        status: 'fail',
+        detail:
+          '.gateforge/runtime.yml exists but .gateforge.yml declares no runtime key — ' +
+          'its envAllowlist, prepare and services are ignored by every gate command; ' +
+          'fix: add `runtime: .gateforge/runtime.yml` to .gateforge.yml',
+      });
+    } else {
+      checks.push({
+        id: 'runtime-declaration',
+        status: 'ok',
+        detail: 'no runtime document (the default .gateforge/runtime.yml is absent; nothing is ignored)',
+      });
+    }
+  }
 
   // 0.10.2: a declared test-tooling glob that reaches a discovered
   // resource's own source is a CONFIG error. `check` refuses it with
