@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- **Supervised runs honour a project's declared test timeout.** The
+  generated config the supervised run executes under always set a 60 s
+  per-test timeout, so a test that needs longer under the consumer's own
+  configuration (`timeout: 180_000`) failed with "Test timeout of 60000ms
+  exceeded". Discovery already runs `playwright test --list` and reads the
+  timeout the runner resolved for each project from its JSON report; that
+  number now travels with the planned project and is written as that
+  project's own `timeout`. It is data only: the consumer config is still
+  never loaded. The 60 s default is a floor, because Playwright reports its
+  own 30 s default for a project that declared none, and a consumer who
+  never set a timeout keeps today's 60 s. A project that reports no
+  timeout, `0`, or a non-finite value also keeps 60 s.
+
 ## 0.13.4
 
 - **A suite that mixes the fixture's `test` with Playwright's own runs in
