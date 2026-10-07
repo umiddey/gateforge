@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.13.3
+
+- **Hooks on the fixture's `test` receive their fixtures again.** 0.13.2
+  wrapped `beforeAll`/`beforeEach`/`afterEach`/`afterAll` to keep hook
+  setup traffic uncredited, but the wrapper hid the hook's parameter list
+  from Playwright, which picks a hook's fixtures by reading it. Every
+  `test.beforeEach(async ({ page }) => …)` got an undefined `page`. The
+  wrapper now reports the consumer's own callback to Playwright, and a
+  titled hook (`test.beforeEach('title', fn)`) keeps its title.
+
 ## 0.13.2
 
 - **API tests are witnessed: the Playwright APIRequestContext now rides the
