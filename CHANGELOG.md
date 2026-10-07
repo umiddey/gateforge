@@ -10,6 +10,13 @@
   wrapper now reports the consumer's own callback to Playwright, and a
   titled hook (`test.beforeEach('title', fn)`) keeps its title.
 
+- **Hook setup traffic stays uncredited on a suite's own runner too.** A
+  suite that builds its runner with `test.extend(...)` on the fixture's
+  `test` got Playwright's unwrapped runner back, so a `request.newContext()`
+  call inside its `beforeEach` rode the running test's session proxy and
+  was credited as test traffic. `extend` now returns a runner whose hooks
+  are tracked the same way.
+
 ## 0.13.2
 
 - **API tests are witnessed: the Playwright APIRequestContext now rides the

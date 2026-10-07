@@ -413,7 +413,9 @@ const HOOK_REGISTRARS = new Set(['beforeAll', 'beforeEach', 'afterEach', 'afterA
  * Re-exports the extended runner with the four hook registrars wrapped
  * so hook callbacks run inside the tracker above. The proxy forwards
  * every other read untouched — the runner object stays the consumer's
- * own (extend/describe/info all behave identically).
+ * own (describe/info all behave identically) — except `extend`, whose
+ * result is wrapped the same way: most suites build their own `test` on
+ * top of this one, and their hooks are setup traffic too.
  *
  * Playwright picks the fixtures a hook receives by reading the hook
  * function's source (`fn.toString()`, first parameter). The forwarder
@@ -426,6 +428,10 @@ const HOOK_REGISTRARS = new Set(['beforeAll', 'beforeEach', 'afterEach', 'afterA
 function withHookTracking<T extends object>(extended: T): T {
   return new Proxy(extended, {
     get(target, property, receiver) {
+      if (property === 'extend') {
+        const extend = Reflect.get(target, property, target) as (...args: unknown[]) => object;
+        return (...args: unknown[]): object => withHookTracking(extend(...args));
+      }
       if (typeof property !== 'string' || !HOOK_REGISTRARS.has(property)) {
         return Reflect.get(target, property, receiver);
       }

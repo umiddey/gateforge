@@ -49,11 +49,16 @@ export default defineConfig({
 });
 `;
 
-const SPEC = `import { test, expect, request } from '@gate-forge/pack-playwright';
+const SPEC = `import { test as base, expect, request } from '@gate-forge/pack-playwright';
 
-test.beforeAll(async () => {
-  // No test is running here: this call must go straight to the app and
-  // stay uncredited (the app sees the app's own Host, never the proxy's).
+// Suites usually build their own runner on the fixture's: its hooks are
+// setup traffic exactly like the base runner's.
+const test = base.extend({});
+
+test.beforeEach(async () => {
+  // A hook, not the test: this call runs inside the test's session window
+  // yet must go straight to the app and stay uncredited (the app sees the
+  // app's own Host, never the proxy's).
   const api = await request.newContext();
   const setup = await api.get('/api/setup');
   expect(setup.status()).toBe(200);
@@ -192,7 +197,7 @@ function recordedExchangePaths(records: LedgerRecord[], testId?: string): string
 }
 
 describe('witnessed API request channel through the actual CLI', () => {
-  it('witnesses APIRequestContext traffic and keeps beforeAll setup uncredited', async () => {
+  it('witnesses APIRequestContext traffic and keeps hook setup uncredited on an extended runner', async () => {
     const app = await startApiApp();
     try {
       await withTempRepo({}, async (repo) => {
@@ -261,11 +266,11 @@ tests:
         }
         expect(run.code, observed).toBe(0);
         expect(report.execution.selectedTests).toMatchObject({ selected: 2, passed: 2, failed: 0 });
-        // The beforeAll setup call reached the app exactly once, and the
+        // The beforeEach setup call reached the app once per test, and the
         // witnessed ledger proves CREDIT stayed honest: the session
         // snapshot carries /api/items but never /api/setup (a direct
         // setup call never rides any session proxy).
-        expect(app.requestsByPath.get('/api/setup')).toBe(1);
+        expect(app.requestsByPath.get('/api/setup')).toBe(2);
         const records = JSON.parse(readFileSync(repo.path('.gateforge/test-gates/records.json'), 'utf8')) as LedgerRecord[];
         const recordedPaths = recordedExchangePaths(records);
         expect(recordedPaths.some((path) => path.endsWith('/api/items'))).toBe(true);
