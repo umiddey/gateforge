@@ -41,10 +41,18 @@ the subprocess transport runs, so one detector implementation serves both.
   (`module:var`), `order` is its 0-based position: include call order
   across routers, decorator source order within one router (Starlette
   matches routes in registration order, so the smallest order IS the
-  serving route). Fail closed: a route appended to its router after an
-  `include_router` call in the same file, declared inside a function
-  body, reachable from more than one app, or mounted through a
-  registry-function include carries NO `registration`. A typed path
+  serving route). A once-called registry function called by a top-level
+  statement of the app-owner module expands IN PLACE: its
+  function-body top-level includes order exactly like written includes
+  (call-site position, statement order inside the function). Fail
+  closed: a route appended to its router after an `include_router` call
+  in the same file, declared inside a function body, reachable from
+  more than one app, or mounted through a registry-function include
+  that is not order-certain (a second call site, a call nested in a
+  statement, a foreign-module call, a chained helper hop, or an include
+  nested in `if`/`for`/`while`/`try`/`with`/`match`) carries NO
+  `registration` — order-uncertain blocks are skipped, and the relative
+  order of the provable routes stays correct. A typed path
   convertor in the raw path string (`{n:int}`, `{p:path}`) sets
   `typedPathParams: true` — the route matches narrower than its
   canonical slot shape.
@@ -126,6 +134,19 @@ bounded and deterministic:
   **8 helper hops** (`MAX_RESOLUTION_DEPTH`). Chains beyond the bound
   yield one typed unresolved entry naming the function that would need
   hop 9 — no silent drop, no guess.
+- **Order-certain expansion** (registration order): when ONE call site
+  is provable in full — the function is a plain module-level `def`,
+  called exactly once across the scanned set, by a top-level expression
+  statement of the module that owns the `FastAPI()` argument — the
+  expansion joins that module's statement order at the call site, and
+  each function-body TOP-LEVEL `include_router` statement orders like a
+  written include (statement order inside the function breaks ties).
+  Everything else stays fail closed: a second call site anywhere, a
+  call nested in a statement or another expression, a call from a
+  module other than the app owner's, a chained helper hop, and any
+  include nested in `if`/`for`/`while`/`try`/`with`/`match` mount
+  without `registration` (facts unchanged). Order-uncertain blocks are
+  skipped, so the relative order of the provable routes stays correct.
 - **Unresolvable arguments** (a name bound to no known instance, or a
   computed expression): the honest outcome is a typed
   `FASTAPI_PREFIX_UNRESOLVED` entry at the exact call site and **no

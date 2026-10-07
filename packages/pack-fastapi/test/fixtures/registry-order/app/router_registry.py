@@ -24,4 +24,4 @@ def register_all_routers(app: FastAPI) -> None:
         app.include_router(sandbox_router)
     else:
         logger.warning("sandbox router disabled in production")
-    app.include_router(admin_router)
+    app.include_router(admin_router, prefix="/api/v1")

@@ -72,10 +72,27 @@ async function scan(files: Record<string, string>): Promise<WrapperOutcome> {
   }
 }
 
+/** A detector fact on the wire: `kind` discriminator plus attribute bag. */
+interface WireFact {
+  kind: string;
+  attributes: Record<string, unknown>;
+}
+
+/** Type guard for the one shape this file reads off a detector outcome. */
+function isWireFact(resource: unknown): resource is WireFact {
+  if (typeof resource !== 'object' || resource === null) return false;
+  if (!('kind' in resource) || !('attributes' in resource)) return false;
+  return (
+    typeof resource.kind === 'string' &&
+    typeof resource.attributes === 'object' &&
+    resource.attributes !== null
+  );
+}
+
 function factsByEffectivePath(outcome: { resources: readonly unknown[] }): Record<string, Record<string, unknown>> {
   const facts: Record<string, Record<string, unknown>> = {};
   for (const resource of outcome.resources) {
-    if (resource.kind !== 'http.contract') continue;
+    if (!isWireFact(resource) || resource.kind !== 'http.contract') continue;
     facts[String(resource.attributes['effectivePath'])] = resource.attributes;
   }
   return facts;

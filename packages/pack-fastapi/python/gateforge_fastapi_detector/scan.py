@@ -25,9 +25,14 @@ Detector vocabulary (frozen with the pack):
   raw path string carries a typed convertor (``{n:int}``, ``{p:path}``).
   Fail closed: a route appended to its router after a same-file include
   call, declared inside a function body, reachable from more than one
-  app, or mounted through a materialized (registry-function) include
-  carries NO ``registration`` — so does every route of an app-less
-  (standalone) router.
+  app, or mounted through a registry-function include that is not
+  order-certain carries NO ``registration`` — so does every route of an
+  app-less (standalone) router. The one registry-function exception: a
+  plain module-level ``def`` whose only call is a top-level expression
+  statement of the module that owns the app argument expands in place —
+  its function-body top-level ``include_router`` statements join the app
+  module's statement order (nested include statements and chained helper
+  hops stay unregistered).
 - One fact per (effective mounted path, concrete method): an
   ``api_route(methods=[...])`` yields one fact per listed method, and a
   router mounted twice yields one fact per mount (plan phase 2.3).
@@ -261,6 +266,24 @@ class IncludeEdge:
     # static pass can order — blocks mounted through it carry no
     # ``registration``.
     materialized: bool = False
+    # Order-certain materialization (0.14): the one call site is provable
+    # (top-level expression statement of the app-owner module, called
+    # exactly once) and this edge is a function-body TOP-LEVEL include
+    # statement, so the expansion joins the app module's statement order
+    # at ``call_node``'s position. False keeps the fail-closed walk.
+    ordered: bool = False
+    # The materializing call site (the registry-function call statement);
+    # the ORDER position anchor for ``ordered`` edges (the include call's
+    # own position lives in the registry module and does not order
+    # against the app module's statements).
+    call_node: ast.AST | None = None
+    # Statement index of the include within the function body: the
+    # tiebreak that keeps same-position expansions in statement order.
+    order_seq: int = 0
+    # True when the include call is a top-level statement of the enclosing
+    # registry function's body; includes nested in if/for/while/try/with/
+    # match never order, whatever the call site proves.
+    function_top_level: bool = False
 
 
 @dataclass
@@ -277,6 +300,9 @@ class FunctionIncludes:
     node: ast.AST
     params: tuple[str, ...]              # positional parameters (call sites bind positionally)
     param_edges: dict[str, list[IncludeEdge]] = field(default_factory=dict)
+    # True when the def is a plain module-level statement (not a class
+    # body method): a precondition for order-certain expansion.
+    module_level: bool = False
 
 
 @dataclass
@@ -292,6 +318,11 @@ class HelperCall:
     args: list[ast.AST]                  # positional argument expressions
     node: ast.AST                        # the call (typed-unresolved anchor)
     enclosing: str | None                # enclosing top-level function (None: module level)
+    # True when the call IS a top-level expression statement of its module
+    # body: the shape whose execution position the flat statement order can
+    # state. A call nested in if/for/while/try/with or inside another
+    # expression never qualifies.
+    module_top_expr: bool = False
 
 
 @dataclass
@@ -354,6 +385,10 @@ class FileIndex:
     include_edges: list[IncludeEdge] = field(default_factory=list)
     functions: dict[str, FunctionIncludes] = field(default_factory=dict)
     helper_calls: list[HelperCall] = field(default_factory=list)
+    # Every plain-name call count by callee name (all scopes, this file):
+    # proves a registry function is called exactly once across the whole
+    # scanned set before its expansion may order.
+    name_calls: dict[str, int] = field(default_factory=dict)
     unsupported: list[tuple[ast.AST, list[str]]] = field(default_factory=list)
     models: dict[str, ModelDef] = field(default_factory=dict)
 
@@ -535,6 +570,28 @@ class _ModuleVisitor(ast.NodeVisitor):
         # Module-level string constants, for literal prefix folding
         # (`PREFIX = "/api/v1"`; `APIRouter(prefix=PREFIX)`).
         self._constants: dict[str, str] = constants or {}
+        # Identity sets of module-body facts: def statements that ARE
+        # module-level statements, and call nodes that ARE top-level
+        # expression statements (their execution position is the flat
+        # statement order).
+        self._module_top_def_ids: set[int] = set()
+        self._module_top_expr_ids: set[int] = set()
+        # Identity set of the current registry function's top-level
+        # expression statements (empty outside one).
+        self._function_top_expr_ids: set[int] = set()
+
+    def visit_Module(self, node: ast.Module) -> None:
+        self._module_top_def_ids = {
+            id(statement)
+            for statement in node.body
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        self._module_top_expr_ids = {
+            id(statement.value)
+            for statement in node.body
+            if isinstance(statement, ast.Expr)
+        }
+        self.generic_visit(node)
 
     def visit_Import(self, node: ast.Import) -> None:
         for alias in node.names:
@@ -612,15 +669,30 @@ class _ModuleVisitor(ast.NodeVisitor):
             params = tuple(
                 argument.arg for argument in (*node.args.posonlyargs, *node.args.args)
             )
-            record = FunctionIncludes(name=node.name, node=node, params=params)
+            record = FunctionIncludes(
+                name=node.name,
+                node=node,
+                params=params,
+                module_level=id(node) in self._module_top_def_ids,
+            )
             self.index.functions[node.name] = record
             self._function = record
+            self._function_top_expr_ids = {
+                id(statement.value)
+                for statement in node.body
+                if isinstance(statement, ast.Expr)
+            }
             self.generic_visit(node)  # visit_Call records includes everywhere
             self._function = None
+            self._function_top_expr_ids = set()
         else:
             self.generic_visit(node)  # nested def: keep the enclosing context
 
     def visit_Call(self, node: ast.Call) -> None:
+        if isinstance(node.func, ast.Name):
+            self.index.name_calls[node.func.id] = (
+                self.index.name_calls.get(node.func.id, 0) + 1
+            )
         self._visit_include_call(node)
         self._visit_helper_call(node)
         self.generic_visit(node)
@@ -645,6 +717,7 @@ class _ModuleVisitor(ast.NodeVisitor):
                 args=list(node.args),
                 node=node,
                 enclosing=self._function.name if self._function is not None else None,
+                module_top_expr=id(node) in self._module_top_expr_ids,
             )
         )
 
@@ -764,6 +837,9 @@ class _ModuleVisitor(ast.NodeVisitor):
             ),
             node=node,
             file=self.index.relpath,
+            function_top_level=(
+                self._function is not None and id(node) in self._function_top_expr_ids
+            ),
         )
         self.index.include_edges.append(edge)
         if (
@@ -1299,6 +1375,7 @@ class _Resolver:
                 helper_key = resolve_fn(relpath, call.callee)
                 if helper_key is None:
                     continue
+                ordered_call = self._order_certain_call(relpath, call, helper_key, registry)
                 for position, param in enumerate(registry[helper_key].params):
                     if position >= len(call.args):
                         break
@@ -1306,7 +1383,34 @@ class _Resolver:
                     if edges:
                         self._materialize_call(
                             relpath, call, call.args[position], edges, helper_key,
+                            function=registry[helper_key], param=param,
+                            ordered_call=ordered_call,
                         )
+
+    def _order_certain_call(
+        self,
+        relpath: str,
+        call: HelperCall,
+        helper_key: tuple[str, str],
+        registry: dict[tuple[str, str], FunctionIncludes],
+    ) -> bool:
+        """Whether THIS call site may expand into the app module's ordered
+        statement sequence.
+
+        The call-site half of the rule: a plain module-level registry
+        function, called exactly once across the whole scanned set, by a
+        top-level expression statement. The per-edge half (own edges,
+        function-body top-level statements, an app instance in this very
+        module) is decided in ``_materialize_call``.
+        """
+        if call.enclosing is not None or not call.module_top_expr:
+            return False
+        if not registry[helper_key].module_level:
+            return False
+        total_calls = sum(
+            index.name_calls.get(call.callee, 0) for index in self.indexes.values()
+        )
+        return total_calls == 1
 
     def _materialize_call(
         self,
@@ -1315,12 +1419,19 @@ class _Resolver:
         argument: ast.AST,
         edges: list[IncludeEdge],
         helper_key: tuple[str, str],
+        function: FunctionIncludes,
+        param: str,
+        ordered_call: bool,
     ) -> None:
         """Mounts one call site's edges onto the instance the argument names.
 
         See ``_materialize_function_includes`` for the semantics; this is
         the per-argument decision point (chaining passthrough, instance
-        rewiring, or the typed unresolvable outcome).
+        rewiring, or the typed unresolvable outcome). An order-certain
+        call site (``_order_certain_call``) additionally expands each OWN,
+        function-body TOP-LEVEL include onto an app instance of THIS
+        module as an ordered edge — its position is the call statement's,
+        sequenced by the include's statement index in the function body.
         """
         enclosing = (
             self.indexes[relpath].functions.get(call.enclosing)
@@ -1333,19 +1444,43 @@ class _Resolver:
             owner = self._instance_owner(relpath, argument.id)
             if owner is not None:
                 target_file, owner_var = owner
-                self.indexes[target_file].include_edges.extend(
-                    IncludeEdge(
-                        owner_var=owner_var,
-                        target_var=edge.target_var,
-                        target_alias=edge.target_alias,
-                        target_attrs=list(edge.target_attrs),
-                        prefix=edge.prefix,
-                        node=edge.node,
-                        file=edge.file,
-                        materialized=True,
-                    )
-                    for edge in edges
+                # The expansion order is the app module's statement order,
+                # so only an app OF THE CALL SITE'S OWN MODULE qualifies:
+                # a foreign-module call, a router target, or a chained hop
+                # keeps the fail-closed (unordered) materialization.
+                ordered_target = (
+                    ordered_call
+                    and target_file == relpath
+                    and owner_var in self.indexes[target_file].apps
                 )
+                own_edges = function.param_edges.get(param, [])
+                for edge in edges:
+                    ordered, call_node, order_seq = False, None, 0
+                    if (
+                        ordered_target
+                        and edge.function_top_level
+                        and any(existing is edge for existing in own_edges)
+                    ):
+                        for index, statement in enumerate(function.node.body):
+                            if getattr(statement, "value", None) is edge.node:
+                                ordered, call_node, order_seq = True, call.node, index
+                                break
+                    self.indexes[target_file].include_edges.append(
+                        IncludeEdge(
+                            owner_var=owner_var,
+                            target_var=edge.target_var,
+                            target_alias=edge.target_alias,
+                            target_attrs=list(edge.target_attrs),
+                            prefix=edge.prefix,
+                            node=edge.node,
+                            file=edge.file,
+                            function_top_level=edge.function_top_level,
+                            materialized=True,
+                            ordered=ordered,
+                            call_node=call_node,
+                            order_seq=order_seq,
+                        )
+                    )
                 return
             self.unresolved.append({
                 "code": FASTAPI_PREFIX_UNRESOLVED,
@@ -1606,8 +1741,10 @@ class _Resolver:
 
         ``certain`` carries the registration certainty of the mount chain:
         a block reached through a materialized (registry-function) include
-        executes at call time, so everything below it emits NO
-        ``registration`` while still emitting its facts exactly as before.
+        that is not order-certain executes at call time, so everything
+        below it emits NO ``registration`` while still emitting its facts
+        exactly as before; an order-certain expansion joins the app
+        module's statement order and stays certain.
         """
         index = self.indexes[relpath]
         node_key = f"{relpath}:{var}"
@@ -1764,13 +1901,24 @@ class _Resolver:
         a same-file include of this router, or reached through a
         multi-file merge — emit NO registration, and blocks mounted
         through materialized (registry-function) includes walk with
-        ``certain=False``. Nothing else changes: facts and unresolved
+        ``certain=False`` unless the edge is order-certain (a once-called
+        module-level registry function expanding in place at its call
+        statement). Nothing else changes: facts and unresolved
         outcomes are exactly the unordered walk's.
         """
         routes = router.routes
         owned = [edge for edge in index.include_edges if edge.owner_var == var]
         route_files = {route.file for route in routes}
-        edge_files = {edge.file or relpath for edge in owned}
+        # Files whose statement sequence positions an edge for ordering:
+        # a written edge lives in its own file; an order-certain expansion
+        # positions at the call site in THIS module; any other materialized
+        # edge stays out of the flat order entirely (fail closed).
+        edge_files: set[str] = set()
+        for edge in owned:
+            if not edge.materialized:
+                edge_files.add(edge.file or relpath)
+            elif edge.ordered and edge.call_node is not None:
+                edge_files.add(relpath)
         mergeable = (
             len(route_files) <= 1
             and len(edge_files) <= 1
@@ -1787,11 +1935,15 @@ class _Resolver:
             self._emit_routes(index, router, prefix, mount, {})
             return
         route_claims: dict[int, tuple[str, int]] = {}
-        items: list[tuple[tuple[int, int], str, int]] = [
-            ((route.node.lineno, getattr(route.node, "col_offset", 0)), "route", position)
+        items: list[tuple[tuple[int, int, int], str, int]] = [
+            (
+                (route.node.lineno, getattr(route.node, "col_offset", 0), 0),
+                "route",
+                position,
+            )
             for position, route in enumerate(routes)
         ] + [
-            ((edge.node.lineno, getattr(edge.node, "col_offset", 0)), "edge", position)
+            (self._edge_order_key(edge), "edge", position)
             for position, edge in enumerate(owned)
         ]
         items.sort(key=lambda item: item[0])
@@ -1810,9 +1962,27 @@ class _Resolver:
                 edge = owned[position]
                 self._walk_edge(
                     relpath, edge, prefix, chain, node_key, included,
-                    certain and not edge.materialized,
+                    certain and not (edge.materialized and not edge.ordered),
                 )
         self._emit_routes(index, router, prefix, mount, route_claims)
+
+    def _edge_order_key(self, edge: IncludeEdge) -> tuple[int, int, int]:
+        """Sort key placing one owned edge in its module's statement order.
+
+        An order-certain expansion positions at the CALL SITE statement in
+        the app module, sequenced by the include's statement index within
+        the function body (the expansion's internal order). Every other
+        edge keeps its own source position: a non-ordered materialized
+        edge never earns registration, so wherever it sorts it can neither
+        take an order slot nor misorder provable routes.
+        """
+        if edge.ordered and edge.call_node is not None:
+            return (
+                edge.call_node.lineno,
+                getattr(edge.call_node, "col_offset", 0),
+                edge.order_seq,
+            )
+        return (edge.node.lineno, getattr(edge.node, "col_offset", 0), 0)
 
     def _route_added_after_include(self, relpath: str, var: str, route: RouteDef) -> bool:
         """True when a same-file include of this router executes BEFORE the

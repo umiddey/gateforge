@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased
+
+- **pack-fastapi: a once-called registry function now orders its
+  includes.** 0.13.6 deliberately left registry-function includes
+  (`register_all_routers(app)` shapes) without `registration` — the
+  include executes at function-call time, so no static position seemed
+  provable. Real apps mount every router through such a function, which
+  made registration-order overlap resolution dead code for them (0 of
+  782 endpoints carried `registration` on a real consumer). When the
+  call site is provable in full — the function is a plain module-level
+  `def` whose include target is its own parameter, called EXACTLY once
+  across the scanned set, by a top-level expression statement of the
+  module that owns the `FastAPI()` argument — the expansion now joins
+  that module's statement order at the call statement, and each
+  function-body TOP-LEVEL `include_router` statement carries the
+  flattened order like a written include (statement order inside the
+  function breaks ties between same-position expansions). The order
+  sequence stays the real registration sequence: the app module's
+  module-level statements in source order with the call expanded in
+  place, so an include written after the call and routes on the app
+  itself order after the whole expansion. Everything else fails closed,
+  exactly as before: a second call site anywhere, a call nested in a
+  statement or inside another expression, a call from a module other
+  than the app owner's, a chained helper hop, and an include nested in
+  `if`/`elif`/`else`/`for`/`while`/`try`/`with`/`match` mount without
+  `registration` — order-uncertain blocks are skipped, and the relative
+  order of the provable routes stays correct (the resolver never
+  resolves an overlap that involves a candidate without registration).
+
 ## 0.13.6
 
 - **A literal-vs-parameter route overlap resolves by the framework's own
