@@ -247,28 +247,44 @@ export type EvidenceFixtures = {
 };
 
 /**
+ * The runner the evidence fixtures extend. Page observation needs a
+ * Chromium debugging port, so only then does it replace Playwright's
+ * worker-scoped `browser`. The replacement is registered at module load,
+ * and ONLY when the supervisor enabled page observation: a worker-scoped
+ * override changes Playwright's worker hash, and tests whose runners
+ * differ in it are scheduled in separate worker groups. A suite mixing
+ * this runner with Playwright's own would then no longer run in file
+ * order (an order-dependent suite breaks), for a port nothing reads.
+ */
+const browserRunner =
+  process.env['GATEFORGE_PAGE_OBSERVATION_ENABLED'] === '1'
+    ? base.extend({
+        browser: async ({ browserName, launchOptions }, use) => {
+          const browserType = { chromium, firefox, webkit }[browserName];
+          const witnessed = Boolean(process.env[ENV_WITNESS_URL]) && browserName === 'chromium';
+          const debuggingPort = witnessed ? await availableDebuggingPort() : null;
+          const args = (launchOptions.args ?? []).filter((arg) => !arg.startsWith('--remote-debugging-port='));
+          const browser = await browserType.launch({
+            ...launchOptions,
+            args: [...args, ...(debuggingPort === null ? [] : [`--remote-debugging-port=${debuggingPort}`])],
+          });
+          if (debuggingPort !== null) browserDebuggingPorts.set(browser, debuggingPort);
+          try {
+            await use(browser);
+          } finally {
+            browserDebuggingPorts.delete(browser);
+            await browser.close();
+          }
+        },
+      })
+    : base;
+
+/**
  * The extended test runner. Surface-independent evidence channels have
  * no surface requirement; the first UI call fails closed if no surface
  * was wired.
  */
-const extended = base.extend<EvidenceFixtures>({
-  browser: async ({ browserName, launchOptions }, use) => {
-    const browserType = { chromium, firefox, webkit }[browserName];
-    const witnessed = Boolean(process.env[ENV_WITNESS_URL]) && browserName === 'chromium';
-    const debuggingPort = witnessed ? await availableDebuggingPort() : null;
-    const args = (launchOptions.args ?? []).filter((arg) => !arg.startsWith('--remote-debugging-port='));
-    const browser = await browserType.launch({
-      ...launchOptions,
-      args: [...args, ...(debuggingPort === null ? [] : [`--remote-debugging-port=${debuggingPort}`])],
-    });
-    if (debuggingPort !== null) browserDebuggingPorts.set(browser, debuggingPort);
-    try {
-      await use(browser);
-    } finally {
-      browserDebuggingPorts.delete(browser);
-      await browser.close();
-    }
-  },
+const extended = browserRunner.extend<EvidenceFixtures>({
   page: async ({ page, browser }, use, testInfo) => {
     if (!process.env[ENV_WITNESS_URL]) {
       await use(page);
