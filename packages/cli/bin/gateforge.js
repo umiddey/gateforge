@@ -9,6 +9,22 @@
  */
 import { main } from '../dist/cli.js';
 
+// A closed output reader (`| head`, a pager that quits, a CI log tailer
+// that stops following) is not a Gateforge failure. Without a listener,
+// Node raises the stream's 'error' event OUTSIDE main's error handling —
+// an unhandled `write EPIPE` crash with exit 1 that can overwrite the
+// command's own verdict (fresh-clone snag 5a: `tests discover` exited 0
+// on the first run and 1 on identical re-runs, decided by how the output
+// was captured, not by the repository). The error is swallowed here so
+// the process always exits with the exit code the command itself
+// returned; anything other than EPIPE still crashes loudly.
+for (const output of [process.stdout, process.stderr]) {
+  output.on('error', (error) => {
+    if (error !== null && typeof error === 'object' && error.code === 'EPIPE') return;
+    throw error;
+  });
+}
+
 main(process.argv.slice(2)) //
   .then((code) => {
     process.exitCode = code;
