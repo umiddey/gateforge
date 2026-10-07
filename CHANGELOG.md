@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.13.7
 
 - **pack-fastapi: a once-called registry function now orders its
   includes.** 0.13.6 deliberately left registry-function includes

@@ -1,5 +1,5 @@
 /**
- * Registration-order facts (0.14): every endpoint the detector can place
+ * Registration-order facts: every endpoint the detector can place
  * statically in an app's flattened registration sequence carries
  * `registration: {scope, order}` — include call order across routers,
  * decorator source order within one router. Fail closed: a route appended
@@ -98,7 +98,7 @@ function factsByEffectivePath(outcome: { resources: readonly unknown[] }): Recor
   return facts;
 }
 
-describe('registration-order facts (0.14)', () => {
+describe('registration-order facts', () => {
   it('orders follow include call order and decorator order; fail-closed routes carry none', async () => {
     const outcome = await scan({ 'app/main.py': APP_MAIN });
     const facts = factsByEffectivePath(outcome);
@@ -177,7 +177,7 @@ const FOREIGN_PATHS = [
   'registry-order/foreign/app/items.py',
 ];
 
-describe('registry-function registration order (0.14)', () => {
+describe('registry-function registration order', () => {
   it('expands a once-called registry function in place, in the app module statement order', async () => {
     const facts = factsByEffectivePath(await runDetector(BASIC_PATHS));
     const scope = 'registry-order.app.main:app';

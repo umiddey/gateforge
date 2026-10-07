@@ -1,6 +1,6 @@
 {
   "name": "@gate-forge/witness",
-  "version": "0.13.6",
+  "version": "0.13.7",
   "license": "Apache-2.0",
   "description": "Gateforge runner-neutral witness: the loopback HTTP witness proxy, the per-test session tagging contract, and the runner-adapter contract every test runner (Playwright, Cypress, pytest+httpx, Jest/Vitest+supertest) implements to produce the same trusted evidence.",
   "type": "module",
@@ -61,7 +61,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@gate-forge/core": "^0.13.6",
+    "@gate-forge/core": "^0.13.7",
     "yaml": "^2.8.1"
   },
   "peerDependencies": {
