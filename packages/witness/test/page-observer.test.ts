@@ -354,6 +354,10 @@ describe('real CDP page observer', () => {
       await expect.poll(() => visits.length, { timeout: 5_000 }).toBe(1);
       expect(visits[0]!.observed.apiRequestsSettled).toBe(false);
       expect(visits[0]!.observed.apiResponses).toEqual([]);
+      // The observer names the aborted request.
+      expect(visits[0]!.observed.unsettledRequests).toEqual([
+        { method: 'GET', url: '/api/data', errorText: 'net::ERR_FAILED' },
+      ]);
       expect(visits[0]!.verdict.loads.refusalReasons).toContain('PAGE_API_UNSETTLED');
       expect(visits[0]!.verdict.dataOk.refusalReasons).toContain('PAGE_API_UNSETTLED');
     } finally {

@@ -3,7 +3,13 @@ import type { BrowserContextOptions } from 'playwright';
 import type { PageObservationContext, SessionPageObserverRequest } from './types.js';
 import { driveEngineVisit, type EngineBrowserManager } from './browser.js';
 import { observePageBrowser, type PageObserver } from './page-observer.js';
-import { landedLoginRoute, type PageRoute, type PageVisitVerdict } from './page-observation.js';
+import {
+  apiErrorDetailOf,
+  landedLoginRoute,
+  type ObservedPageVisit,
+  type PageRoute,
+  type PageVisitVerdict,
+} from './page-observation.js';
 export interface PageObserverRegistrationState {
   pageObservers: Map<string, PageObserver>;
   pageObservationRecords: Map<string, string[]>;
@@ -122,6 +128,7 @@ export async function registerPageObserver(input: {
           // One payload shared by both promise records; the sequence
           // increases on every observation of this registered session.
           apiRequestsSettled: visit.apiRequestsSettled,
+          unsettledRequests: visit.unsettledRequests,
           liveChannels: visit.liveChannels,
           observationSequence: observationSequence++,
           loads: finalVerdict.loads,
@@ -190,7 +197,10 @@ function normalizePageStorageState(raw: unknown): BrowserContextOptions['storage
 
 /**
  * One sweep progress line, emitted as each visit finishes so a killed run
- * keeps the lines it already earned.
+ * keeps the lines it already earned. `detail` names WHY the page refused
+ * when the reason alone cannot: the unsettled requests for
+ * PAGE_API_UNSETTLED, the refusing response for PAGE_API_ERROR — appended
+ * after the timing as `: <detail>`.
  */
 export function formatSweepProgress(info: {
   index: number;
@@ -200,9 +210,37 @@ export function formatSweepProgress(info: {
   proven: boolean;
   firstReason: string | null;
   ms: number;
+  detail?: string | null;
 }): string {
   const outcome = info.proven ? 'proven' : `refused${info.firstReason === null ? '' : ` ${info.firstReason}`}`;
-  return `page ${String(info.index)}/${String(info.total)} ${info.audience} ${info.path} -> ${outcome} (${String(info.ms)} ms)`;
+  const suffix = info.detail === undefined || info.detail === null || info.detail === '' ? '' : `: ${info.detail}`;
+  return `page ${String(info.index)}/${String(info.total)} ${info.audience} ${info.path} -> ${outcome} (${String(info.ms)} ms)${suffix}`;
+}
+
+/**
+ * The progress-line detail for one refused visit: the unsettled requests
+ * for PAGE_API_UNSETTLED (`GET /a net::ERR_ABORTED; POST /b outstanding`),
+ * the refusing response for PAGE_API_ERROR (`GET /api/y -> 500`, with the
+ * grader's own anonymous-401 exemption), null for every other reason.
+ *
+ * Args:
+ *   firstReason: the first refusal reason of the verdict.
+ *   visit: the visit the verdict graded.
+ *   anonymous: the page's anonymous flag (audience without login).
+ *
+ * Returns:
+ *   string | null: the appended detail, or null when the reason is
+ *   self-explanatory.
+ */
+export function progressDetailFor(firstReason: string | null, visit: ObservedPageVisit, anonymous: boolean): string | null {
+  if (firstReason === 'PAGE_API_UNSETTLED') {
+    const detail = visit.unsettledRequests
+      .map(({ method, url, errorText }) => `${method} ${url} ${errorText}`)
+      .join('; ');
+    return detail === '' ? null : detail;
+  }
+  if (firstReason === 'PAGE_API_ERROR') return apiErrorDetailOf(visit.apiResponses, anonymous);
+  return null;
 }
 
 /** One swept route outcome: the page verdict plus whether the sweep visited it. */
@@ -270,6 +308,7 @@ export async function sweepPageVisits(input: {
         domMarkerHit: false,
         apiStatuses: [],
         apiRequestsSettled: true,
+        unsettledRequests: [],
         liveChannels: { count: 0, paths: [] },
         observationSequence: observationSequence++,
         loads: verdict.loads,
@@ -301,6 +340,7 @@ export async function sweepPageVisits(input: {
       // One payload reused for both contracts; the sequence increases
       // within this sweep.
       apiRequestsSettled: visit.apiRequestsSettled,
+      unsettledRequests: visit.unsettledRequests,
       liveChannels: visit.liveChannels,
       observationSequence: observationSequence++,
       loads: verdict.loads,
@@ -317,6 +357,11 @@ export async function sweepPageVisits(input: {
       proven: verdict.loads.satisfied && verdict.dataOk.satisfied,
       firstReason: verdict.loads.refusalReasons[0] ?? verdict.dataOk.refusalReasons[0] ?? null,
       ms: Date.now() - visitStartedAt,
+      detail: progressDetailFor(
+        verdict.loads.refusalReasons[0] ?? verdict.dataOk.refusalReasons[0] ?? null,
+        visit,
+        route.anonymous === true,
+      ),
     }));
     if (index === 0 && input.storageState !== undefined) {
       const login = landedLoginRoute(visit.url, route.path, input.loginRoutes);

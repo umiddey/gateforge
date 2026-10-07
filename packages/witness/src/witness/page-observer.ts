@@ -2,6 +2,7 @@ import type { Browser, BrowserContext, Page, Request } from 'playwright';
 import {
   apiRequestsSettled,
   gradePageVisit,
+  unsettledRequestsOf,
   type ObservedApiRequestCompletion,
   type ObservedApiRequestFailure,
   type ObservedPageVisit,
@@ -134,18 +135,51 @@ function cdpSettledCount(window: {
   cdpSends: Map<string, number>;
   cdpCompletes: Map<string, number>;
 }): number {
-  const outstandingByKey = new Map<string, number>();
-  for (const request of window.outstanding) {
-    const key = apiExchangeKey(request.method(), request.url());
-    outstandingByKey.set(key, (outstandingByKey.get(key) ?? 0) + 1);
-  }
+  const unsettledKeys = unsettledKeysOfWindow(window);
   let settled = 0;
-  for (const [key, count] of outstandingByKey) {
-    if ((window.cdpSends.get(key) ?? 0) < (window.playwrightOpens.get(key) ?? 0)) continue;
-    const unfinished = (window.playwrightOpens.get(key) ?? 0) - (window.playwrightFinished.get(key) ?? 0);
-    if ((window.cdpCompletes.get(key) ?? 0) >= unfinished) settled += count;
+  for (const request of window.outstanding) {
+    if (!unsettledKeys.has(apiExchangeKey(request.method(), request.url()))) settled += 1;
   }
   return settled;
+}
+
+/**
+ * The keys whose CDP correlation has NOT proven every open request
+ * finished: the same conservative per-window, per-method+URL rule
+ * {@link cdpSettledCount} grades by, kept as the one place that rule
+ * lives (the still-open request list for the refusal diagnosis reads it
+ * too, so the diagnosis can never disagree with the settle verdict).
+ */
+function unsettledKeysOfWindow(window: {
+  outstanding: Set<Request>;
+  playwrightOpens: Map<string, number>;
+  playwrightFinished: Map<string, number>;
+  cdpSends: Map<string, number>;
+  cdpCompletes: Map<string, number>;
+}): Set<string> {
+  const byKey = new Map<string, number>();
+  for (const request of window.outstanding) {
+    const key = apiExchangeKey(request.method(), request.url());
+    byKey.set(key, (byKey.get(key) ?? 0) + 1);
+  }
+  const unsettled = new Set<string>();
+  for (const key of byKey.keys()) {
+    if ((window.cdpSends.get(key) ?? 0) < (window.playwrightOpens.get(key) ?? 0)) {
+      unsettled.add(key);
+      continue;
+    }
+    const unfinished = (window.playwrightOpens.get(key) ?? 0) - (window.playwrightFinished.get(key) ?? 0);
+    if ((window.cdpCompletes.get(key) ?? 0) < unfinished) unsettled.add(key);
+  }
+  return unsettled;
+}
+
+/** The still-open requests of one window (the unsettled keys' requests). */
+function stillOpenRequests(window: PageWindow): Array<{ method: string; url: string }> {
+  const unsettledKeys = unsettledKeysOfWindow(window);
+  return [...window.outstanding]
+    .filter((request) => unsettledKeys.has(apiExchangeKey(request.method(), request.url())))
+    .map((request) => ({ method: request.method(), url: request.url() }));
 }
 
 /** Attach the witness's independent Playwright/CDP client to an existing browser. */
@@ -262,6 +296,11 @@ export async function observePageBrowser(options: PageObserverOptions): Promise<
             failures: window.failedRequests,
             completions: window.completedRequests,
           }),
+          unsettledRequests: unsettledRequestsOf({
+            outstanding: stillOpenRequests(window),
+            failures: window.failedRequests,
+            completions: window.completedRequests,
+          }),
           liveChannels: liveChannelSnapshot(window.liveChannels),
         };
         // Evidence is NOT cleared: repeated quiet emissions of the SAME
@@ -306,6 +345,11 @@ export async function observePageBrowser(options: PageObserverOptions): Promise<
         apiResponses: [...window.apiResponses],
         apiRequestsSettled: apiRequestsSettled({
           outstandingCount: Math.max(0, window.outstanding.size - cdpSettledCount(window)),
+          failures: window.failedRequests,
+          completions: window.completedRequests,
+        }),
+        unsettledRequests: unsettledRequestsOf({
+          outstanding: stillOpenRequests(window),
           failures: window.failedRequests,
           completions: window.completedRequests,
         }),

@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **The sweep progress line names the requests that refused a page.** A
+  page printing only `refused PAGE_API_UNSETTLED (782 ms)` left nobody any
+  wiser about WHICH request never settled. A refused visit now keeps its
+  culprits — the additive `unsettledRequests` field on the visit and in
+  the `page.observed` payload (both the observed and the swept channel):
+  un-superseded failures with their real browser error text, then
+  still-open requests as `outstanding`, capped at five, urls without
+  query — and the per-page progress line appends them:
+  `page 5/56 erp /billing/documents -> refused PAGE_API_UNSETTLED (782 ms): GET /api/v1/foo net::ERR_ABORTED; POST /api/x outstanding`.
+  A `PAGE_API_ERROR` line names the refusing response
+  (`GET /api/y -> 500`, honoring the grader's anonymous-401 exemption)
+  instead of printing only the reason code.
+
 - **`tests suggest --from-run`: suggestions from a witnessed run's own page
   observations.** A witnessed run already records, per test, every API
   request each page made; the suggestion engine no longer has to guess from

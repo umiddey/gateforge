@@ -36,6 +36,13 @@ export interface ObservedPageVisit {
    */
   apiRequestsSettled: boolean;
   /**
+   * The requests that left the app data set unsettled, named for the
+   * refusal diagnosis (`unsettledRequestsOf`): un-superseded failures
+   * with their browser error text, then still-open requests as
+   * `outstanding`, capped at five. Empty for a settled visit.
+   */
+  unsettledRequests: UnsettledRequest[];
+  /**
    * The declared/protocol live channels the visit kept open (a
    * controller-declared path prefix, an app-host WebSocket upgrade, a
    * `text/event-stream` response). They never count as app data
@@ -76,6 +83,88 @@ export function apiRequestsSettled(input: {
   return input.failures.every((failure) =>
     failure.errorText === 'net::ERR_ABORTED' && completed.has(`${failure.method} ${failure.url}`),
   );
+}
+
+/** One request a visit could not settle, as the evidence names it. */
+export interface UnsettledRequest {
+  method: string;
+  /** Path without query — every tracked app data call is same-origin. */
+  url: string;
+  /** The browser failure text, or `outstanding` for a still-open request. */
+  errorText: string;
+}
+
+/** How many culprits the diagnosis carries before it stops listing. */
+const UNSETTLED_REQUESTS_CAP = 5;
+
+/**
+ * Names the requests that left a visit's app data set unsettled, with the
+ * SAME settled rule {@link apiRequestsSettled} grades by: every failure
+ * that did NOT count as settled (an abort counts only when a completed
+ * same-method/full-URL request superseded it) keeps its real browser
+ * error text, and every request still open at grading time is listed as
+ * `outstanding`. Capped at five, urls without their query — this is the
+ * one-line "which request hung?" answer, not a transcript.
+ *
+ * Args:
+ *   input.outstanding: the requests still open at grading time.
+ *   input.failures: the requests that failed without completing.
+ *   input.completions: the requests that reached completion.
+ *
+ * Returns:
+ *   UnsettledRequest[]: at most five entries; failures first.
+ */
+export function unsettledRequestsOf(input: {
+  outstanding: readonly { method: string; url: string }[];
+  failures: readonly ObservedApiRequestFailure[];
+  completions: readonly ObservedApiRequestCompletion[];
+}): UnsettledRequest[] {
+  const completed = new Set(input.completions.map(({ method, url }) => `${method} ${url}`));
+  const withoutQuery = (url: string): string => {
+    try {
+      return new URL(url).pathname;
+    } catch {
+      return url;
+    }
+  };
+  return [
+    ...input.failures
+      .filter((failure) => !(failure.errorText === 'net::ERR_ABORTED' && completed.has(`${failure.method} ${failure.url}`)))
+      .map(({ method, url, errorText }) => ({ method, url: withoutQuery(url), errorText })),
+    ...input.outstanding.map(({ method, url }) => ({ method, url: withoutQuery(url), errorText: 'outstanding' })),
+  ].slice(0, UNSETTLED_REQUESTS_CAP);
+}
+
+/**
+ * The response that refused data-ok with PAGE_API_ERROR, as one
+ * `METHOD path -> status` line, or null. The anonymous-401 exemption is
+ * the grader's own ({@link gradePageVisit}): on a page whose audience
+ * declares no login, a 401 is the expected not-logged-in answer and is
+ * not the refusing response.
+ *
+ * Args:
+ *   responses: the visit's collected app data responses.
+ *   anonymous: the page's anonymous flag (audience without login).
+ *
+ * Returns:
+ *   string | null: the first refusing response, or null.
+ */
+export function apiErrorDetailOf(
+  responses: ReadonlyArray<{ method: string; url: string; status: number }>,
+  anonymous: boolean,
+): string | null {
+  for (const response of responses) {
+    if (response.status < 400) continue;
+    if (response.status === 401 && anonymous) continue;
+    let path = response.url;
+    try {
+      path = new URL(response.url).pathname;
+    } catch {
+      // Keep the raw text when the url does not parse.
+    }
+    return `${response.method} ${path} -> ${String(response.status)}`;
+  }
+  return null;
 }
 
 export type PageRefusalReason =

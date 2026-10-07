@@ -260,4 +260,82 @@ fetch('/api/orders', { method: 'POST', headers: { 'content-type': 'application/j
       cleanup = undefined;
     }
   });
+
+  it('progress lines and payloads name the requests that refused an unsettled or failing page', async () => {
+    const app = createServer((request, response) => {
+      if (request.url === '/api/hang' || request.url === '/api/aborted') return; // never answers
+      if (request.url === '/api/error') {
+        response.writeHead(500, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ ok: false }));
+        return;
+      }
+      const main =
+        request.url === '/errorpage'
+          ? "fetch('/api/error').then((r) => r.json()).catch(() => {});"
+          : request.url === '/wait'
+            ? "fetch('/api/hang').catch(() => {});"
+            // The 50 ms abort delay is deliberate real time INSIDE THE
+            // PAGE (rule exception, same rationale as cancelHtml in
+            // browser-visit.test.ts): fake timers in the test process
+            // cannot drive the page's JS or the browser's network stack,
+            // and the abort must land after Chromium dispatched the
+            // request.
+            : `const controller = new AbortController();
+               fetch('/api/aborted', { signal: controller.signal }).catch(() => {});
+               setTimeout(() => controller.abort(), 50);`;
+      response.writeHead(200, { 'content-type': 'text/html' });
+      response.end(`<!doctype html><html><body><main>Page</main><script>${main}</script></body></html>`);
+    });
+    app.listen(0, [127, 0, 0, 1].join('.'));
+    await once(app, 'listening');
+    const address = app.address();
+    if (address === null || typeof address === 'string') throw new Error('app server did not bind');
+    const appBase = `http://${[127, 0, 0, 1].join('.')}:${String(address.port)}`;
+    const manager = new EngineBrowserManager({ launch: (options) => chromium.launch(options) });
+    cleanup = async () => { await manager.closeAll(); await new Promise<void>((resolve) => app.close(() => resolve())); };
+    const payloads: Array<{ routeId?: unknown; unsettledRequests?: Array<Record<string, unknown>> }> = [];
+    const lines: string[] = [];
+    try {
+      const { visits } = await sweepPageVisits({
+        browser: manager,
+        sessionId: 'sweep-refusal-detail',
+        testId: 'referee',
+        appBase,
+        audience: 'tenant',
+        routes: [
+          { id: 'tenant.page-error', path: '/errorpage' },
+          { id: 'tenant.page-wait', path: '/wait' },
+          { id: 'tenant.page-cancel', path: '/cancel' },
+        ],
+        loginRoutes: [],
+        errorMarkers: [],
+        liveChannels: [],
+        onProgress: (line) => lines.push(line),
+        issueRecord: (_obligationId, _testId, payload) => {
+          if (payload === null || typeof payload !== 'object') throw new Error('sweep record has no payload');
+          payloads.push(payload);
+          return String(payloads.length);
+        },
+      });
+      // The 500 page settled: PAGE_API_ERROR, now naming the request.
+      expect(visits[0]?.verdict.dataOk.refusalReasons).toEqual(['PAGE_API_ERROR']);
+      expect(visits[1]?.verdict.loads.refusalReasons).toContain('PAGE_API_UNSETTLED');
+      expect(visits[2]?.verdict.loads.refusalReasons).toContain('PAGE_API_UNSETTLED');
+      const routePayload = (routeId: string) => payloads.find((payload) => payload.routeId === routeId);
+      expect(routePayload('tenant.page-wait')?.unsettledRequests).toEqual([
+        { method: 'GET', url: '/api/hang', errorText: 'outstanding' },
+      ]);
+      expect(routePayload('tenant.page-cancel')?.unsettledRequests).toEqual([
+        { method: 'GET', url: '/api/aborted', errorText: 'net::ERR_ABORTED' },
+      ]);
+      expect(routePayload('tenant.page-error')?.unsettledRequests).toEqual([]);
+      const lineFor = (path: string) => lines.find((line) => line.includes(` ${path} -> refused`));
+      expect(lineFor('/errorpage')).toMatch(/refused PAGE_API_ERROR \(\d+ ms\): GET \/api\/error -> 500$/);
+      expect(lineFor('/wait')).toMatch(/refused PAGE_API_UNSETTLED \(\d+ ms\): GET \/api\/hang outstanding$/);
+      expect(lineFor('/cancel')).toMatch(/refused PAGE_API_UNSETTLED \(\d+ ms\): GET \/api\/aborted net::ERR_ABORTED$/);
+    } finally {
+      await cleanup();
+      cleanup = undefined;
+    }
+  }, 180_000);
 });

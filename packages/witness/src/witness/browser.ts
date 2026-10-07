@@ -36,6 +36,7 @@ import type { Browser, BrowserContext, BrowserContextOptions, Frame, Locator, Pa
 import {
   apiRequestsSettled,
   gradePageVisit,
+  unsettledRequestsOf,
   type ObservedApiRequestCompletion,
   type ObservedApiRequestFailure,
   type ObservedPageVisit,
@@ -244,6 +245,11 @@ export async function driveEngineVisit(
       apiResponses,
       apiRequestsSettled: apiRequestsSettled({
         outstandingCount: outstandingRequests.size,
+        failures: failedApiRequests,
+        completions: completedApiRequests,
+      }),
+      unsettledRequests: unsettledRequestsOf({
+        outstanding: [...outstandingRequests],
         failures: failedApiRequests,
         completions: completedApiRequests,
       }),

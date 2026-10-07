@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { gradePageVisit, landedLoginRoute, matchPageRoute } from '../src/witness/page-observation.js';
+import {
+  apiErrorDetailOf,
+  gradePageVisit,
+  landedLoginRoute,
+  matchPageRoute,
+  unsettledRequestsOf,
+} from '../src/witness/page-observation.js';
 
 const pages = [{ id: 'tenant.page-orders', path: '/orders/:id' }];
 const clean = {
@@ -7,8 +13,9 @@ const clean = {
   navigations: [],
   exceptions: [],
   domMarkerHit: false,
-  apiResponses: [{ url: 'http://127.0.0.1:47013/api/orders/42', status: 200, remoteAddress: '127.0.0.1', proxied: true }],
+  apiResponses: [{ method: 'GET', url: 'http://127.0.0.1:47013/api/orders/42', status: 200, remoteAddress: '127.0.0.1', proxied: true }],
   apiRequestsSettled: true,
+  unsettledRequests: [],
   liveChannels: { count: 0, paths: [] },
 };
 
@@ -135,7 +142,7 @@ describe('page observation grading', () => {
 describe('anonymous pages of audiences without a login', () => {
   const base = 'http://127.0.0.1';
   const anonymousPages = [{ id: 'global.page-terms', path: '/terms', anonymous: true }];
-  const api401 = { url: `${base}/api/me`, status: 401, remoteAddress: '127.0.0.1', proxied: true };
+  const api401 = { method: 'GET', url: `${base}/api/me`, status: 401, remoteAddress: '127.0.0.1', proxied: true };
 
   it('accepts exactly 401 as the expected not-logged-in answer', () => {
     const resolved = gradePageVisit({
@@ -300,5 +307,61 @@ describe('public login pages and expected-page grading', () => {
     });
     expect(crashedLogin.loads.satisfied).toBe(false);
     expect(crashedLogin.loads.refusalReasons).toContain('PAGE_UNCAUGHT_EXCEPTION');
+  });
+});
+
+describe('unsettledRequestsOf — naming the requests that left a visit unsettled', () => {
+  it('lists un-superseded failures, then open requests, capped at five, without query', () => {
+    expect(unsettledRequestsOf({
+      outstanding: [
+        { method: 'POST', url: 'http://127.0.0.1:13001/api/x?token=1' },
+        { method: 'GET', url: 'http://127.0.0.1:13001/api/6' },
+        { method: 'GET', url: 'http://127.0.0.1:13001/api/7' },
+        { method: 'GET', url: 'http://127.0.0.1:13001/api/8' },
+        { method: 'GET', url: 'http://127.0.0.1:13001/api/9' },
+        { method: 'GET', url: 'http://127.0.0.1:13001/api/10' },
+      ],
+      failures: [
+        // Superseded exactly as apiRequestsSettled forgives it: never named.
+        { method: 'GET', url: 'http://127.0.0.1:13001/api/gone', errorText: 'net::ERR_ABORTED' },
+        { method: 'GET', url: 'http://127.0.0.1:13001/api/aborted', errorText: 'net::ERR_ABORTED' },
+        { method: 'GET', url: 'http://127.0.0.1:13001/api/dead', errorText: 'net::ERR_EMPTY_RESPONSE' },
+      ],
+      completions: [{ method: 'GET', url: 'http://127.0.0.1:13001/api/gone' }],
+    })).toEqual([
+      { method: 'GET', url: '/api/aborted', errorText: 'net::ERR_ABORTED' },
+      { method: 'GET', url: '/api/dead', errorText: 'net::ERR_EMPTY_RESPONSE' },
+      { method: 'POST', url: '/api/x', errorText: 'outstanding' },
+      { method: 'GET', url: '/api/6', errorText: 'outstanding' },
+      { method: 'GET', url: '/api/7', errorText: 'outstanding' },
+    ]);
+  });
+
+  it('collects nothing when every failure was superseded and nothing stayed open', () => {
+    expect(unsettledRequestsOf({
+      outstanding: [],
+      failures: [{ method: 'GET', url: 'http://127.0.0.1:13001/api/a', errorText: 'net::ERR_ABORTED' }],
+      completions: [{ method: 'GET', url: 'http://127.0.0.1:13001/api/a' }],
+    })).toEqual([]);
+  });
+});
+
+describe('apiErrorDetailOf — naming the response that refused data-ok', () => {
+  const responses = [
+    { method: 'GET', url: 'http://127.0.0.1:13001/api/me', status: 401 },
+    { method: 'POST', url: 'http://127.0.0.1:13001/api/orders', status: 500 },
+    { method: 'GET', url: 'http://127.0.0.1:13001/api/y', status: 503 },
+  ];
+
+  it('names the first refusing response as METHOD path -> status', () => {
+    expect(apiErrorDetailOf(responses, false)).toBe('GET /api/me -> 401');
+  });
+
+  it('skips the anonymous-401 exemption exactly like the grader', () => {
+    expect(apiErrorDetailOf(responses, true)).toBe('POST /api/orders -> 500');
+  });
+
+  it('returns null when no response refused', () => {
+    expect(apiErrorDetailOf([{ method: 'GET', url: 'http://app/api/ok', status: 200 }], false)).toBeNull();
   });
 });

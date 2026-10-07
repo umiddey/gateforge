@@ -204,6 +204,12 @@ describe('engine browser visit', () => {
       const dead = await driveEngineVisit(page, appBase, pages[0]!, pages);
       expect(dead.visit.apiRequestsSettled).toBe(false);
       expect(dead.visit.apiResponses.map(({ status }) => status)).toEqual([200]);
+      // The visit names the request that left it unsettled (the exact
+      // Chromium error text for a destroyed socket is platform detail).
+      expect(dead.visit.unsettledRequests).toHaveLength(1);
+      expect(dead.visit.unsettledRequests[0]?.method).toBe('GET');
+      expect(dead.visit.unsettledRequests[0]?.url).toBe('/data-deadbody');
+      expect(dead.visit.unsettledRequests[0]?.errorText).toBeTruthy();
       expect(dead.verdict.loads.refusalReasons).toContain('PAGE_API_UNSETTLED');
       expect(dead.verdict.dataOk.satisfied).toBe(false);
       expect(dead.verdict.dataOk.refusalReasons).toContain('PAGE_API_UNSETTLED');
@@ -315,6 +321,10 @@ describe('engine browser visit', () => {
     try {
       const cancelled = await driveEngineVisit(page, appBase, pages[0]!, pages);
       expect(cancelled.visit.apiRequestsSettled).toBe(false);
+      // The visit names the cancelled request and its real failure text.
+      expect(cancelled.visit.unsettledRequests).toEqual([
+        { method: 'GET', url: '/api/x', errorText: 'net::ERR_ABORTED' },
+      ]);
       expect(cancelled.verdict.loads.refusalReasons).toContain('PAGE_API_UNSETTLED');
       expect(cancelled.verdict.dataOk.refusalReasons).toContain('PAGE_API_UNSETTLED');
     } finally {

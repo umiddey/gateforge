@@ -24,8 +24,15 @@ fetch('/api/orders', { method: 'POST', headers: { 'content-type': 'application/j
   .catch(() => {});
 </script></body></html>`;
 
+/** A page whose only app data call never answers. */
+const HANG_PAGE_HTML = `<!doctype html><html><body><main>Hanging</main><script>
+fetch('/api/hang').catch(() => {});
+</script></body></html>`;
+
 const app = createHttpServer((request, response) => {
   const path = new URL(request.url ?? '/', `http://${LOOPBACK}`).pathname;
+  // Never answers: the unsettled-visit evidence case.
+  if (path === '/api/hang') return;
   if (path === '/api/items' || path === '/api/orders') {
     response.writeHead(200, {
       'content-type': 'application/json',
@@ -42,7 +49,9 @@ const app = createHttpServer((request, response) => {
     ? '<!doctype html><html><body><main>Something went wrong</main></body></html>'
     : path.startsWith('/dual')
       ? DUAL_PAGE_HTML
-      : '<!doctype html><html><body><main>Orders are ready</main></body></html>');
+      : path.startsWith('/hang')
+        ? HANG_PAGE_HTML
+        : '<!doctype html><html><body><main>Orders are ready</main></body></html>');
 });
 let appBaseUrl: string;
 let witness: WitnessHandle;
@@ -309,6 +318,35 @@ describe('page.observed record retention', () => {
             expect.objectContaining({ method: 'POST', status: 200, url: expect.stringContaining('/api/orders') }),
           ]),
         );
+      }
+    } finally {
+      await browser.close();
+    }
+  });
+
+  it('records name the requests that left an unsettled page unsettled', async () => {
+    await registerPageContext({ pages: [{ id: 'tenant.page-hang', path: '/hang' }] });
+    const session = await openSession('tests/orders-hang');
+    const debuggingPort = await freePort();
+    const browser = await chromium.launch({ args: [`--remote-debugging-port=${debuggingPort}`] });
+    try {
+      expect((await registerObserver(session, debuggingPort)).status).toBe(200);
+      const page = await (await browser.newContext()).newPage();
+      await page.goto(`${appBaseUrl}/hang`);
+      // The bounded observer flush still emits the refused visit; the
+      // poll waits for the whole flush budget, not a guessed instant.
+      await expect.poll(
+        async () => (await getRecords()).filter((record) => record['kind'] === 'page.observed').length,
+        { timeout: 30_000 },
+      ).toBe(2);
+      const records = (await getRecords()).filter((record) => record['kind'] === 'page.observed');
+      expect(records).toHaveLength(2);
+      for (const record of records) {
+        const payload = recordPayload(record) as { loads: { refusalReasons: string[] }; unsettledRequests: unknown };
+        expect(payload.loads.refusalReasons).toContain('PAGE_API_UNSETTLED');
+        expect(payload['unsettledRequests']).toEqual([
+          { method: 'GET', url: '/api/hang', errorText: 'outstanding' },
+        ]);
       }
     } finally {
       await browser.close();
