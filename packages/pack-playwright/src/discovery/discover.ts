@@ -143,6 +143,12 @@ export interface DiscoverResult {
    * was unreadable.
    */
   projectStorageStates?: Record<string, string>;
+  /**
+   * Playwright project name → the per-test timeout (ms) the runner
+   * resolved for it (see `NativeListResult.projectTimeouts`). Absent when
+   * no project reported a usable one.
+   */
+  projectTimeouts?: Record<string, number>;
   /** Static registration sites guarded by Gateforge environment state. */
   registrationWarnings: StaticRegistrationWarning[];
   /**
@@ -373,6 +379,7 @@ export async function discoverTestCatalog(options: DiscoverOptions): Promise<Dis
       ...(native.projectStorageStates !== undefined
         ? { projectStorageStates: native.projectStorageStates }
         : {}),
+      ...(native.projectTimeouts !== undefined ? { projectTimeouts: native.projectTimeouts } : {}),
       registrationWarnings: scan.registrationWarnings,
       configWarnings,
       fileVerdict: (file: string): RunnerFileVerdict =>

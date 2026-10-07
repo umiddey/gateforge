@@ -577,6 +577,10 @@ export function planExpectedSet(catalog: TestCatalog): PlannedRow[] {
  *     enumeration captured them.
  *   projectStorageStates: project name → the `use.storageState` path it
  *     declared, as the enumeration captured it.
+ *   projectTimeouts: project name → the per-test timeout (ms) the runner
+ *     resolved for it, as the enumeration read it from the JSON report.
+ *     Carried as data; the synthesized config applies the engine's 60 s
+ *     floor (`effectiveProjectTimeoutMs`).
  *
  * Returns:
  *   ProjectScope[]: one entry per project that owns at least one file,
@@ -586,6 +590,7 @@ export function plannedProjectScopes(
   rows: readonly PlannedRow[],
   projectDependencies?: Readonly<Record<string, readonly string[]>>,
   projectStorageStates?: Readonly<Record<string, string>>,
+  projectTimeouts?: Readonly<Record<string, number>>,
 ): ProjectScope[] {
   const filesByProject = new Map<string, Set<string>>();
   for (const row of rows) {
@@ -599,6 +604,7 @@ export function plannedProjectScopes(
     .map(([name, files]) => {
       const dependencies = [...new Set(projectDependencies?.[name] ?? [])].sort();
       const storageState = projectStorageStates?.[name];
+      const timeoutMs = projectTimeouts?.[name];
       return {
         name,
         files: [...files].sort(),
@@ -606,6 +612,7 @@ export function plannedProjectScopes(
         // Absent for a project that declares no state — that project runs
         // with no session, which is what the `setup` project needs.
         ...(storageState === undefined ? {} : { storageState }),
+        ...(timeoutMs === undefined ? {} : { timeoutMs }),
       };
     })
     .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));

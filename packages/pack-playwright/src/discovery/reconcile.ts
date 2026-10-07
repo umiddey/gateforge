@@ -127,6 +127,17 @@ export interface NativeListResult {
    * no-named-project verdict.
    */
   projectNames?: string[];
+  /**
+   * Project name → the per-test timeout (ms) the RUNNER resolved for it,
+   * as the json reporter rebuilt `config.projects[].timeout` (data, never
+   * the consumer config). Only finite positive numbers are kept: `0`
+   * (Playwright's "no timeout"), negatives and non-numbers are absence.
+   * Absent when no project reported a usable timeout. Playwright reports
+   * its own 30 s default for a project that declared none, so a consumer
+   * of this field must treat it as a floor-able value (see
+   * `effectiveProjectTimeoutMs`), not as proof of a declaration.
+   */
+  projectTimeouts?: Record<string, number>;
 }
 
 /**
@@ -342,7 +353,7 @@ interface ReporterSpec {
 }
 /** Minimal parsed JSON-reporter document shape. */
 interface ReporterDocument {
-  config?: { rootDir?: string; projects?: Array<{ name?: string }> };
+  config?: { rootDir?: string; projects?: Array<{ name?: string; timeout?: unknown }> };
   suites?: ReporterSuite[];
   errors?: Array<{ message?: string }>;
 }
@@ -596,6 +607,7 @@ export async function listNativePlaywrightTests(options: {
   // no named project, which test-gates need for the per-project
   // identity join (catalog rows key by project name).
   const projectNames = document.config?.projects?.map((project) => project.name ?? '');
+  const projectTimeouts = readProjectTimeouts(document.config?.projects);
   // The runner reports files relative to ITS rootDir — the config
   // directory's rootDir when the document omits one. Resolve against the
   // CHILD's cwd (the config directory), then normalize to repo-relative:
@@ -726,7 +738,35 @@ export async function listNativePlaywrightTests(options: {
     ...(projectStorageStates !== undefined ? { projectStorageStates } : {}),
     ...(testFileScope !== undefined ? { testFileScope } : {}),
     ...(projectNames !== undefined ? { projectNames } : {}),
+    ...(projectTimeouts !== undefined ? { projectTimeouts } : {}),
   };
+}
+
+/**
+ * Reads the per-project test timeouts out of the JSON report's
+ * `config.projects[]`.
+ *
+ * Args:
+ *   projects: the report's `config.projects`, as untrusted JSON.
+ *
+ * Returns:
+ *   Record<string, number> | undefined: project name → timeout ms for each
+ *   NAMED project that reported a finite positive number (null-prototype,
+ *   since a project name is candidate data); undefined when none did.
+ */
+function readProjectTimeouts(
+  projects: ReadonlyArray<{ name?: string; timeout?: unknown }> | undefined,
+): Record<string, number> | undefined {
+  if (!Array.isArray(projects)) return undefined;
+  const timeouts = Object.create(null) as Record<string, number>;
+  for (const project of projects) {
+    const name = project?.name;
+    const timeout = project?.timeout;
+    if (typeof name !== 'string' || name.length === 0) continue;
+    if (typeof timeout !== 'number' || !Number.isFinite(timeout) || timeout <= 0) continue;
+    timeouts[name] = timeout;
+  }
+  return Object.keys(timeouts).length > 0 ? timeouts : undefined;
 }
 
 /**

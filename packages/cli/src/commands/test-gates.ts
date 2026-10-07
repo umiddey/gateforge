@@ -2647,6 +2647,10 @@ async function runSupervisedTestGatesInner(
   // state its setup project saved. Empty when the enumeration captured
   // none — absence, never a guessed empty one.
   let projectStorageStates: Record<string, string> = {};
+  // The per-test timeout (ms) each project's runner resolved, as the
+  // enumeration read it from the JSON report. Empty when none reported a
+  // usable one — the engine's 60 s default then applies.
+  let projectTimeouts: Record<string, number> = {};
   try {
     // collectPytest is REQUIRED here (GAP 1 fix, server-witnessed
     // channel): the supervised run's expected set, mapping resolution,
@@ -2673,6 +2677,7 @@ async function runSupervisedTestGatesInner(
     nativeInstances = discovered.nativeInstances;
     projectDependencies = discovered.projectDependencies ?? {};
     projectStorageStates = discovered.projectStorageStates ?? {};
+    projectTimeouts = discovered.projectTimeouts ?? {};
     projectGraphCaptured = discovered.projectDependencies !== undefined;
     for (const warning of discovered.registrationWarnings) {
       writeLine(
@@ -4368,7 +4373,12 @@ async function runSupervisedTestGatesInner(
   // outranks every declaration and bypasses this path exactly as before, a
   // run that planned no project has nothing to freeze, and a non-native
   // runner never enters it.
-  const plannedScopes = plannedProjectScopes(plannedRows, projectDependencies, projectStorageStates);
+  const plannedScopes = plannedProjectScopes(
+    plannedRows,
+    projectDependencies,
+    projectStorageStates,
+    projectTimeouts,
+  );
   let freezePlan: NativeFreezePlan | null = null;
   let freezeTargets: GeneratedTargetClass | null = null;
   let freezePrerequisites: PrerequisiteIdentity[] = [];

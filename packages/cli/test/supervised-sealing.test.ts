@@ -569,4 +569,17 @@ describe('project dependency closure (a narrowed run still runs the setup it dep
       { name: 'setup', files: [SETUP_FILE] },
     ]);
   });
+
+  it('carries the runner-reported per-project timeout onto the planned scope as data', () => {
+    const scopes = plannedProjectScopes(
+      plannedRowsWithProjectDependencies([plannedRow()], [plannedRow(), setupRow()], { chromium: ['setup'] }),
+      { chromium: ['setup'] },
+      undefined,
+      { chromium: 180_000, unrelated: 90_000 },
+    );
+    expect(scopes).toEqual([
+      { name: 'chromium', files: [FILE], dependencies: ['setup'], timeoutMs: 180_000 },
+      { name: 'setup', files: [SETUP_FILE] },
+    ]);
+  });
 });

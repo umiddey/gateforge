@@ -120,6 +120,32 @@ export interface TrustedReporterOptions {
   controlSpecPath?: string;
 }
 
+/** The engine's per-test timeout (ms) when a project declares no larger one. */
+export const DEFAULT_TEST_TIMEOUT_MS = 60_000;
+
+/**
+ * The per-test timeout a supervised project runs with, given the timeout
+ * the runner reported for it in list mode.
+ *
+ * The engine default is a FLOOR: Playwright reports its own 30 s default
+ * for a project that declared nothing, and adopting that would silently
+ * tighten every consumer that never set a timeout. A declared timeout
+ * larger than the default is honoured. Missing, zero (Playwright's
+ * "unlimited"), negative or non-finite values fall back to the default.
+ *
+ * Args:
+ *   reportedMs: the `config.projects[].timeout` the runner reported, if any.
+ *
+ * Returns:
+ *   number: `reportedMs` when it is a finite number above the default,
+ *   else {@link DEFAULT_TEST_TIMEOUT_MS}.
+ */
+export function effectiveProjectTimeoutMs(reportedMs: number | undefined): number {
+  return reportedMs !== undefined && Number.isFinite(reportedMs) && reportedMs > DEFAULT_TEST_TIMEOUT_MS
+    ? reportedMs
+    : DEFAULT_TEST_TIMEOUT_MS;
+}
+
 /** Inputs for one trusted config synthesis. */
 export interface TrustedConfigInput {
   /** Absolute repo root (the runner's testDir, and the identity root). */
@@ -174,7 +200,7 @@ export interface TrustedConfigInput {
    * before.
    */
   controlSpecPath?: string;
-  /** Per-test timeout ms (default 60_000). */
+  /** Per-test timeout ms for projects with no raised timeout (default 60_000). */
   testTimeoutMs?: number;
 }
 
@@ -222,6 +248,13 @@ export interface ProjectScope {
    * are always repo-relative to the identity root.
    */
   testDir?: string;
+  /**
+   * The per-test timeout (ms) the runner resolved for this project in
+   * `--list` mode (data from the JSON report, never consumer code). It is
+   * written as the project's own `timeout` only when it exceeds the engine
+   * default; see {@link effectiveProjectTimeoutMs}.
+   */
+  timeoutMs?: number;
 }
 
 /** Thrown when a project-declared browser state may not be read. */
@@ -432,6 +465,9 @@ export function synthesizeTrustedConfig(input: TrustedConfigInput): {
       ...(operatorState === undefined && scope.storageState !== undefined
         ? { storageState: scope.storageState }
         : {}),
+      ...(effectiveProjectTimeoutMs(scope.timeoutMs) > DEFAULT_TEST_TIMEOUT_MS
+        ? { timeoutMs: effectiveProjectTimeoutMs(scope.timeoutMs) }
+        : {}),
     }))
     .filter((scope) => scope.name.length > 0 && scope.files.length > 0)
     .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
@@ -484,6 +520,8 @@ export function synthesizeTrustedConfig(input: TrustedConfigInput): {
       // collects from there; every consumer project stays on the config's
       // repo-root `testDir`, exactly as before.
       ...(scope.testDir === undefined ? {} : { testDir: scope.testDir }),
+      // The project's own test timeout, only when it RAISES the default.
+      ...(scope.timeoutMs === undefined ? {} : { timeout: scope.timeoutMs }),
       ...(edges.length > 0 ? { dependencies: edges } : {}),
       // The declared state, for THIS project only. It rides in `use`
       // rather than at the top level so the `setup` project that writes
@@ -508,6 +546,9 @@ export function synthesizeTrustedConfig(input: TrustedConfigInput): {
             `  projects: ${JSON.stringify(
               plainProjects.map((name) => ({
                 name,
+                ...(loneScope?.name === name && loneScope.timeoutMs !== undefined
+                  ? { timeout: loneScope.timeoutMs }
+                  : {}),
                 ...(loneScope?.name === name && loneScope.storageState !== undefined
                   ? { use: { storageState: loneScope.storageState } }
                   : {}),
@@ -519,7 +560,7 @@ export function synthesizeTrustedConfig(input: TrustedConfigInput): {
     '  fullyParallel: false,',
     '  retries: 0,',
     '  forbidOnly: true,',
-    `  timeout: ${String(input.testTimeoutMs ?? 60_000)},`,
+    `  timeout: ${String(input.testTimeoutMs ?? DEFAULT_TEST_TIMEOUT_MS)},`,
     '  reporter: [',
     "    ['list'],",
     `    [${JSON.stringify(input.reporterEntry)}, ${JSON.stringify(reporterOptions)}],`,
