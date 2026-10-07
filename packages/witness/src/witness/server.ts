@@ -256,6 +256,7 @@ import type {
   SessionResolveRequest,
   SessionPageObserverRequest,
   SessionPageObserverFlushRequest,
+  ObservedProxy,
   PageSweepRequest,
   TestSession,
   TwinShapeReport,
@@ -506,8 +507,8 @@ interface WitnessState {
   adapters: Map<string, EvidenceAdapter>;
   /** Loopback host matching the browser-facing app's cookie origin. */
   proxyHost: string;
-  /** Numeric loopback address resolved once before any proxy listens. */
-  proxyBindHost: string;
+  /** Every loopback address the app hostname resolved to, served by every proxy. */
+  proxyBindHosts: string[];
   classifications: Record<string, Classification>;
   ledger: Map<string, IssuedRecord>;
   /**
@@ -577,7 +578,7 @@ interface WitnessState {
    */
   observedResponses: ObservedResponseAttribution[];
   observedSeq: number;
-  proxyServer: Server | null;
+  proxyServer: ObservedProxy | null;
   nowIso: () => string;
   stopped: boolean;
   /**
@@ -966,28 +967,48 @@ function parseCollectionRows(
   return { ...declared, ids, error: null };
 }
 
+/** Bounded bind attempts for one proxy port (a later address can hit EADDRINUSE). */
+const PROXY_BIND_ATTEMPTS = 5;
+
+/** Closes every listener of one proxy (a sealed channel is gone). */
+async function closeProxyListeners(servers: Server[]): Promise<void> {
+  await Promise.all(
+    servers.map(
+      (server) =>
+        new Promise<void>((resolveClose) => {
+          server.close(() => resolveClose());
+        }),
+    ),
+  );
+}
+
 /**
- * Starts one loopback reverse-proxy server forwarding to the run's
+ * Starts one loopback reverse proxy forwarding to the run's
  * attested proxy target. `sessionId` names the session the port belongs
  * to (null = the shared unattributed proxy): every exchange completing
  * on this port is recorded as an engine observation stamped with that
  * session id and the witness-monotonic completion tick.
+ *
+ * The proxy listens on EVERY loopback address the app hostname
+ * resolved to, all on ONE port: a browser tries every resolved
+ * address, but a Node-only client (Playwright's APIRequestContext)
+ * connects to the single address its resolver picks.
  *
  * Args:
  *   state: running witness state.
  *   sessionId: owning session id, or null for the shared proxy.
  *
  * Returns:
- *   Promise<Server>: the listening server (OS-assigned loopback port).
+ *   Promise<ObservedProxy>: every listener plus the shared port.
  *
  * Throws:
- *   Error: when the server fails to bind.
+ *   Error: when the proxy fails to bind.
  */
 async function startObservedProxy(
   state: WitnessState,
   sessionId: string | null,
   chaosSession: string,
-): Promise<Server> {
+): Promise<ObservedProxy> {
   const proxyTargetUrl = new URL(state.options.proxyTarget as string);
   // One scheduler per proxy port: a session's `k` and its recorded
   // schedule are its own, so two tests in one run can never shift each
@@ -1026,7 +1047,10 @@ async function startObservedProxy(
     if (collectionRoutes.size === 0) return null;
     return collectionRoutes.get(`${method} ${path}`) ?? null;
   };
-  const server = createServer((req, res) => {
+  // One request handler shared by EVERY listener of this
+  // proxy: each loopback address gets its own Server
+  // object, all serving the same exchanges.
+  const proxyHandler = (req: IncomingMessage, res: ServerResponse): void => {
     const chunks: Buffer[] = [];
     req.on('data', (chunk: Buffer) => chunks.push(chunk));
     req.on('end', () => {
@@ -1216,22 +1240,66 @@ async function startObservedProxy(
       if (body.length > 0) forward.write(body);
       forward.end();
     });
-  });
-  await new Promise<void>((resolveListen, rejectListen) => {
-    server.once('error', rejectListen);
-    server.listen(0, state.proxyBindHost, () => resolveListen());
-  });
-  server.removeAllListeners('error');
-  return server;
+  };
+  // ONE port for every loopback address the app hostname
+  // resolves to: the first listener asks the OS for a free
+  // port and the rest share it. A browser tries every
+  // resolved address, but a Node-only client (Playwright's
+  // APIRequestContext) connects to the single address its
+  // resolver picks, so every loopback address must answer
+  // on the same port. A later address can collide with
+  // another process that grabbed the port in the gap: close
+  // every listener and retry on a fresh port (bounded),
+  // then fail with the bind error.
+  for (let attempt = 1; attempt <= PROXY_BIND_ATTEMPTS; attempt += 1) {
+    const servers: Server[] = [];
+    let port = 0;
+    try {
+      for (const bindHost of state.proxyBindHosts) {
+        const server = createServer(proxyHandler);
+        await new Promise<void>((resolveListen, rejectListen) => {
+          server.once('error', rejectListen);
+          server.listen(port, bindHost, () => resolveListen());
+        });
+        server.removeAllListeners('error');
+        if (port === 0) {
+          const address = server.address();
+          if (address === null || typeof address === 'string') {
+            throw new WitnessStartupError('observation proxy failed to bind an OS-assigned port');
+          }
+          port = address.port;
+        }
+        servers.push(server);
+      }
+      return { servers, port };
+    } catch (error) {
+      await closeProxyListeners(servers);
+      if (
+        attempt === PROXY_BIND_ATTEMPTS ||
+        (error as NodeJS.ErrnoException | null)?.code !== 'EADDRINUSE'
+      ) {
+        throw new WitnessStartupError(
+          `observation proxy failed to bind '${state.proxyHost}': ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+      // EADDRINUSE on a later address: another process took
+      // the port between assignment and this bind. Retry on
+      // a fresh OS-assigned port.
+    }
+  }
+  // Unreachable: every attempt returns or throws above.
+  throw new WitnessStartupError(`observation proxy failed to bind '${state.proxyHost}'`);
 }
 
-/** The base URL of a started observation-proxy server. */
-function proxyUrlOf(state: WitnessState, server: Server): string {
-  const address = server.address();
-  if (address === null || typeof address === 'string') {
-    throw new WitnessStartupError('observation proxy failed to bind an OS-assigned port');
-  }
-  return `http://${formatHost(state.proxyHost)}:${address.port}`;
+/**
+ * The base URL of a started observation proxy: the HOSTNAME
+ * (never an IP, so Host headers stay exactly as the suite
+ * addresses them) plus the one port every listener shares.
+ */
+function proxyUrlOf(state: WitnessState, proxy: ObservedProxy): string {
+  return `http://${formatHost(state.proxyHost)}:${proxy.port}`;
 }
 
 /**
@@ -1252,19 +1320,17 @@ async function startSessionProxy(state: WitnessState, session: TestSession): Pro
     session.proxyUrl = null;
     return;
   }
-  const server = await startObservedProxy(state, session.sessionId, session.testId);
-  session.proxyServer = server;
-  session.proxyUrl = proxyUrlOf(state, server);
+  const proxy = await startObservedProxy(state, session.sessionId, session.testId);
+  session.proxyServer = proxy;
+  session.proxyUrl = proxyUrlOf(state, proxy);
 }
 
-/** Closes one session's dedicated proxy port (sealed = channel gone). */
+/** Closes one session's dedicated proxy listeners (sealed = channel gone). */
 async function stopSessionProxy(session: TestSession): Promise<void> {
-  const server = session.proxyServer;
+  const proxy = session.proxyServer;
   session.proxyServer = null;
-  if (server === null) return;
-  await new Promise<void>((resolveClose) => {
-    server.close(() => resolveClose());
-  });
+  if (proxy === null) return;
+  await closeProxyListeners(proxy.servers);
 }
 
 /** Detaches the independent browser observer when its test session ends. */
@@ -1431,19 +1497,25 @@ export async function startWitness(options: WitnessOptions): Promise<WitnessHand
     }
   }
   // Keep the browser-facing logical hostname and the control host separate.
-  // Resolve the proxy bind address once, and never bind a non-loopback result.
+  // Resolve the proxy bind addresses once, and never bind a non-loopback result.
   const proxyHostname = options.proxyTarget ? new URL(options.proxyTarget).hostname : null;
   const proxyHost = proxyHostname === null
     ? options.host ?? LOOPBACK_HOSTNAME
     : proxyHostname.replace(/^\[|\]$/g, '');
-  let proxyBindHost = proxyHost;
+  let proxyBindHosts = proxyHostname === null ? [proxyHost] : [];
   if (proxyHostname !== null) {
     await assertLoopback(options.proxyTarget as string, 'observation proxy target');
-    const resolved = await lookup(proxyHost);
-    if (!isLoopbackAddress(resolved.address)) {
+    // The app hostname can resolve to SEVERAL loopback addresses
+    // (`localhost` commonly answers ::1 and the IPv4 loopback): a
+    // browser tries every one, but a Node-only client connects to
+    // the single address its resolver picks. Fail closed on any
+    // non-loopback answer, and serve every loopback address.
+    const resolved = await lookup(proxyHost, { all: true });
+    const addresses = resolved.map((record) => record.address);
+    if (addresses.length === 0 || !addresses.every(isLoopbackAddress)) {
       throw new AttestationError(`observation proxy hostname '${proxyHost}' resolved to a non-loopback bind address`);
     }
-    proxyBindHost = resolved.address;
+    proxyBindHosts = [...new Set(addresses)];
   }
 
   const state: WitnessState = {
@@ -1461,7 +1533,7 @@ export async function startWitness(options: WitnessOptions): Promise<WitnessHand
     },
     adapters,
     proxyHost,
-    proxyBindHost,
+    proxyBindHosts,
     classifications,
     ledger: new Map(),
     preObservations: new Map(),
@@ -6572,9 +6644,7 @@ async function stopWitness(state: WitnessState): Promise<void> {
   if (state.proxyServer !== null) {
     const proxy = state.proxyServer;
     state.proxyServer = null;
-    await new Promise<void>((resolveClose) => {
-      proxy.close(() => resolveClose());
-    });
+    await closeProxyListeners(proxy.servers);
   }
   for (const session of state.sessions.values()) {
     await stopSessionProxy(session);

@@ -450,6 +450,21 @@ export interface BrowserVisibleResponse {
 }
 
 /**
+ * One started observation proxy: every loopback address the
+ * run's app hostname resolves to, served on ONE shared port.
+ * A browser tries every resolved address, but a Node-only
+ * client (Playwright's APIRequestContext) connects to the
+ * single address its resolver picks, so every loopback
+ * address must answer on the same port.
+ */
+export interface ObservedProxy {
+  /** One listener per resolved loopback address (never empty). */
+  servers: Server[];
+  /** The single port every listener shares. */
+  port: number;
+}
+
+/**
  * Witness-held session state (plan Phase 1). Created only by
  * `POST /sessions/open` (the trusted supervisor, verifier-key
  * authenticated — enforcement-review fix 3); sealed by
@@ -492,8 +507,8 @@ export interface TestSession {
    * an observation proxy; null otherwise.
    */
   proxyUrl: string | null;
-  /** The dedicated proxy server (closed when the session seals). */
-  proxyServer: Server | null;
+  /** The dedicated proxy listeners (closed when the session seals). */
+  proxyServer: ObservedProxy | null;
   /**
    * Phase 4 claim injection: the mapped obligation claims the supervisor
    * registered at open (sorted, deduplicated, obligation-id-shaped;

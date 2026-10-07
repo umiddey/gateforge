@@ -162,6 +162,35 @@ async function runCliProcess(cwd: string, env: Record<string, string>, args: rea
   return { code: code ?? 1, stdout, stderr };
 }
 
+/** One ledger record shape (the witness's issued record). */
+interface LedgerRecord {
+  kind?: string;
+  testId?: string;
+  payload?: { exchanges?: Array<{ url?: string }> };
+}
+
+/**
+ * The recorded exchange paths of the session ledger — of
+ * ONE test when its test id is given, of every test
+ * otherwise (a path is the exchange URL's pathname).
+ */
+function recordedExchangePaths(records: LedgerRecord[], testId?: string): string[] {
+  return records
+    .filter(
+      (record) =>
+        record.kind === 'http.observed' &&
+        (testId === undefined || record.testId === testId),
+    )
+    .flatMap((record) => record.payload?.exchanges ?? [])
+    .map((exchange) => {
+      try {
+        return new URL(exchange.url ?? '').pathname;
+      } catch {
+        return exchange.url ?? '';
+      }
+    });
+}
+
 describe('witnessed API request channel through the actual CLI', () => {
   it('witnesses APIRequestContext traffic and keeps beforeAll setup uncredited', async () => {
     const app = await startApiApp();
@@ -237,22 +266,33 @@ tests:
         // snapshot carries /api/items but never /api/setup (a direct
         // setup call never rides any session proxy).
         expect(app.requestsByPath.get('/api/setup')).toBe(1);
-        const records = JSON.parse(readFileSync(repo.path('.gateforge/test-gates/records.json'), 'utf8')) as Array<{
-          kind?: string;
-          payload?: { exchanges?: Array<{ url?: string }> };
-        }>;
-        const recordedPaths = records
-          .filter((record) => record.kind === 'http.observed')
-          .flatMap((record) => record.payload?.exchanges ?? [])
-          .map((exchange) => {
-            try {
-              return new URL(exchange.url ?? '').pathname;
-            } catch {
-              return exchange.url ?? '';
-            }
-          });
+        const records = JSON.parse(readFileSync(repo.path('.gateforge/test-gates/records.json'), 'utf8')) as LedgerRecord[];
+        const recordedPaths = recordedExchangePaths(records);
         expect(recordedPaths.some((path) => path.endsWith('/api/items'))).toBe(true);
         expect(recordedPaths.some((path) => path.endsWith('/api/setup'))).toBe(false);
+        // Per-test attribution: each test's OWN session ledger
+        // carries its /api/items exchange — the `request`
+        // fixture AND the imported `request.newContext()` each
+        // ride their own session's proxy, not any other path.
+        // The runner-outcomes document joins each test's title
+        // to the runner test id its session (and therefore its
+        // records) were opened under.
+        const outcomesDoc = JSON.parse(readFileSync(repo.path('.gateforge/test-gates/runner-outcomes.json'), 'utf8')) as {
+          outcomes?: Array<{ testId?: string; titlePath?: string[] }>;
+        };
+        const outcomes = outcomesDoc.outcomes ?? [];
+        for (const title of [TITLE_FIXTURE, TITLE_IMPORTED]) {
+          const row = outcomes.find((candidate) => (candidate.titlePath ?? []).includes(title));
+          const testId = row?.testId;
+          // A missing row (or id) means the test never ran under
+          // a session at all: the join below must not pass
+          // vacuously, so it filters on an id no record carries.
+          expect(testId, `runner test id for '${title}'`).toBeDefined();
+          expect(
+            recordedExchangePaths(records, testId ?? '').some((path) => path.endsWith('/api/items')),
+            `session ledger for runner test ${String(testId)}`,
+          ).toBe(true);
+        }
       });
     } finally {
       await app.stop();

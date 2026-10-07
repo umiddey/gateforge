@@ -18,7 +18,11 @@
   to the app inside worker hooks and module scope, so setup traffic stays
   uncredited. Kind inference no longer proposes `api-e2e`/`unit` from a
   Gateforge-pack import, so `tests mark --kind observed-e2e` is
-  declarable for exactly the tests the channel witnesses.
+  declarable for exactly the tests the channel witnesses. The observation
+  proxies listen on every loopback address the app hostname resolves to
+  (a name such as `localhost` answers both `::1` and the IPv4 loopback),
+  so a Node-side client whose resolver picks the other family still
+  reaches the session proxy.
 
 - **The sweep progress line names the requests that refused a page.** A
   page printing only `refused PAGE_API_UNSETTLED (782 ms)` left nobody any
