@@ -973,7 +973,7 @@ function requestedConfigConflicts(
  * 2. A real terminal — ONE question ("What should Gateforge do
  *    for you?") with three choices, each explained in one line.
  * 3. No terminal and no `--preset` — light only, stated ONCE on
- *    the line that also names `--preset <light|normal|strict>`.
+ *    the line that also names the `mode:` edit in .gateforge.yml.
  *    Gateforge never guesses normal or strict for someone who is
  *    not there: guessing strict blocks a team, guessing normal
  *    pretends a gate nobody asked for.

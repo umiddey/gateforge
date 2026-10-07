@@ -256,7 +256,7 @@ import {
   evaluateApprovedPolicy,
   resolveApprovedPolicyDigest,
 } from '../trusted-policy.js';
-import { loadConfigAt, parseRunFormat, rejectUnknownFlags, VERSION } from './common.js';
+import { loadConfigAt, parseRunFormat, rejectUnknownFlags, VERSION, warnUndeclaredRuntime } from './common.js';
 import { resolveVerifierKeyring, type VerifierKeyring } from '../verifier-keys.js';
 import { renderEndpointInventory } from '../endpoint-report.js';
 import { candidateTreeCoversCommit, computeCandidateTreeSnapshot, resolveGitDir, sanitizedAuthorityEnv } from '../candidate-tree.js';
@@ -1190,6 +1190,10 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
   // fails closed. Legacy v1 `recordIdsMac` never authorizes, even when
   // it verifies.
   const config = loadConfigAt(io.cwd);
+  // Undeclared runtime document (fresh-clone snag 5g): the
+  // owner's `.gateforge/runtime.yml` is ignored until this
+  // line exists — say so before the gate runs.
+  warnUndeclaredRuntime(io, config);
   // A merge-request pipeline with no base commit would resolve `auto` to
   // the local staged diff — zero changed files in a CI job, and a gate
   // that fails an hour later on debt nobody changed. Refuse in seconds.

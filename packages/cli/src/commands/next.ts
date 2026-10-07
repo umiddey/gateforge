@@ -75,7 +75,7 @@ import { computeEvaluationScope, detectStagedWorkingTreeMismatches } from '../sc
 import { httpRoutesView, resolveStateDir } from '../state.js';
 import { gateforgeOwnedInputs } from '../gateforge-owned.js';
 import { engineGeneratedStateFileFilter } from '../state-artifacts.js';
-import { loadConfigAt, rejectUnknownFlags } from './common.js';
+import { loadConfigAt, rejectUnknownFlags, warnUndeclaredRuntime } from './common.js';
 import { resolveVerifierKeyring } from '../verifier-keys.js';
 import { loadCacheExclusions } from '../cache-exclusions.js';
 import { singletonPerTenantGuidanceLines } from '../singleton-guidance.js';
@@ -984,6 +984,9 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
   const diffScoped = options['changed'] === true;
   const asJson = options['json'] === true;
   const config = loadConfigAt(io.cwd);
+  // Undeclared runtime document (fresh-clone snag 5g):
+  // navigation prints what the gates would ignore.
+  warnUndeclaredRuntime(io, config);
   const cacheExclusions = loadCacheExclusions(io.cwd, config);
   const providerIdentity: ChangedProvider = diffScoped
     ? resolveProvider(config.changed.provider, io.cwd, io.env).provider

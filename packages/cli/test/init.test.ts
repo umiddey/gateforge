@@ -543,8 +543,11 @@ describe('gateforge init', () => {
       expect(code).toBe(0);
       expect(existsSync(repo.path('.gateforge/hooks/gateforge-check.mjs'))).toBe(false);
       expect(existsSync(repo.path('.pre-commit-config.yaml'))).toBe(false);
-      // The tip now names the goal, not the legacy --blocking flag.
-      expect(stdout).toContain('--preset <light|normal|strict>');
+      // The tip now names the goal edit, not the legacy --blocking
+      // flag or a --preset re-run (which exits 2 on the config
+      // this run just wrote).
+      expect(stdout).toContain('a human must choose the goal');
+      expect(stdout).toContain('edit `mode:` in .gateforge.yml');
     });
   });
 
@@ -776,6 +779,41 @@ describe('gateforge init scan-and-choose (Phase 1: scan, recommend, choose)', ()
       // typescript language default, with no evidence behind it.
       expect(stdout).toMatch(/gateforge\.pack-http — no .*signal/);
       expect(stdout).not.toContain('frontend/src/client/index.ts');
+    });
+  });
+
+  it('a nested frontend declaring react-router-dom recommends the React Router pack (fresh-clone snag 6)', async () => {
+    await withTempRepo({}, async (repo) => {
+      // Exactly the fresh-clone shape: the manifest lives in the nested
+      // frontend workspace, not at the root.
+      repo.writeFiles({
+        'frontend/package.json':
+          '{ "name": "frontend", "private": true, "dependencies": { "react-router-dom": "^7.18.2" } }\n',
+      });
+      const { code, stdout } = await runCli(repo, ['init']);
+      expect(code, stdout).toBe(0);
+      expect(stdout).toContain('signals: react-router');
+      // One reason, naming the concrete evidence file.
+      expect(stdout).toMatch(
+        /gateforge\.pack-react-router — .*'react-router-dom'.*frontend\/package\.json/,
+      );
+      const config = loadConfig(join(repo.root, '.gateforge.yml'));
+      expect(config.plugins.map((plugin) => plugin.id)).toEqual(['gateforge.pack-react-router']);
+    });
+  });
+
+  it('react-router in devDependencies recommends the pack too (fresh-clone snag 6)', async () => {
+    await withTempRepo({}, async (repo) => {
+      repo.writeFiles({
+        'package.json':
+          '{ "name": "root", "private": true, "devDependencies": { "react-router": "^7.18.2" } }\n',
+      });
+      const { code, stdout } = await runCli(repo, ['init']);
+      expect(code, stdout).toBe(0);
+      expect(stdout).toContain('signals: react-router');
+      expect(stdout).toMatch(/gateforge\.pack-react-router — .*'react-router'.*package\.json/);
+      const config = loadConfig(join(repo.root, '.gateforge.yml'));
+      expect(config.plugins.map((plugin) => plugin.id)).toEqual(['gateforge.pack-react-router']);
     });
   });
 
@@ -1086,7 +1124,7 @@ const UNMATCHED_ROUTES_INIT_NOTE =
   "note: routes whose name matches no table will be REPORTED, not blocking. " +
   "set 'endpoints:\n  unmatchedRoutes: block' in .gateforge.yml (or re-run with --unmatched-routes block) to block on them\n";
 
-const QUEUE_REPO_INIT_OUTPUT_WITHOUT_OBSERVER = "no terminal: writing the light preset (report everything, block nothing) — a human must choose the goal: re-run with --preset <light|normal|strict> (in a terminal, `gateforge init` asks)\nscan:\n  languages: javascript\n  signals: (none)\nrecommended:\n  plugins: gateforge.pack-http\n  why: gateforge.pack-http — no repository signal — the javascript default set\n  policy: persistence:* on user-facing tables; transport-only HTTP on consumed endpoints\n  proof: overlay (tests/e2e/gateforge/)\nskipped:\n  gateforge.pack-task — no semantic verifier (VERIFIER_UNSUPPORTED)\n  http:frontend-request-observed — not provable yet: no independent browser channel\n  coveragePolicy / strictE2E — owner opt-in\ntip: re-run with --plugins <comma,list> to add detectors (entries already in .gateforge.yml are kept; nothing else in the file changes)\n" +
+const QUEUE_REPO_INIT_OUTPUT_WITHOUT_OBSERVER = "no terminal: writing the light preset (report everything, block nothing) — a human must choose the goal: edit `mode:` in .gateforge.yml (light: `mode: warn`, normal: `mode: changed`, strict: `mode: strict`) — in a terminal, `gateforge init` asks\nscan:\n  languages: javascript\n  signals: (none)\nrecommended:\n  plugins: gateforge.pack-http\n  why: gateforge.pack-http — no repository signal — the javascript default set\n  policy: persistence:* on user-facing tables; transport-only HTTP on consumed endpoints\n  proof: overlay (tests/e2e/gateforge/)\nskipped:\n  gateforge.pack-task — no semantic verifier (VERIFIER_UNSUPPORTED)\n  http:frontend-request-observed — not provable yet: no independent browser channel\n  coveragePolicy / strictE2E — owner opt-in\ntip: re-run with --plugins <comma,list> to add detectors (entries already in .gateforge.yml are kept; nothing else in the file changes)\n" +
   UNMATCHED_ROUTES_INIT_NOTE +
   "tip: non-interactive init keeps full evidence identity; use --docs-exclude <folder,...> (or --docs-exclude-file <path>, one folder per line) to opt in\ncreated: <REPO>/.gateforge.yml\ncreated: <REPO>/.gateforge/policies.yml\ncreated: <REPO>/.gateforge/classification-policy.yml\ncreated: <REPO>/.gateforge/baselines/obligations.json\ncreated: <REPO>/GATEFORGE.md\ncreated: <REPO>/tests/e2e/gateforge/README.md\n" +
   `install the enabled packs as direct dependencies (same version as the CLI): npm i -D @gate-forge/pack-http@${VERSION}\n` +

@@ -176,11 +176,15 @@ export function parseGoalAnswer(answer: string): InitPresetName {
 /**
  * How a headless owner changes the goal this run could not ask for.
  * Printed as part of the ONE line that names the written preset, so
- * the choice is stated once and the flag that changes it travels with
- * it.
+ * the choice is stated once and the way to change it travels with
+ * it. The remedy is the EDIT, never a `--preset` re-run: the run
+ * just wrote (or already had) `.gateforge.yml`, and init never
+ * rewrites an existing config — a re-run exits 2.
  */
 export const CHOOSE_ANOTHER_GOAL_ADVICE =
-  'a human must choose the goal: re-run with --preset <light|normal|strict> (in a terminal, `gateforge init` asks)';
+  'a human must choose the goal: edit `mode:` in .gateforge.yml ' +
+  '(light: `mode: warn`, normal: `mode: changed`, strict: `mode: strict`) ' +
+  '— in a terminal, `gateforge init` asks';
 
 /**
  * What this init run actually did, as the summary needs to report it.

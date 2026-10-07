@@ -75,3 +75,55 @@ describe('explain on a repo-relative path', () => {
     });
   }, 240_000);
 });
+
+describe('explain on an obligation id its sibling commands print (fresh-clone snag 5d)', () => {
+  it('resolves `<resourceId>:<contract>` to the obligation\'s resource and marks it requested', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.commitFiles({}, 'base');
+
+      const run = await runCli(repo, ['explain', 'tenant.accounts:persistence:read']);
+
+      expect(run.code, `${run.stdout}\n${run.stderr}`).toBe(0);
+      expect(run.stdout).toContain('resource tenant.accounts');
+      expect(run.stdout).toContain('decisionFingerprint:');
+      expect(run.stdout).toContain('obligations (');
+      expect(run.stdout).toContain('tenant.accounts:persistence:read');
+      // The id the caller asked about is named in the obligation list.
+      expect(run.stdout).toContain('<- requested');
+      expect(run.stdout).not.toContain('no discovered resource matches');
+    });
+  }, 240_000);
+
+  it('resolves a transport (http) obligation id too', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.writeFiles({
+        '.gateforge/policies.yml':
+          'schemaVersion: 1\npolicies:\n  - id: user-facing-http\n' +
+          '    when:\n      exposure: user-facing\n    require: [http:request-observed]\n',
+      });
+      repo.commitFiles({}, 'base');
+
+      const run = await runCli(repo, ['explain', 'tenant.accounts:http:request-observed']);
+
+      expect(run.code, `${run.stdout}\n${run.stderr}`).toBe(0);
+      expect(run.stdout).toContain('resource tenant.accounts');
+      expect(run.stdout).toContain('tenant.accounts:http:request-observed');
+      expect(run.stdout).toContain('<- requested');
+      expect(run.stdout).not.toContain('no discovered resource matches');
+    });
+  }, 240_000);
+
+  it('keeps the unknown-target error for an obligation-shaped id outside the registry', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.commitFiles({}, 'base');
+
+      const run = await runCli(repo, ['explain', 'tenant.ghost:persistence:read']);
+
+      expect(run.code).toBe(1);
+      expect(run.stderr).toContain("no discovered resource matches 'tenant.ghost:persistence:read'");
+    });
+  }, 240_000);
+});

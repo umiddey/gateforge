@@ -69,6 +69,7 @@ describe('enforcement doctor (standard mode reports honestly)', () => {
         'policy-inputs-staged',
         'policy-inputs-vs-HEAD',
         'runner',
+        'runtime-declaration',
         'server-protection',
         'snapshot',
         'strictness-mode',

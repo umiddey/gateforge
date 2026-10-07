@@ -2,10 +2,12 @@
  * Shared command helpers: config loading, flag validation, the report
  * format vocabulary, and the tool version stamp.
  */
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadConfig, type GateforgeConfig } from '@gate-forge/core';
 import { UsageError } from '../errors.js';
 import { rejectLegacyExclusions } from '../legacy-exclusion-paths.js';
+import { writeLine, type Io } from '../io.js';
 
 /**
  * Tool version stamped into SARIF `tool.driver.version` (pin #10) and
@@ -74,6 +76,48 @@ export function parseRunFormat(value: string): ReportFormat {
 export function loadConfigAt(cwd: string): GateforgeConfig {
   rejectLegacyExclusions(cwd);
   return loadConfig(join(cwd, '.gateforge.yml'));
+}
+
+/**
+ * The default runtime document (`.gateforge/runtime.yml`):
+ * the document the gate commands read ONLY when `.gateforge.yml`
+ * declares it with a `runtime:` key.
+ */
+const DEFAULT_RUNTIME_DOCUMENT = '.gateforge/runtime.yml';
+
+/**
+ * Warns when the default runtime document exists on disk but
+ * `.gateforge.yml` never declared it.
+ *
+ * The document is a TRUSTED POLICY INPUT: it is hashed into
+ * the policy digest only when declared, so the gate commands
+ * (`check`, `test-gates`, the commit hook) resolve
+ * `config.runtime` to null and silently ignore the owner's
+ * `envAllowlist`, `prepare` and services — the first symptom
+ * is a witnessed run whose test process sees none of the
+ * `E2E_*` variables the recipe was supposed to grant. This
+ * warning is the only place that names the cause before that
+ * run. The document is NEVER read here: reading it
+ * implicitly would hash different bytes into the policy
+ * digest without the owner approving the change.
+ *
+ * Args:
+ *   io: process context (cwd + stderr).
+ *   config: the loaded `.gateforge.yml`.
+ *
+ * Returns:
+ *   void — one warning line, or nothing when the declaration
+ *   matches reality.
+ */
+export function warnUndeclaredRuntime(io: Io, config: GateforgeConfig): void {
+  if (config.runtime !== undefined) return;
+  if (!existsSync(join(io.cwd, ...DEFAULT_RUNTIME_DOCUMENT.split('/')))) return;
+  writeLine(
+    io.stderr,
+    `warning: ${DEFAULT_RUNTIME_DOCUMENT} exists but .gateforge.yml declares no runtime key — ` +
+      'its envAllowlist, prepare and services are ignored by every gate command. ' +
+      `fix: add \`runtime: ${DEFAULT_RUNTIME_DOCUMENT}\` to .gateforge.yml`,
+  );
 }
 
 /**

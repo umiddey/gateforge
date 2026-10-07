@@ -8,6 +8,7 @@
  * at exit 2. `example-e2e` class: CLI process behavior over a real
  * project tree.
  */
+import { spawn } from 'node:child_process';
 import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -358,4 +359,98 @@ describe('gateforge tests discover', () => {
       expect(badConfig.stderr).toContain('gateforge:');
     });
   });
+
+  it('a closed stdout reader never changes the exit — run twice, same exit (fresh-clone snag 5a)', async () => {
+    await withTempRepo({}, async (repo) => {
+      installConsumer(repo);
+      // A large unresolved list keeps the command writing lines long
+      // after the reader detached — the exact plumbing (`| head`, a
+      // pager that quits, a CI log tailer) that used to kill the
+      // process with an unhandled 'write EPIPE' (exit 1) even though
+      // discovery itself had already succeeded.
+      const files: Record<string, string> = {};
+      for (let index = 0; index < 200; index += 1) {
+        const name = `e2e/unresolved-${String(index).padStart(3, '0')}.spec.js`;
+        files[name] = [
+          "import { makeJourney } from './journey-factory';",
+          'const journey = makeJourney();',
+          ...[0, 1, 2, 3, 4, 5, 6, 7].map(
+            (slot) => `journey('unresolvable journey ${String(index)}/${String(slot)}', async () => {});`,
+          ),
+          '',
+        ].join('\n');
+      }
+      files['e2e/journey-factory.js'] = 'export function makeJourney() { return () => {}; }\n';
+      repo.writeFiles(files);
+
+      /** The shipped bin: the way an owner (and `npx`) actually runs it. */
+      const REAL_BIN = fileURLToPath(new URL('../bin/gateforge.js', import.meta.url));
+      const runThroughClosedPipe = (): Promise<{ code: number; stderr: string }> =>
+        // Executor form: the repo's TS lib predates `Promise.withResolvers`.
+        new Promise((resolveTest, rejectTest) => {
+          const child = spawn(process.execPath, [REAL_BIN, 'tests', 'discover'], {
+            cwd: repo.root,
+            env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' },
+            stdio: ['ignore', 'pipe', 'pipe'],
+          });
+          let stderr = '';
+          let detached = false;
+          child.stdout.on('data', () => {
+            // The reader goes away after the first chunk arrives; every
+            // later line used to explode as an unhandled stream error.
+            if (!detached) {
+              detached = true;
+              child.stdout.destroy();
+            }
+          });
+          child.stderr.on('data', (chunk: Buffer) => {
+            stderr += chunk.toString('utf8');
+          });
+          child.once('error', rejectTest);
+          child.once('close', (code) => resolveTest({ code: code ?? -1, stderr }));
+        });
+
+      const first = await runThroughClosedPipe();
+      const second = await runThroughClosedPipe();
+      // The command's OWN verdict, not the reader's: the same exit twice.
+      expect(first.code, `first stderr:\n${first.stderr}`).toBe(0);
+      expect(second.code, `second stderr:\n${second.stderr}`).toBe(0);
+      expect(first.stderr).not.toContain('EPIPE');
+      expect(second.stderr).not.toContain('EPIPE');
+    });
+  }, 240_000);
+
+  it('never parses a JSON import as JavaScript (fresh-clone snag 5b: translations flood)', async () => {
+    await withTempRepo({}, async (repo) => {
+      installConsumer(repo);
+      repo.writeFiles({
+        'e2e/messages.json': `${JSON.stringify({ nav: { home: 'Home' }, errors: { notFound: 'Not found' } }, null, 2)}\n`,
+        'e2e/i18n.spec.js': [
+          "import { test } from 'playwright/test';",
+          "import messages from './messages.json';",
+          "test('shows the translated home label', async ({ page }) => {",
+          "  if (messages.nav.home !== 'Home') throw new Error('translations');",
+          "  await page.goto('/');",
+          '});',
+          '',
+        ].join('\n'),
+      });
+
+      const result = await runCli(repo, ['tests', 'discover', '--json']);
+      expect(result.code, `${result.stdout}\n${result.stderr}`).toBe(0);
+      const catalog = JSON.parse(result.stdout) as {
+        entries: Array<{ logicalKey: string }>;
+        parseErrors: Array<{ file: string; message: string }>;
+      };
+      // The JSON asset is data, not a script: zero parse errors, and the
+      // spec itself still resolves its playwright test normally.
+      expect(catalog.parseErrors).toEqual([]);
+      expect(catalog.entries.some((entry) => entry.logicalKey.includes('i18n.spec.js'))).toBe(true);
+
+      const text = await runCli(repo, ['tests', 'discover']);
+      expect(text.code).toBe(0);
+      expect(text.stdout).toContain('parseErrors=0');
+      expect(text.stdout).not.toContain('parse errors (');
+    });
+  }, 240_000);
 });

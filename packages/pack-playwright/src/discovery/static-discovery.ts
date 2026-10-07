@@ -886,12 +886,12 @@ function isTestModuleSpecifier(specifier: string): boolean {
 
 /**
  * Resolves a relative specifier the way node/TS resolve it: a FILE
- * first (the bare path when it names one, then each parseable
- * extension), then a directory's `index.*`. A directory is never a
- * resolution result — `existsSync` is true for one, and returning it
- * made `readText` fail with EISDIR and report a false parse error
- * against the consumer's own source whenever a file and a directory
- * shared a name (install rehearsal F16).
+ * first (the bare path when it names a parseable SCRIPT file, then each
+ * parseable extension), then a directory's `index.*`. A directory is
+ * never a resolution result — `existsSync` is true for one, and
+ * returning it made `readText` fail with EISDIR and report a false
+ * parse error against the consumer's own source whenever a file and a
+ * directory shared a name (install rehearsal F16).
  *
  * Args:
  *   state: the running scan (seeded/traversed files win outright).
@@ -906,8 +906,15 @@ function isTestModuleSpecifier(specifier: string): boolean {
 function resolveSpecifier(state: ScanState, cwd: string, fromFile: string, specifier: string): string | null {
   const base = posix.dirname(fromFile);
   const joined = posix.normalize(posix.join(base, specifier));
+  // The bare path only when it already names a SCRIPT file. A specifier
+  // like `./translations/en.json` (or any non-script asset) must never
+  // resolve: the scan parses JavaScript/TypeScript only, so pulling a
+  // JSON document into the parser flooded the catalog with thousands of
+  // parse-error rows for one import (fresh-clone snag 5b — a frontend
+  // translations file alone produced 18,658 of them). The extension and
+  // index candidates below still cover extensionless script specifiers.
   const candidates = [
-    joined,
+    ...(PARSEABLE_EXTENSIONS.some((ext) => joined.endsWith(ext)) ? [joined] : []),
     ...PARSEABLE_EXTENSIONS.map((ext) => `${joined}${ext}`),
     ...PARSEABLE_EXTENSIONS.map((ext) => `${joined}/index${ext}`),
   ];

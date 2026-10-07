@@ -305,6 +305,7 @@ import {
   VERIFIER_KEY_ENV,
   VERIFIER_KEY_FILE_ENV,
   VERSION,
+  warnUndeclaredRuntime,
 } from './common.js';
 import { resolveVerifierKeyring, type VerifierKeyring } from '../verifier-keys.js';
 import { hostLoadFailureNotices, startHostLoadSampler, type HostLoadCollector, type HostLoadSample, type HostLoadTestTiming } from '../host-load.js';
@@ -634,6 +635,10 @@ async function legacyTestGates(io: Io, options: LegacyOptions): Promise<number> 
   // fixture call answers 401 (x-gateforge-run mismatch).
   const runToken = options.runToken;
   const config = loadConfigAt(io.cwd);
+  // Undeclared runtime document (fresh-clone snag 5g):
+  // the envAllowlist the owner wrote never reaches the
+  // suite child unless this line exists.
+  warnUndeclaredRuntime(io, config);
   const cacheExclusions = loadCacheExclusions(io.cwd, config);
   const cachePolicyDigest = cacheExclusions.length > 0 ? trustedPolicyDigestForConfig(io.cwd, config) : null;
   const cacheApprovalResolution =
@@ -2037,6 +2042,10 @@ export function decideTestOnlyReseal(input: {
  */
 export async function runSupervisedTestGates(io: Io, options: SupervisedOptions): Promise<number> {
   const config = loadConfigAt(io.cwd);
+  // Undeclared runtime document (fresh-clone snag 5g):
+  // the supervised child sees none of the envAllowlist
+  // the owner wrote until this line exists.
+  warnUndeclaredRuntime(io, config);
 
   // The existing owner-pinned runtime declaration names test inputs too.
   // Values come only from the operator, never from candidate configuration.

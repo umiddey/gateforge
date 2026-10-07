@@ -57,7 +57,8 @@ commands:
                                           declare the data plane for a file, folder, or glob (preview without --confirm)
   classify delete <src> <hard|archive> [--archive-field k=v]... --reason T [--confirm]
                                           declare how removal manifests for a file, folder, or glob
-  explain <resourceId> [--json]          full signal/rule/obligation trace for one resource
+  explain <resourceId|obligationId> [--json]
+                                          full signal/rule/obligation trace for one resource or obligation
   tests discover [--json] [--pytest]     inventory existing tests into the run-state catalog
   tests suggest [--changed] [--json]     suggest existing tests for uncovered obligations (inspection, never a gate)
   tests mark --test K --kind K [--category C]...

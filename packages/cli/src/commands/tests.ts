@@ -10,7 +10,9 @@
  *   problems.
  * - `mark` — validate a declaration against the CURRENT catalog and
  *   obligation registry, then write/update `.gateforge/test-map.yml`
- *   ATOMICALLY and idempotently, printing the exact diff. Never edits
+ *   ATOMICALLY and idempotently, printing the exact diff. A repeated
+ *   mark for the same test UNIONS its claims (never replaces); a changed
+ *   kind or category set is refused. Never edits
  *   test files, never adds waivers, refuses contradictions.
  * - `sync` — regenerate only annotation-sourced entries from an AST-only
  *   scan; hand-written sidecar entries are never modified.
@@ -1065,7 +1067,7 @@ async function markSubcommand(
     }
     ruleClaims.push(businessRuleClaimId(ruleId, caseId));
   }
-  const newEntry: TestMapEntry = {
+  const declaredEntry: TestMapEntry = {
     key: declaredKey,
     selector: {
       runner: entry.runner,
@@ -1080,8 +1082,14 @@ async function markSubcommand(
     reason,
   };
   const previousMap = loadOptionalTestMap(io.cwd) ?? { schemaVersion: 1 as const, tests: [] };
+  const previousEntry = previousMap.tests.find((existing) => existing.key === declaredKey);
+  const merged = previousEntry !== undefined;
+  // A repeated mark for the same test UNIONS its claims (§5.3); it never
+  // silently replaces an earlier declaration (fresh-clone snag 5f). A
+  // changed kind or category set is refused BEFORE any byte is written.
+  const nextEntry = merged ? mergeMarkDeclaration(previousEntry, declaredEntry) : declaredEntry;
   const tests = previousMap.tests.filter((existing) => existing.key !== declaredKey);
-  tests.push(newEntry);
+  tests.push(nextEntry);
   tests.sort((a, b) => compareStrings(a.key, b.key));
   const nextMap: TestMap = { schemaVersion: 1, tests };
 
@@ -1094,7 +1102,13 @@ async function markSubcommand(
     if (asJson) {
       writeLine(
         io.stdout,
-        canonicalJson({ schemaVersion: 1, path, changed: false, entry: newEntry } as unknown as JsonValue),
+        canonicalJson({
+          schemaVersion: 1,
+          path,
+          changed: false,
+          ...(merged ? { merged: true } : {}),
+          entry: nextEntry,
+        } as unknown as JsonValue),
       );
     } else {
       writeLine(io.stdout, `mark: no changes — '${declaredKey}' is already declared exactly so in ${path}`);
@@ -1110,12 +1124,22 @@ async function markSubcommand(
         schemaVersion: 1,
         path,
         changed: true,
+        ...(merged ? { merged: true } : {}),
         diff,
-        entry: newEntry,
+        entry: nextEntry,
       } as unknown as JsonValue),
     );
   } else {
     writeLine(io.stdout, `mark: wrote ${path} (existing tests untouched; a declaration is intent, not proof)`);
+    if (merged) {
+      // The union is the result: name every claim the entry now carries,
+      // so a repeat mark can never hide what the first one declared.
+      writeLine(
+        io.stdout,
+        `mark: merged into the existing declaration — '${declaredKey}' now claims ` +
+          `${String(nextEntry.claims.length)} claim(s): ${nextEntry.claims.join(', ')}`,
+      );
+    }
     writeLine(io.stdout, `--- ${previousMap.tests.length === 0 ? '/dev/null' : path}`);
     writeLine(io.stdout, `+++ ${path}`);
     for (const line of diff) {
@@ -1128,6 +1152,61 @@ async function markSubcommand(
 const MARK_USAGE_LINE =
   'usage: gateforge tests mark --test <key> --kind <kind> [--category <c>]... ' +
   '(--obligation <id>... | --rule <ruleId>/<caseId>) [--case <caseId>]... --reason "<text>"';
+
+/**
+ * Merges a repeated `tests mark` into the entry already in the sidecar
+ * (plan §5.3, fresh-clone snag 5f): claims are UNIONED — a second mark
+ * for the same test adds its obligations instead of silently replacing
+ * the first declaration's. A changed `kind:` or `categories:` set is a
+ * contradiction, not an update: the merge refuses naming both sets and
+ * the manual edit, because quietly rewriting a declaration's meaning
+ * would re-grade claims the owner already relied on. The latest `reason`
+ * wins (it is the most recent owner statement covering the union).
+ *
+ * Args:
+ *   previous: the entry already stored under the key.
+ *   declared: the entry this run would write for the same key.
+ *
+ * Returns:
+ *   TestMapEntry: previous ∪ declared (claims, caseIds; previous
+ *   `source`/`twinOf` kept; selector, kind, reason from this run).
+ * @throws UsageError when kind or categories differ, naming both and
+ *   the sidecar edit that resolves it.
+ */
+function mergeMarkDeclaration(previous: TestMapEntry, declared: TestMapEntry): TestMapEntry {
+  if (previous.kind !== undefined && previous.kind !== declared.kind) {
+    throw new UsageError(
+      `cannot mark '${declared.key}': the existing declaration in ${TEST_MAP_RELATIVE} is kind '${previous.kind}', ` +
+        `this run declared kind '${declared.kind}' — a repeated mark adds claims, it never changes an existing ` +
+        `declaration's kind; edit the entry's kind: in ${TEST_MAP_RELATIVE} yourself`,
+    );
+  }
+  const previousCategories = previous.categories ?? [];
+  const declaredCategories = declared.categories ?? [];
+  if (
+    declaredCategories.length > 0 &&
+    (declaredCategories.length !== previousCategories.length ||
+      declaredCategories.some((category, index) => category !== previousCategories[index]))
+  ) {
+    throw new UsageError(
+      `cannot mark '${declared.key}': the existing declaration in ${TEST_MAP_RELATIVE} declares ` +
+        `categories [${previousCategories.join(', ')}], this run declared [${declaredCategories.join(', ')}] — ` +
+        `a repeated mark adds claims, it never changes an existing declaration's categories; ` +
+        `edit the entry's categories: in ${TEST_MAP_RELATIVE} yourself`,
+    );
+  }
+  const claims = [...new Set([...previous.claims, ...declared.claims])].sort(compareStrings);
+  const caseIds = [...new Set([...(previous.caseIds ?? []), ...(declared.caseIds ?? [])])].sort(compareStrings);
+  const categories = previousCategories.length > 0 ? previousCategories : declaredCategories;
+  return {
+    ...declared,
+    ...(previous.source !== undefined ? { source: previous.source } : {}),
+    ...(previous.twinOf !== undefined ? { twinOf: previous.twinOf } : {}),
+    ...(categories.length > 0 ? { categories } : {}),
+    claims,
+    ...(caseIds.length > 0 ? { caseIds } : {}),
+  };
+}
 
 /** Reads a repeated flag as a string array (single value → one element). */
 function flagArray(options: Record<string, string | boolean | string[]>, name: string): string[] {

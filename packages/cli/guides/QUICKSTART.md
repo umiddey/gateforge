@@ -74,11 +74,12 @@ hard the gate blocks; it never waives an obligation and never hides code
 from the scan.
 
 An AI agent or CI run with no terminal and no `--preset` writes `light` only
-and says so on ONE line, together with the flag that changes it:
+and says so on ONE line, together with the edit that changes it:
 `no terminal: writing the light preset (report everything, block nothing) — a
-human must choose the goal: re-run with --preset <light|normal|strict>`. The
-closing summary then reports what was written without naming the goal again.
-Gateforge will not guess `normal` or `strict` for someone who is not there.
+human must choose the goal: edit `mode:` in .gateforge.yml (light: `mode: warn`,
+normal: `mode: changed`, strict: `mode: strict`)`. The closing summary then
+reports what was written without naming the goal again. Gateforge will not guess
+`normal` or `strict` for someone who is not there.
 
 **You should see:** the goal you asked for, followed by a summary of what was
 written and an `undo:` command.
@@ -212,6 +213,14 @@ gateforge tests mark \
 
 `tests mark` writes `.gateforge/test-map.yml`. Commit that file so `check`, hooks, and CI can read the declaration without listing the suite. Replace the example values with exact values from your catalog and suggestion output. Never mark a test that does not perform the claimed behavior.
 
+`--obligation` is repeatable — one mark can declare several claims for one
+test (`--obligation '<id-a>' --obligation '<id-b>'`). A second `tests mark` for
+the same test ADDS its claims to the existing declaration (it never replaces
+them) and prints the full resulting claim list. A repeat that declares a
+DIFFERENT `--kind` or a different `--category` set is refused, naming both —
+edit the entry's `kind:`/`categories:` in `.gateforge/test-map.yml` yourself to
+change a declaration's meaning.
+
 **You should see:** the sidecar diff, or a current annotation in the test. A repeated identical `tests mark` reports no changes.
 
 **If not:** rerun discovery, copy the exact test key and obligation ID, and resolve any mapping contradiction. Do not use a declaration to silence a blocker.
@@ -273,6 +282,14 @@ one source, never both.
 
 The command prints a key ID, not the secret. Set the app URL and any session state the suite needs. The application and test environment must already be running; see [Test environment](TEST-ENVIRONMENT.md).
 
+If the suite reads its own environment variables (a base URL, a test mail
+box, a seeded password), the supervised runner forwards ONLY the names
+declared in `.gateforge/runtime.yml`'s `envAllowlist` — and that file
+counts only when `.gateforge.yml` also declares
+`runtime: .gateforge/runtime.yml`. Both blocks together are the recipe in
+[Test environment → Declare test-service environment variables](TEST-ENVIRONMENT.md#declare-test-service-environment-variables); a suite whose variables never reach the test process silently falls
+back to its own defaults.
+
 **You should see:** `verifier key ring created` and an active key ID.
 
 **If a ring already exists:** the command says so — it names the ring, the active
@@ -306,7 +323,7 @@ and a build that is installed but cannot start names the loader's own line and
 
 **You should see:** the selected tests pass and the run seals a receipt.
 
-**If not:** use the first typed blocker. Check the changed-file base, mapping, app readiness, seed data, and verifier key. A test declaration or a plain passing test run is not a receipt.
+**If not:** use the first typed blocker. Check the changed-file base, mapping, app readiness, seed data, and verifier key. A test that fails on an environment variable the raw runner saw — `ECONNREFUSED` on a stale default host, an empty token — is the env recipe: list the name in `.gateforge/runtime.yml` `envAllowlist` AND declare `runtime: .gateforge/runtime.yml` in `.gateforge.yml` (the file without the `.gateforge.yml` block is silently ignored) — [Test environment → Declare test-service environment variables](TEST-ENVIRONMENT.md#declare-test-service-environment-variables). A test declaration or a plain passing test run is not a receipt.
 
 ## 8. Check the changed code
 

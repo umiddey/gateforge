@@ -120,7 +120,8 @@ const MAX_SCAN_BYTES = 1024 * 1024;
  * Languages are a subset of `python` / `javascript` / `typescript`
  * (`python` when the repo is empty or yields no signal). Signals name
  * the bundled-detector evidence found: `sqlalchemy`, `fastapi`,
- * `playwright`, `vitest`, `cypress`, `pytest`, `http-clients`. Each
+ * `playwright`, `vitest`, `cypress`, `pytest`, `http-clients`,
+ * `react-router`. Each
  * signal carries the file evidence it was read from in `reasons`.
  */
 export interface RepoScan {
@@ -148,6 +149,7 @@ const PACK_SIGNAL: Record<string, string> = {
   'gateforge.pack-fastapi': 'fastapi',
   'gateforge.pack-sqlalchemy': 'sqlalchemy',
   'gateforge.pack-http': 'http-clients',
+  'gateforge.pack-react-router': 'react-router',
 };
 
 /**
@@ -354,6 +356,12 @@ export function scanRepo(cwd: string): RepoScan {
       if (dependency && !reasons['http-clients']) {
         reasons['http-clients'] = `package.json dependency '${dependency}' in ${file}`;
       }
+      // The React Router reader pack: ANY scanned manifest (root or
+      // nested, e.g. frontend/package.json) declaring the router.
+      const router = packageJsonReactRouter(join(cwd, file));
+      if (router && !reasons['react-router']) {
+        reasons['react-router'] = `package.json dependency '${router}' in ${file}`;
+      }
     }
     if (base.startsWith('playwright.config.')) hasPlaywright = true;
     if (base.startsWith('vitest.config.') || base.startsWith('vite.config.')) hasVitest = true;
@@ -415,6 +423,7 @@ export function scanRepo(cwd: string): RepoScan {
   if (hasCypress) signals.push('cypress');
   if (hasPytestIni || hasPytestToml || hasPytestFile) signals.push('pytest');
   if (reasons['http-clients']) signals.push('http-clients');
+  if (reasons['react-router']) signals.push('react-router');
   return { languages, signals, reasons, files: collected.length };
 }
 
@@ -441,6 +450,12 @@ export function recommendPlugins(scan: RepoScan): string[] {
     signals.has('http-clients')
   ) {
     ids.push('gateforge.pack-http');
+  }
+  if (
+    (languages.has('javascript') || languages.has('typescript')) &&
+    signals.has('react-router')
+  ) {
+    ids.push('gateforge.pack-react-router');
   }
   if (ids.length > 0) return ids;
   return languageDefaultPlugins([...languages]);
@@ -596,6 +611,40 @@ function packageJsonHttpClient(absolute: string): string | null {
       ) {
         return name;
       }
+    }
+  }
+  return null;
+}
+
+/**
+ * The React Router dependency a package.json declares, if any: the
+ * package itself (`react-router`) or its DOM binding
+ * (`react-router-dom`), in `dependencies` or `devDependencies`. This is
+ * the reader pack's recommendation signal — the manifest may sit at the
+ * repository root or nested (a `frontend/` workspace), and every scanned
+ * one is read.
+ *
+ * Args:
+ *   absolute: absolute path of the package.json.
+ *
+ * Returns:
+ *   string | null: the declaring dependency name, or null.
+ */
+function packageJsonReactRouter(absolute: string): string | null {
+  const text = readSmallText(absolute);
+  if (text === null) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== 'object' || parsed === null) return null;
+  for (const section of ['dependencies', 'devDependencies']) {
+    const deps = (parsed as Record<string, unknown>)[section];
+    if (typeof deps !== 'object' || deps === null) continue;
+    for (const name of ['react-router-dom', 'react-router']) {
+      if (name in (deps as Record<string, unknown>)) return name;
     }
   }
   return null;
