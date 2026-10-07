@@ -453,13 +453,16 @@ export { expect }; // re-exported so tests never need `playwright/test`
  * `newContext(options)` returns the same witnessed wrapping the
  * `request` fixture carries, resolving the session LAZILY (on the first
  * call) from the currently running test. Where no test is running
- * (module scope), inside a worker hook (`beforeAll`/`beforeEach`/
+ * (module scope), or inside a worker hook (`beforeAll`/`beforeEach`/
  * `afterEach`/`afterAll` — Playwright runs a file's `beforeAll` INSIDE
  * the first test's session window, so the session being open proves
- * nothing), or when no session answers, the returned context talks to
- * the app DIRECTLY — setup traffic stays uncredited: it never reaches
- * any session proxy, and the witness refuses session-attributed
- * evidence outside a bound session.
+ * nothing), the returned context talks to the app DIRECTLY — setup
+ * traffic stays uncredited: it never reaches any session proxy, and
+ * the witness refuses session-attributed evidence outside a bound
+ * session. INSIDE a test body a session that never answers is a
+ * failure, not a fallback: the context waits the fixtures' own
+ * bound and then throws, so in-test traffic can never silently
+ * bypass the witness.
  *
  * The underlying context is created with the options exactly as given;
  * only app-origin call URLs are rehosted per call.
@@ -491,11 +494,19 @@ export const request = {
       return await directContext(testInfo);
     }
     const witness = new WitnessClient();
-    // A short bound: inside a test the session is already open (the
-    // supervisor opens it at test begin), so a real resolve answers at
-    // once; outside one, waiting only delays the direct fallback.
-    const session = await resolveSessionBounded(witness, testInfo.testId, testInfo.workerIndex, 500);
-    if (session === null || session.proxyUrl === null) {
+    // Inside a test body the supervisor has already opened (or is
+    // opening) this test's session: wait the same bound the
+    // fixtures use. A missing session must NOT fall back to a
+    // direct context here — that would silently bypass the
+    // witness for in-test traffic (only module scope and worker
+    // hooks are setup traffic, which stays uncredited by design).
+    const session = await resolveSessionBounded(witness, testInfo.testId, testInfo.workerIndex, 5_000);
+    if (session === null) {
+      throw new Error(`No supervisor-issued witness session for ${testInfo.testId}.`);
+    }
+    if (session.proxyUrl === null) {
+      // No proxy channel exists for this session: nothing can be
+      // witnessed, and unwrapped behavior is today's behavior.
       return await directContext(testInfo);
     }
     const routing = sessionApiRouting(appBaseURL, session.proxyUrl);
