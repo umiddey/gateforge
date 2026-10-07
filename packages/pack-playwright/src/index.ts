@@ -17,7 +17,7 @@
  * - Setup: `gateforgeGlobalSetup` / `gateforgeGlobalTeardown` — spawn
  *   the witness deterministically before workers (no races).
  */
-export { test, expect } from './fixture/fixture.js';
+export { test, expect, request } from './fixture/fixture.js';
 export type { EvidenceFixtures } from './fixture/fixture.js';
 export {
   createEvidence,

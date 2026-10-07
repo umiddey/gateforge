@@ -13,12 +13,17 @@
  * import `{ test, expect }` FROM A RUNNER EXTENDED LIKE THIS — importing
  * raw `playwright/test` bypasses the fixture and produces claims with no
  * records (the engine grades the obligation `missing`; GF-24).
+ *
+ * API tests are witnessed too: the `request` fixture, the owned
+ * `page.request`/`context.request`, and the exported `request` factory
+ * (its `newContext`) rehost app-origin calls onto the test's session
+ * proxy through {@link ./api-request.ts} — see the module doc there.
  */
-import { chromium, firefox, webkit } from 'playwright';
-import type { Page } from 'playwright/test';
+import { chromium, firefox, webkit, request as playwrightRequest } from 'playwright';
+import type { Page, TestInfo } from 'playwright/test';
 import { createServer as createTcpServer } from 'node:net';
 import { once } from 'node:events';
-import type { Browser } from 'playwright/test';
+import type { APIRequestContext, Browser } from 'playwright/test';
 
 import { expect, test as base } from './consumer-runner.js';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -28,7 +33,9 @@ import {
   type EvidenceApi,
   type SurfaceDescriptor,
 } from './evidence.js';
+import { rehostContextRequest, sessionApiRouting, wrapApiRequestContext } from './api-request.js';
 import { WitnessClient, type SessionPageObserverFlushRequest } from './witness-client.js';
+import type { SessionCredential } from '../witness/types.js';
 const browserDebuggingPorts = new WeakMap<Browser, number>();
 
 /**
@@ -58,6 +65,43 @@ async function availableDebuggingPort(): Promise<number> {
   if (address === null || typeof address === 'string') throw new Error('Could not allocate a Chromium debugging port.');
   await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   return address.port;
+}
+
+/**
+ * Resolves the supervisor-issued session for one (testId, workerIndex)
+ * pair, polling until the deadline: the trusted reporter's session open
+ * and the worker's first resolve race, so a bounded wait absorbs the
+ * dispatch latency.
+ *
+ * Args:
+ *   witness: the witness client.
+ *   testId: the runner-side test id the session was opened under.
+ *   workerIndex: the worker slot the session was opened under.
+ *   timeoutMs: how long to wait for the session to appear.
+ *
+ * Returns:
+ *   Promise<SessionCredential | null>: the open session, or null at the
+ *   deadline.
+ */
+async function resolveSessionBounded(
+  witness: WitnessClient,
+  testId: string,
+  workerIndex: number,
+  timeoutMs: number,
+): Promise<SessionCredential | null> {
+  const deadline = Date.now() + timeoutMs;
+  let session = await witness.resolveSession({ testId, workerIndex });
+  while (session === null && Date.now() < deadline) {
+    await delay(100);
+    session = await witness.resolveSession({ testId, workerIndex });
+  }
+  return session;
+}
+
+/** The project's `use.baseURL`, when it is a non-empty string. */
+function projectBaseURL(testInfo: TestInfo): string | undefined {
+  const baseURL: unknown = testInfo.project.use['baseURL'];
+  return typeof baseURL === 'string' && baseURL !== '' ? baseURL : undefined;
 }
 
 
@@ -207,7 +251,7 @@ export type EvidenceFixtures = {
  * no surface requirement; the first UI call fails closed if no surface
  * was wired.
  */
-export const test = base.extend<EvidenceFixtures>({
+const extended = base.extend<EvidenceFixtures>({
   browser: async ({ browserName, launchOptions }, use) => {
     const browserType = { chromium, firefox, webkit }[browserName];
     const witnessed = Boolean(process.env[ENV_WITNESS_URL]) && browserName === 'chromium';
@@ -235,18 +279,7 @@ export const test = base.extend<EvidenceFixtures>({
       throw new Error('GATEFORGE_APP_BASE_URL is required for witnessed browser traffic.');
     }
     const witness = new WitnessClient();
-    const deadline = Date.now() + 5_000;
-    let session = await witness.resolveSession({
-      testId: testInfo.testId,
-      workerIndex: testInfo.workerIndex,
-    });
-    while (session === null && Date.now() < deadline) {
-      await delay(100);
-      session = await witness.resolveSession({
-        testId: testInfo.testId,
-        workerIndex: testInfo.workerIndex,
-      });
-    }
+    const session = await resolveSessionBounded(witness, testInfo.testId, testInfo.workerIndex, 5_000);
     if (session === null) {
       throw new Error(`No supervisor-issued witness session for ${testInfo.testId}.`);
     }
@@ -288,11 +321,20 @@ export const test = base.extend<EvidenceFixtures>({
       });
     };
     if (session.proxyUrl !== null) {
+      const sessionProxyUrl: string = session.proxyUrl;
       // The reporter rides along so a page that loads ANOTHER origin
       // (a suite base URL Gateforge was never told about) reaches the
       // witness as a name, not as silence.
       const reporter = createUnroutedOriginReporter({ witness, session, appBaseURL });
-      await routePageThroughSessionProxy(page, appBaseURL, session.proxyUrl, reporter.report);
+      await routePageThroughSessionProxy(page, appBaseURL, sessionProxyUrl, reporter.report);
+      // The owned APIRequestContext (`page.request`/`context.request`)
+      // rides the SAME session: app-origin calls rehost onto the proxy,
+      // other origins pass through, plausible mismatches are reported.
+      rehostContextRequest(page.context(), {
+        baseURL: projectBaseURL(testInfo),
+        routing: async () => sessionApiRouting(appBaseURL, sessionProxyUrl),
+        onUnroutedOrigin: reporter.report,
+      });
       try {
         await use(page);
       } finally {
@@ -310,6 +352,40 @@ export const test = base.extend<EvidenceFixtures>({
       await flushPageObserver();
     }
   },
+  request: async ({ request }, use, testInfo) => {
+    if (!process.env[ENV_WITNESS_URL]) {
+      await use(request);
+      return;
+    }
+    const appBaseURL = process.env['GATEFORGE_APP_BASE_URL']?.trim();
+    if (!appBaseURL) {
+      throw new Error('GATEFORGE_APP_BASE_URL is required for witnessed API traffic.');
+    }
+    const witness = new WitnessClient();
+    const session = await resolveSessionBounded(witness, testInfo.testId, testInfo.workerIndex, 5_000);
+    if (session === null) {
+      throw new Error(`No supervisor-issued witness session for ${testInfo.testId}.`);
+    }
+    if (session.proxyUrl === null) {
+      // No proxy channel exists for this session: nothing can be
+      // witnessed, and unwrapped behavior is today's behavior.
+      await use(request);
+      return;
+    }
+    const sessionProxyUrl: string = session.proxyUrl;
+    const reporter = createUnroutedOriginReporter({ witness, session, appBaseURL });
+    try {
+      await use(
+        wrapApiRequestContext(request, {
+          baseURL: projectBaseURL(testInfo),
+          routing: async () => sessionApiRouting(appBaseURL, sessionProxyUrl),
+          onUnroutedOrigin: reporter.report,
+        }),
+      );
+    } finally {
+      await reporter.settled();
+    }
+  },
   surface: async ({}, use): Promise<void> => {
     await use(undefined);
   },
@@ -319,4 +395,113 @@ export const test = base.extend<EvidenceFixtures>({
   },
 });
 
+/**
+ * Worker-hook execution depth (beforeAll/beforeEach/afterEach/afterAll
+ * RUNNING right now in this worker). The witnessed API factory consults
+ * it: a context created inside a worker hook must talk to the app
+ * DIRECTLY — that is setup traffic and stays uncredited — even though
+ * Playwright runs `beforeAll` of a file inside the FIRST test's
+ * test-begin window, where the session is already open and a plain
+ * `test.info()` resolve would otherwise credit the call.
+ */
+let workerHookDepth = 0;
+
+/** The hook registrars whose EXECUTION the tracker wraps. */
+const HOOK_REGISTRARS = new Set(['beforeAll', 'beforeEach', 'afterEach', 'afterAll']);
+
+/**
+ * Re-exports the extended runner with the four hook registrars wrapped
+ * so hook callbacks run inside the tracker above. The proxy forwards
+ * every other read untouched — the runner object stays the consumer's
+ * own (extend/describe/info all behave identically).
+ */
+function withHookTracking<T extends object>(extended: T): T {
+  return new Proxy(extended, {
+    get(target, property, receiver) {
+      if (typeof property !== 'string' || !HOOK_REGISTRARS.has(property)) {
+        return Reflect.get(target, property, receiver);
+      }
+      const register = Reflect.get(target, property, target) as (callback: unknown, timeout?: number) => unknown;
+      return (callback: unknown, timeout?: number): unknown =>
+        // A ZERO-PARAMETER forwarder is what Playwright sees: its spec
+        // transform inspects hook callbacks and rejects rest parameters
+        // ("First argument must use the object destructuring pattern").
+        register(function (this: unknown) {
+          const hookArgs = Array.from(arguments);
+          workerHookDepth += 1;
+          try {
+            return Promise.resolve(
+              (callback as (...args: unknown[]) => unknown).apply(this, hookArgs),
+            ).finally(() => {
+              workerHookDepth -= 1;
+            });
+          } catch (error) {
+            workerHookDepth -= 1;
+            throw error;
+          }
+        }, timeout);
+    },
+  });
+}
+
+export const test: typeof extended = withHookTracking(extended);
+
 export { expect }; // re-exported so tests never need `playwright/test`
+
+/**
+ * The module-scope `request` of `@gate-forge/pack-playwright/fixture`:
+ * `newContext(options)` returns the same witnessed wrapping the
+ * `request` fixture carries, resolving the session LAZILY (on the first
+ * call) from the currently running test. Where no test is running
+ * (module scope), inside a worker hook (`beforeAll`/`beforeEach`/
+ * `afterEach`/`afterAll` — Playwright runs a file's `beforeAll` INSIDE
+ * the first test's session window, so the session being open proves
+ * nothing), or when no session answers, the returned context talks to
+ * the app DIRECTLY — setup traffic stays uncredited: it never reaches
+ * any session proxy, and the witness refuses session-attributed
+ * evidence outside a bound session.
+ *
+ * The underlying context is created with the options exactly as given;
+ * only app-origin call URLs are rehosted per call.
+ */
+export const request = {
+  async newContext(options: Parameters<typeof playwrightRequest.newContext>[0] = {}): Promise<APIRequestContext> {
+    if (!process.env[ENV_WITNESS_URL]) return await playwrightRequest.newContext(options);
+    const appBaseURL = process.env['GATEFORGE_APP_BASE_URL']?.trim();
+    if (appBaseURL === undefined || appBaseURL === '') return await playwrightRequest.newContext(options);
+    const directContext = (testInfo?: TestInfo): Promise<APIRequestContext> => {
+      // Direct (setup) traffic. The project's own base URL rides along
+      // when the caller gave none, so a relative setup call behaves
+      // exactly as the suite's config says it should.
+      const fallbackBaseURL = options.baseURL ?? (testInfo === undefined ? undefined : projectBaseURL(testInfo));
+      return playwrightRequest.newContext(
+        fallbackBaseURL === undefined ? options : { ...options, baseURL: fallbackBaseURL },
+      );
+    };
+    let testInfo: TestInfo;
+    try {
+      testInfo = base.info();
+    } catch {
+      // Module scope: no test owns this context.
+      return await directContext();
+    }
+    if (workerHookDepth > 0) {
+      // A worker hook: setup traffic, never credited — even though the
+      // first test's session may already be open here.
+      return await directContext(testInfo);
+    }
+    const witness = new WitnessClient();
+    // A short bound: inside a test the session is already open (the
+    // supervisor opens it at test begin), so a real resolve answers at
+    // once; outside one, waiting only delays the direct fallback.
+    const session = await resolveSessionBounded(witness, testInfo.testId, testInfo.workerIndex, 500);
+    if (session === null || session.proxyUrl === null) {
+      return await directContext(testInfo);
+    }
+    const routing = sessionApiRouting(appBaseURL, session.proxyUrl);
+    return wrapApiRequestContext(await playwrightRequest.newContext(options), {
+      ...(options.baseURL === undefined ? {} : { baseURL: options.baseURL }),
+      routing: async () => routing,
+    });
+  },
+};

@@ -2219,6 +2219,16 @@ const { test: baseTest, expect } = require('@gate-forge/pack-playwright/fixture'
 import { test as baseTest, expect } from '@gate-forge/pack-playwright/fixture';
 ```
 
+The fixture module also exports `request` (next to `test`/`expect`): the
+witnessed Playwright APIRequestContext channel. The `request` fixture and
+`page.request`/`context.request` of witnessed tests are wrapped
+automatically; a context from `request.newContext()` is witnessed when the
+call happens inside a test body and goes straight to the app in worker
+hooks and module scope (setup stays uncredited). Every app-origin call is
+rehosted onto the session proxy — path, query, headers and body untouched;
+other origins pass through, and a same-host or loopback other origin is
+reported through the same unrouted-origin channel as the page.
+
 Rebasing the shared base is not rewriting a journey: the journeys' own steps,
 assertions and fixtures stay as they are, and only the `test` object they
 extend changes. Never rewrite existing `tests/e2e/**` journeys, never

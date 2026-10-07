@@ -402,6 +402,13 @@ Keep the suite's own journeys, steps, assertions and fixtures; change only
 which `test` object they extend. Under a witnessed run, every test then runs
 under a supervisor-issued session whose traffic the witness can observe.
 
+API tests are witnessed the same way: a test that takes `request` from the
+Gateforge fixture module — or calls `request.newContext()` imported from it
+INSIDE the test body — has every app-origin call rehosted onto the session
+proxy (path, query, headers and body untouched), so `observed-e2e` transport
+claims prove for them too. Calls made outside a test body (`beforeAll`,
+`afterAll`, module scope) go to the app directly and stay uncredited.
+
 ### 6b. Point the suite at the origin Gateforge routes
 
 Rebasing the fixture is only half of it. The fixture rewrites requests to

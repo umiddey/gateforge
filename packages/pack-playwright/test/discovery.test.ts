@@ -815,6 +815,24 @@ describe('kind/category inference rules', () => {
     expect(result.kindSignals[0]?.ruleId).toBe('api-request-fixture');
   });
 
+  it('a gateforge-pack request fixture stays kindless: the witnessed API channel is marked observed-e2e', () => {
+    // The pack's API request channel rehosts those calls through the
+    // session proxy, so a strong api-e2e inference here would block the
+    // exact `observed-e2e` declaration the channel exists to prove.
+    const result = inferTestKind({
+      file: 'e2e/api.spec.ts',
+      title: 'calls the service',
+      titlePath: ['calls the service'],
+      facts: {
+        ...baseFacts,
+        signatureParams: ['request'],
+        gateforgeFixtureImport: { file: 'e2e/api.spec.ts', line: 1, col: 0 },
+      },
+    });
+    expect(result.inferredKind).toBe('unknown');
+    expect(result.kindSignals).toEqual([]);
+  });
+
   it('an http client call fires api-e2e even without fixtures', () => {
     const where = { file: 'e2e/a.spec.ts', line: 4, col: 2 };
     const result = inferTestKind({
@@ -836,6 +854,24 @@ describe('kind/category inference rules', () => {
     });
     expect(result.inferredKind).toBe('unit');
     expect(result.kindSignals[0]?.ruleId).toBe('networkless-unit');
+  });
+
+  it('a gateforge-pack import is never networkless: its channels are static-analysis-invisible', () => {
+    // The imported `request.newContext()` pattern has no fixture params,
+    // but its calls ride the witnessed API channel — a 'unit' proposal
+    // here would block the observed-e2e marking.
+    const result = inferTestKind({
+      file: 'e2e/api.spec.ts',
+      title: 'calls the service',
+      titlePath: ['calls the service'],
+      facts: {
+        ...baseFacts,
+        signatureParams: [],
+        gateforgeFixtureImport: { file: 'e2e/api.spec.ts', line: 1, col: 0 },
+      },
+    });
+    expect(result.inferredKind).toBe('unknown');
+    expect(result.kindSignals).toEqual([]);
   });
 
   it('conflicting rules resolve to unknown with the conflict recorded', () => {

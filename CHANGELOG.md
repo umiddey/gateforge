@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- **API tests are witnessed: the Playwright APIRequestContext now rides the
+  session proxy.** API specs that use `request` (the fixture),
+  `page.request`/`context.request`, or `request.newContext()` never pass
+  `page.route`, so the session proxy never saw their exchanges and their
+  endpoint traffic could never be witnessed. The Gateforge fixture now
+  wraps those contexts (additive; without a witness wired, behavior is
+  byte-for-byte today's): every call whose resolved URL carries the app
+  origin is rehosted onto the test's session proxy — the same host swap
+  the page channel performs, with path, query, headers and body
+  untouched; other origins pass through, and a same-host or loopback
+  other origin is reported like an unrouted page origin. The fixture
+  module exports `request` next to `test`/`expect`; its `newContext()`
+  resolves the session per call from the running test and goes straight
+  to the app inside worker hooks and module scope, so setup traffic stays
+  uncredited. Kind inference no longer proposes `api-e2e`/`unit` from a
+  Gateforge-pack import, so `tests mark --kind observed-e2e` is
+  declarable for exactly the tests the channel witnesses.
+
 - **The sweep progress line names the requests that refused a page.** A
   page printing only `refused PAGE_API_UNSETTLED (782 ms)` left nobody any
   wiser about WHICH request never settled. A refused visit now keeps its
