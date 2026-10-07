@@ -563,10 +563,16 @@ interface ObservedExchangeFacts {
   status: unknown;
 }
 
-/** One exchange's grade: ok, or the typed reason it blocks with. */
+/**
+ * One exchange's grade: ok, or the typed reason it blocks with.
+ * `ownRoute` marks an invalid grade about the obligation's OWN route (an
+ * ambiguity that includes it, or its non-2xx status) as opposed to an
+ * exchange of some other endpoint, so a reason can name the call that
+ * actually blocked the claim.
+ */
 type ExchangeGrade =
   | { ok: true }
-  | { ok: false; status: 'invalid'; reason: string }
+  | { ok: false; status: 'invalid'; reason: string; ownRoute: boolean }
   | { ok: false; status: 'missing'; reason: string };
 
 /**
@@ -604,6 +610,7 @@ function gradeObservedExchange(
       ok: false,
       status: 'invalid',
       reason: `'${input.obligation.id}': ${subject} carries no method/url pair`,
+      ownRoute: false,
     };
   }
   if (inventoryBlock !== null) {
@@ -618,6 +625,7 @@ function gradeObservedExchange(
       reason:
         `'${input.obligation.id}': ${subject} carries a noncanonical observed path: ` +
         `${interpreted.reason}`,
+      ownRoute: false,
     };
   }
   // Identity match (plan §9, D2 — fail closed, no any-endpoint
@@ -644,6 +652,7 @@ function gradeObservedExchange(
       ok: false,
       status: 'invalid',
       reason: `'${input.obligation.id}': ${subject} ${resolution.reason}`,
+      ownRoute: false,
     };
   }
   if (resolution.status === 'ambiguous') {
@@ -656,6 +665,9 @@ function gradeObservedExchange(
         `distinct routes [${resolution.candidates.join('; ')}]; the transport status is known ` +
         'but handler attribution is not, so no endpoint-specific claim passes until ' +
         'engine-owned handler proof resolves the overlap',
+      ownRoute: resolution.candidates.some((text) =>
+        text.endsWith(`(${input.obligation.resourceId})`),
+      ),
     };
   }
   if (resolution.status === 'mismatch') {
@@ -667,6 +679,7 @@ function gradeObservedExchange(
         `${interpreted.path} uniquely matches route ${candidateIdentityText(resolution.matched)} ` +
         `but the obligation requires endpoint '${input.obligation.resourceId}'; evidence from ` +
         'a different endpoint can never satisfy it',
+      ownRoute: false,
     };
   }
   if (input.obligation.contract === 'http:response-status-ok') {
@@ -678,6 +691,7 @@ function gradeObservedExchange(
         reason:
           `'${input.obligation.id}': observed status ` +
           `'${String(status)}' is not a 2xx response`,
+        ownRoute: true,
       };
     }
   }
@@ -843,6 +857,9 @@ function gradeObservedTransport(input: ClaimEvidenceInput): ClaimOutcome | null 
   const inventoryBlock = transportInventoryBlock(input);
   const candidates = (input.httpRoutes ?? []) as readonly HttpRouteCandidate[];
   const satisfied: string[] = [];
+  // Reasons about the obligation's own route outrank exchanges of other
+  // endpoints the same session also made (a login before the call).
+  const ownInvalidReasons: string[] = [];
   const invalidReasons: string[] = [];
   const missingReasons: string[] = [];
   for (const entry of records) {
@@ -865,6 +882,7 @@ function gradeObservedTransport(input: ClaimEvidenceInput): ClaimOutcome | null 
       continue;
     }
     let invalid: string | null = null;
+    let ownInvalid: string | null = null;
     let missing: string | null = null;
     let matchedHere = false;
     for (const raw of exchanges) {
@@ -878,12 +896,17 @@ function gradeObservedTransport(input: ClaimEvidenceInput): ClaimOutcome | null 
         break;
       }
       if (grade.status === 'invalid') {
-        if (invalid === null) invalid = grade.reason;
+        if (grade.ownRoute) {
+          if (ownInvalid === null) ownInvalid = grade.reason;
+        } else if (invalid === null) {
+          invalid = grade.reason;
+        }
       } else if (missing === null) {
         missing = grade.reason;
       }
     }
     if (matchedHere) satisfied.push(label);
+    else if (ownInvalid !== null) ownInvalidReasons.push(ownInvalid);
     else if (invalid !== null) invalidReasons.push(invalid);
     else if (missing !== null) missingReasons.push(missing);
   }
@@ -894,6 +917,9 @@ function gradeObservedTransport(input: ClaimEvidenceInput): ClaimOutcome | null 
       status: 'satisfied',
       recordIds: [sortedUniqueIds(satisfied)[0] as string],
     };
+  }
+  if (ownInvalidReasons.length > 0) {
+    return { status: 'invalid', reason: ownInvalidReasons.sort(compareStrings)[0] as string };
   }
   if (invalidReasons.length > 0) {
     return { status: 'invalid', reason: invalidReasons.sort(compareStrings)[0] as string };

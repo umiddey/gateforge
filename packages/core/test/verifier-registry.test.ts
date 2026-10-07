@@ -1022,6 +1022,57 @@ describe('transport Observe channel (plan 0.9.2 item D)', () => {
     expect(noContext.reason).toContain('no route inventory context');
   });
 
+  it("names the obligation's own blocked exchange, not an unrelated endpoint the same test also called", () => {
+    // A test logs in, then calls the obligation's route. That call is
+    // ambiguous (literal sibling), so the claim blocks either way, but
+    // the reason must name the overlap, not the login exchange.
+    const routes: readonly HttpRouteCandidate[] = [
+      { resourceId: 'tenant.accounts', method: 'GET', canonicalPath: '/accounts/{}' },
+      { resourceId: 'tenant.accounts.export', method: 'GET', canonicalPath: '/accounts/export' },
+      { resourceId: 'tenant.auth.login', method: 'POST', canonicalPath: '/auth/login' },
+    ];
+    const login = { method: 'POST', url: '/auth/login', status: 200 };
+    const own = { method: 'GET', url: '/accounts/export', status: 200 };
+
+    const oneRecord = complete(
+      httpOutcome(transportObligation, [observedRecord(transportObligation.id, { exchanges: [login, own] })], routes),
+    );
+    expect(oneRecord.verdict).toBe('invalid');
+    expect(oneRecord.reason).toContain('ambiguous route attribution');
+    expect(oneRecord.reason).not.toContain('POST /auth/login');
+
+    // Across records too: a record holding only the login exchange never
+    // outranks the record holding the obligation's own blocked exchange.
+    const twoRecords = complete(
+      httpOutcome(
+        transportObligation,
+        [
+          observedRecord(transportObligation.id, { exchanges: [login], sessionId: 'sess-a' }),
+          observedRecord(transportObligation.id, { exchanges: [own], sessionId: 'sess-b' }),
+        ],
+        routes,
+      ),
+    );
+    expect(twoRecords.verdict).toBe('invalid');
+    expect(twoRecords.reason).toContain('ambiguous route attribution');
+
+    // A non-2xx on the obligation's own route outranks an unrelated
+    // endpoint as well.
+    const failing = complete(
+      httpOutcome(
+        statusObligation,
+        [
+          observedRecord(statusObligation.id, {
+            exchanges: [login, { method: 'GET', url: '/accounts/7', status: 500 }],
+          }),
+        ],
+        routes,
+      ),
+    );
+    expect(failing.verdict).toBe('invalid');
+    expect(failing.reason).toContain("observed status '500' is not a 2xx response");
+  });
+
   it('I4: response-status-ok still requires a 2xx on the Observe channel', () => {
     const failing = observedRecord(statusObligation.id, {
       exchanges: [{ method: 'GET', url: '/accounts/456', status: 500 }],

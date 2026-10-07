@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- **A blocked transport claim names the call that blocked it.** When a
+  test's witnessed session held an exchange of another endpoint (a login
+  before the real call) and the obligation's own call was blocked (a
+  literal-vs-parameter route overlap, or a non-2xx status), the verdict
+  reason named the unrelated exchange ("uniquely matches route POST
+  /auth/login") instead of the real cause. Reasons about the obligation's
+  own route now outrank exchanges of other endpoints, inside one observed
+  session and across sessions. Verdicts are unchanged; only the reason
+  text differs.
+
 ## 0.13.5
 
 - **Supervised runs honour a project's declared test timeout.** The
