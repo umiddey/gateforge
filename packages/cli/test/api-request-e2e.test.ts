@@ -1,13 +1,7 @@
 /**
- * The witnessed API request channel through the actual CLI: API tests
- * that use Playwright's APIRequestContext — the fixture `request`, and
- * `request.newContext()` from the fixture module — get their endpoint
- * exchanges proxied through the test's session (host swap, exactly the
- * page channel's rewrite), so mapped `observed-e2e` claims for
- * `http:request-observed` / `http:response-status-ok` prove. A call made
- * in `beforeAll` (no test running, no session) goes to the app DIRECTLY
- * and stays uncredited — proven by the app seeing the app's own Host,
- * never the proxy's.
+ * Real CLI coverage that distinguishes direct test-code Playwright API
+ * calls from browser traffic: direct calls never satisfy observed claims,
+ * while a page request triggered by the UI is credited to that test.
  */
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
@@ -28,13 +22,29 @@ import {
   GATEFORGE_YML,
 } from './witnessed-run-fixture.js';
 
-const TITLE_FIXTURE = 'fixture request witnesses endpoint traffic';
-const TITLE_IMPORTED = 'imported new context witnesses in-test traffic';
+const TITLE_FIXTURE = 'fixture request uses direct API transport';
+const TITLE_IMPORTED = 'imported new context uses direct API transport';
+const TITLE_UI = 'API seed followed by browser UI request';
+const TITLE_SEED_ONLY = 'direct seed alone is not UI evidence';
+const TITLE_PAGE_REQUEST = 'page.request alone is not UI evidence';
+const TITLE_CONTEXT_REQUEST = 'context.request alone is not UI evidence';
 
 /** The endpoint the witness must observe (resource name is deterministic). */
 const ITEMS_RESOURCE = endpointResourceName('GET', '/api/items');
 const ITEMS_REQUEST = `tenant.${ITEMS_RESOURCE}:http:request-observed`;
 const ITEMS_STATUS = `tenant.${ITEMS_RESOURCE}:http:response-status-ok`;
+const UI_RESOURCE = endpointResourceName('GET', '/api/ui-items');
+const UI_REQUEST = `tenant.${UI_RESOURCE}:http:request-observed`;
+const UI_STATUS = `tenant.${UI_RESOURCE}:http:response-status-ok`;
+const SEED_ONLY_RESOURCE = endpointResourceName('GET', '/api/seed-only');
+const SEED_ONLY_REQUEST = `tenant.${SEED_ONLY_RESOURCE}:http:request-observed`;
+const SEED_ONLY_STATUS = `tenant.${SEED_ONLY_RESOURCE}:http:response-status-ok`;
+const PAGE_RESOURCE = endpointResourceName('GET', '/api/page-request');
+const PAGE_REQUEST = `tenant.${PAGE_RESOURCE}:http:request-observed`;
+const PAGE_STATUS = `tenant.${PAGE_RESOURCE}:http:response-status-ok`;
+const CONTEXT_RESOURCE = endpointResourceName('GET', '/api/context-request');
+const CONTEXT_REQUEST = `tenant.${CONTEXT_RESOURCE}:http:request-observed`;
+const CONTEXT_STATUS = `tenant.${CONTEXT_RESOURCE}:http:response-status-ok`;
 
 const PLAYWRIGHT_CONFIG = `import { defineConfig } from 'playwright/test';
 export default defineConfig({
@@ -51,14 +61,9 @@ export default defineConfig({
 
 const SPEC = `import { test as base, expect, request } from '@gate-forge/pack-playwright';
 
-// Suites usually build their own runner on the fixture's: its hooks are
-// setup traffic exactly like the base runner's.
 const test = base.extend({});
 
 test.beforeEach(async () => {
-  // A hook, not the test: this call runs inside the test's session window
-  // yet must go straight to the app and stay uncredited (the app sees the
-  // app's own Host, never the proxy's).
   const api = await request.newContext();
   const setup = await api.get('/api/setup');
   expect(setup.status()).toBe(200);
@@ -75,6 +80,33 @@ test('${TITLE_IMPORTED}', async () => {
   const response = await api.get('/api/items');
   expect(response.status()).toBe(200);
   await api.dispose();
+});
+
+test('${TITLE_UI}', async ({ page }) => {
+  const api = await request.newContext();
+  const seeded = await api.post('/api/seed');
+  expect(seeded.status()).toBe(201);
+  await api.dispose();
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Load items' }).click();
+  await expect(page.getByText('Items loaded')).toBeVisible();
+});
+
+test('${TITLE_SEED_ONLY}', async () => {
+  const api = await request.newContext();
+  const response = await api.get('/api/seed-only');
+  expect(response.status()).toBe(200);
+  await api.dispose();
+});
+
+test('${TITLE_PAGE_REQUEST}', async ({ page }) => {
+  const response = await page.request.get('/api/page-request');
+  expect(response.status()).toBe(200);
+});
+
+test('${TITLE_CONTEXT_REQUEST}', async ({ context }) => {
+  const response = await context.request.get('/api/context-request');
+  expect(response.status()).toBe(200);
 });
 `;
 
@@ -113,25 +145,48 @@ export default {
       }
     };
     route('items_get', 'GET', '/api/items', 10);
+    route('ui_items_get', 'GET', '/api/ui-items', 11);
+    route('seed_only_get', 'GET', '/api/seed-only', 12);
+    route('page_request_get', 'GET', '/api/page-request', 13);
+    route('context_request_get', 'GET', '/api/context-request', 14);
     return { resources, unresolved: [], findings: [], classificationSignals };
   },
 };
 `;
 
-/** The fixture app: two GET endpoints, counting the requests each receives. */
+/** Fixture API with direct-only routes and a button-driven UI request. */
 async function startApiApp(): Promise<{
   url: string;
   requestsByPath: Map<string, number>;
   stop: () => Promise<void>;
 }> {
   const requestsByPath = new Map<string, number>();
+  let seeded = false;
   const app = createServer((request, response) => {
     const path = (request.url ?? '/').split('?')[0] ?? '/';
     requestsByPath.set(path, (requestsByPath.get(path) ?? 0) + 1);
-    response.setHeader('content-type', 'application/json');
-    response.setHeader('x-gateforge-env-fingerprint', FINGERPRINT);
-    if (request.method === 'GET' && (path === '/api/items' || path === '/api/setup')) {
-      response.end(JSON.stringify({ ok: true }));
+    if (request.method === 'GET' && path === '/') {
+      response.setHeader('content-type', 'text/html');
+      response.end('<button>Load items</button><div id="result"></div><script>document.querySelector("button").onclick=async()=>{await fetch("/api/ui-items");document.querySelector("#result").textContent="Items loaded"}</script>');
+      return;
+    }
+    if (request.method === 'POST' && path === '/api/seed') {
+      seeded = true;
+      response.writeHead(201, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ seeded: true }));
+      return;
+    }
+    if (
+      request.method === 'GET' &&
+      (path === '/api/items' ||
+        path === '/api/setup' ||
+        path === '/api/ui-items' ||
+        path === '/api/seed-only' ||
+        path === '/api/page-request' ||
+        path === '/api/context-request')
+    ) {
+      response.setHeader('content-type', 'application/json');
+      response.end(JSON.stringify({ ok: true, seeded }));
       return;
     }
     response.statusCode = 404;
@@ -171,7 +226,7 @@ async function runCliProcess(cwd: string, env: Record<string, string>, args: rea
 interface LedgerRecord {
   kind?: string;
   testId?: string;
-  payload?: { channel?: string; exchanges?: Array<{ url?: string }> };
+  payload?: { channel?: string; exchanges?: Array<{ method?: string; url?: string; status?: number }> };
 }
 
 /**
@@ -198,7 +253,7 @@ function recordedExchangePaths(records: LedgerRecord[], testId?: string): string
 }
 
 describe('witnessed API request channel through the actual CLI', () => {
-  it('does not credit test-code API requests as E2E evidence', async () => {
+  it('credits only browser UI traffic, not test-code API requests', async () => {
     const app = await startApiApp();
     try {
       await withTempRepo({}, async (repo) => {
@@ -235,6 +290,42 @@ tests:
     kind: api-e2e
     claims: ['${ITEMS_REQUEST}', '${ITEMS_STATUS}']
     reason: API-only test; direct calls are not observed E2E evidence.
+  - key: playwright:chromium:specs/api.spec.js:${TITLE_UI}
+    selector:
+      runner: playwright
+      project: chromium
+      file: specs/api.spec.js
+      titlePath: ['${TITLE_UI}']
+    kind: observed-e2e
+    claims: ['${UI_REQUEST}', '${UI_STATUS}']
+    reason: The UI action makes the claimed browser request after direct seeding.
+  - key: playwright:chromium:specs/api.spec.js:${TITLE_SEED_ONLY}
+    selector:
+      runner: playwright
+      project: chromium
+      file: specs/api.spec.js
+      titlePath: ['${TITLE_SEED_ONLY}']
+    kind: observed-e2e
+    claims: ['${SEED_ONLY_REQUEST}', '${SEED_ONLY_STATUS}']
+    reason: A direct API request alone is not E2E evidence.
+  - key: playwright:chromium:specs/api.spec.js:${TITLE_PAGE_REQUEST}
+    selector:
+      runner: playwright
+      project: chromium
+      file: specs/api.spec.js
+      titlePath: ['${TITLE_PAGE_REQUEST}']
+    kind: observed-e2e
+    claims: ['${PAGE_REQUEST}', '${PAGE_STATUS}']
+    reason: page.request is a direct API call, not a UI action.
+  - key: playwright:chromium:specs/api.spec.js:${TITLE_CONTEXT_REQUEST}
+    selector:
+      runner: playwright
+      project: chromium
+      file: specs/api.spec.js
+      titlePath: ['${TITLE_CONTEXT_REQUEST}']
+    kind: observed-e2e
+    claims: ['${CONTEXT_REQUEST}', '${CONTEXT_STATUS}']
+    reason: context.request is a direct API call, not a UI action.
 `,
         });
         repo.git(['add', '-A']);
@@ -259,20 +350,54 @@ tests:
           verdicts: Array<{ obligationId: string; verdict: string; reason?: string }>;
           execution: { selectedTests: { selected: number; passed: number; failed: number } };
         };
-        // API calls from test code are not browser evidence.
         for (const obligationId of [ITEMS_REQUEST, ITEMS_STATUS]) {
+          expect(report.verdicts.find((item) => item.obligationId === obligationId), observed).toMatchObject({
+            verdict: 'missing',
+          });
+        }
+        const directClaims = [
+          [SEED_ONLY_REQUEST, SEED_ONLY_STATUS],
+          [PAGE_REQUEST, PAGE_STATUS],
+          [CONTEXT_REQUEST, CONTEXT_STATUS],
+        ].flat();
+        for (const obligationId of directClaims) {
           const verdict = report.verdicts.find((item) => item.obligationId === obligationId);
           expect(verdict, observed).toMatchObject({ verdict: 'missing' });
+          expect(verdict?.reason ?? '', obligationId).toContain('the test called this endpoint directly from test code');
+        }
+        for (const obligationId of [UI_REQUEST, UI_STATUS]) {
+          expect(report.verdicts.find((item) => item.obligationId === obligationId), observed).toMatchObject({
+            verdict: 'satisfied',
+          });
         }
         expect(run.code, observed).toBe(1);
-        expect(report.execution.selectedTests).toMatchObject({ selected: 2, passed: 2, failed: 0 });
+        expect(report.execution.selectedTests).toMatchObject({ selected: 6, passed: 6, failed: 0 });
         expect(app.requestsByPath.get('/api/items')).toBe(2);
-        // API calls reach the app directly but never appear as observed
-        // browser exchanges in the witnessed ledger.
-        expect(app.requestsByPath.get('/api/setup')).toBe(2);
+        expect(app.requestsByPath.get('/api/setup')).toBe(6);
+        expect(app.requestsByPath.get('/api/seed')).toBe(1);
+        expect(app.requestsByPath.get('/api/ui-items')).toBe(1);
+        expect(app.requestsByPath.get('/api/seed-only')).toBe(1);
+        expect(app.requestsByPath.get('/api/page-request')).toBe(1);
+        expect(app.requestsByPath.get('/api/context-request')).toBe(1);
         const records = JSON.parse(readFileSync(repo.path('.gateforge/test-gates/records.json'), 'utf8')) as LedgerRecord[];
         const recordedPaths = recordedExchangePaths(records);
-        expect(recordedPaths.some((path) => path.endsWith('/api/items'))).toBe(false);
+        for (const path of ['/api/items', '/api/seed-only', '/api/page-request', '/api/context-request']) {
+          expect(recordedPaths.some((exchangePath) => exchangePath.endsWith(path))).toBe(false);
+        }
+        expect(recordedPaths.some((path) => path.endsWith('/api/ui-items'))).toBe(true);
+        const outcomesDoc = JSON.parse(readFileSync(repo.path('.gateforge/test-gates/runner-outcomes.json'), 'utf8')) as {
+          outcomes?: Array<{ testId?: string; titlePath?: string[] }>;
+        };
+        const uiTestId = outcomesDoc.outcomes?.find((item) => (item.titlePath ?? []).includes(TITLE_UI))?.testId;
+        expect(uiTestId, 'browser UI test id').toBeDefined();
+        expect(
+          records.some((record) =>
+            record.testId === uiTestId &&
+            record.payload?.channel === 'observe' &&
+            (record.payload.exchanges ?? []).some((exchange) => new URL(exchange.url ?? '').pathname === '/api/ui-items'),
+          ),
+          'claimed endpoint record is the browser exchange from the UI test',
+        ).toBe(true);
       });
     } finally {
       await app.stop();

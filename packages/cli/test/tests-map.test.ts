@@ -235,31 +235,29 @@ describe('gateforge tests mark', () => {
     });
   }, 120_000);
 
-  it('refuses an observed-e2e mark over a non-browser inference (api-e2e stays contradictory)', async () => {
+  it('refuses an observed-e2e mark over an inferred api-e2e test', async () => {
     await withTempRepo({}, async (repo) => {
       installConsumer(repo);
-      // A pure unit test resolves the strong 'unit' kind; observed-e2e
-      // (a browser-channel kind) contradicts it like any other mismatch.
       repo.writeFiles({
-        'e2e/math.spec.js': [
+        'e2e/api.spec.js': [
           "import { test } from 'playwright/test';",
-          "test('adds two numbers', () => {",
-          '  const sum = 1 + 1;',
-          '  if (sum !== 2) throw new Error("wrong");',
+          "test('calls the API directly', async ({ request }) => {",
+          "  await request.get('/api/items');",
           '});',
           '',
         ].join('\n'),
       });
-      const unitKey = 'playwright:chromium:e2e/math.spec.js:adds two numbers';
+      const apiKey = 'playwright:chromium:e2e/api.spec.js:calls the API directly';
       const mislabeled = await runCli(repo, [
-        'tests', 'mark', '--test', unitKey, '--kind', 'observed-e2e',
+        'tests', 'mark', '--test', apiKey, '--kind', 'observed-e2e',
         '--category', 'persistence.delete',
         '--obligation', OBLIGATION_ACCOUNTS,
-        '--reason', 'Deliberately mislabeled unit test for the observe probe.',
+        '--reason', 'Direct API test cannot establish browser E2E evidence.',
       ]);
       expect(mislabeled.code).toBe(2);
-      expect(mislabeled.stderr).toContain(`cannot mark '${unitKey}'`);
-      expect(mislabeled.stderr).toContain("inference resolved 'unit' from strong code signals");
+      expect(mislabeled.stderr).toContain(`cannot mark '${apiKey}'`);
+      expect(mislabeled.stderr).toContain("inference resolved 'api-e2e' from strong code signals");
+      expect(mislabeled.stderr).toContain('e2e/api.spec.js:');
       expect(existsSync(join(repo.root, '.gateforge/test-map.yml'))).toBe(false);
     });
   }, 120_000);
