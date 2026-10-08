@@ -202,6 +202,7 @@ describe('static discovery', () => {
       'e2e/wrapped-fixtures.ts': [
         "import { test as base } from 'playwright/test';",
         'export const test = base.extend({',
+        '  page: async ({ page }, use) => use(page),',
         '  wrappedPage: async ({ page }, use) => use(page),',
         '});',
         '',
@@ -244,6 +245,11 @@ describe('static discovery', () => {
         "test('wrapped built-in page', async ({ wrappedPage }) => {});",
         '',
       ].join('\n'),
+      'e2e/wrapped-self-page.spec.ts': [
+        "import { test } from './wrapped-fixtures';",
+        "test('wrapped self-shadowed page', async ({ page }) => {});",
+        '',
+      ].join('\n'),
       'e2e/shadow.spec.ts': [
         "import { test } from './fixtures';",
         "test('shadowed page', async ({ page }) => {});",
@@ -265,6 +271,7 @@ describe('static discovery', () => {
       ['unfollowable fixture', 'unknown'],
       ['shadowed page', 'api-e2e'],
       ['wrapped built-in page', 'browser-e2e'],
+      ['wrapped self-shadowed page', 'browser-e2e'],
       ['browser plus API setup', 'browser-e2e'],
     ]));
     const apiEntry = rowFor(result.entries, 'e2e/api.spec.ts');
