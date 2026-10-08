@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.13.8
 
 - **cli: a selected step of a serial journey selects the whole serial
   group.** A named selection narrows the supervised Playwright run to
