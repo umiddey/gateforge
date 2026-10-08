@@ -2384,7 +2384,15 @@ function fixtureClasses(state: ScanState, file: string): StaticTestFacts['fixtur
     ) {
       api = true;
     }
-    const dependencyKinds = definition.dependencies.map(classify);
+    const dependencyKinds = definition.dependencies.map((dependency) => {
+      if (!definitions.has(dependency) && BROWSER_FIXTURE_PARAMS.has(dependency)) {
+        return { kind: 'browser' as const, chain: dependency };
+      }
+      if (!definitions.has(dependency) && dependency === 'request') {
+        return { kind: 'api' as const, chain: dependency };
+      }
+      return classify(dependency);
+    });
     if (dependencyKinds.some((item) => item.kind === 'browser')) browser = true;
     if (dependencyKinds.some((item) => item.kind === 'api')) api = true;
     const kind = browser ? 'browser' : api ? 'api' : unknown ? 'unknown' : definition.dependencies.length > 0 ? 'data' : 'unknown';

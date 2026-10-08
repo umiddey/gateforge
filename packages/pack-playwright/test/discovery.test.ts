@@ -199,6 +199,13 @@ describe('static discovery', () => {
         '});',
         '',
       ].join('\n'),
+      'e2e/wrapped-fixtures.ts': [
+        "import { test as base } from 'playwright/test';",
+        'export const test = base.extend({',
+        '  wrappedPage: async ({ page }, use) => use(page),',
+        '});',
+        '',
+      ].join('\n'),
       'e2e/api.spec.ts': [
         "import { test } from './fixtures';",
         "test('api fixture', async ({ apiAs }) => {});",
@@ -224,6 +231,11 @@ describe('static discovery', () => {
         "test('unfollowable fixture', async ({ dynamic }) => {});",
         '',
       ].join('\n'),
+      'e2e/wrapped-page.spec.ts': [
+        "import { test } from './wrapped-fixtures';",
+        "test('wrapped built-in page', async ({ wrappedPage }) => {});",
+        '',
+      ].join('\n'),
       'e2e/shadow.spec.ts': [
         "import { test } from './fixtures';",
         "test('shadowed page', async ({ page }) => {});",
@@ -239,6 +251,7 @@ describe('static discovery', () => {
       ['fixture chain', 'api-e2e'],
       ['unfollowable fixture', 'unknown'],
       ['shadowed page', 'api-e2e'],
+      ['wrapped built-in page', 'browser-e2e'],
     ]));
     const apiEntry = rowFor(result.entries, 'e2e/api.spec.ts');
     expect(inferenceOf(apiEntry).kindSignals[0]?.evidence).toContain(
