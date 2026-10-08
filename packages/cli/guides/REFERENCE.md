@@ -499,6 +499,12 @@ catalog, lists up to five of that file's real keys.
   strong code-signal inference. In particular, `api-e2e` is not E2E evidence
   for observed claims and cannot be reclassified as `observed-e2e`;
   `tests mark` refuses such contradictions with both source locations.
+- A test that Playwright lists but static discovery did not read cannot
+  carry an E2E claim: Gateforge blocks sidecar and native claims for that
+  row until code is readable. This is distinct from a scanned test whose
+  code signals are inconclusive; a declared kind may still resolve that
+  scanned row's `unknown`. Likely causes include an unresolved wrapper
+  import or a file extension outside configured source globs.
 - Agents may edit the sidecar directly; both paths receive identical
   validation. `mark` is idempotent: re-running an exact declaration writes
   nothing and reports `no changes`.
@@ -1966,6 +1972,26 @@ inventory with a second `--list` using the safe run variables supplied to
 the runner. A difference stops the run before tests start and names each
 project, file, and title present in only one inventory. Static discovery
 also warns when `process.env.GATEFORGE_*` controls test registration.
+
+For Playwright, static discovery follows bounded local ESM imports and
+CommonJS `require` wrappers back to the package root or its exported
+`/fixture` subpath. Proven bindings let the scanner retain test-code
+signals—such as browser fixtures—for kind inference before the static row
+is reconciled with the runner's listed identity. An npm alias is treated as
+the Gateforge package only when the root or nearest package manifest maps
+it to the exact package name, or the installed
+`node_modules/<alias>/package.json` names the Gateforge package. Without
+either proof, an external module is not assumed to export Playwright's
+`test`. A runner-listed file is also scanned when its path matches a
+configured source glob with another recognized extension; files wholly
+outside that source scope remain runner-list-only, and configured
+exclusions still apply.
+When the runner computes a test title from data, Gateforge joins the
+listed instance to the statically read call site only when its file and
+source line match. Static call-site facts then supply kind and tamper
+signals for every instance registered at that line. Resolvable titles
+continue to require title-path identity; a different literal title is
+never joined by line alone.
 
 ### Provenance trust model (GF-23, audited 2026-08-31, three rounds)
 

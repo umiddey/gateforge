@@ -13,7 +13,13 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseConfig, type GateforgeConfig } from '@gate-forge/core';
+import {
+  mappingGradingClaims,
+  parseConfig,
+  resolveTestMappings,
+  type GateforgeConfig,
+  type TestMap,
+} from '@gate-forge/core';
 import {
   diffNativePlaywrightTests,
   collectPytestSuite,
@@ -96,6 +102,104 @@ function inferenceOf(entry: StaticTestEntry) {
 }
 
 describe('static discovery', () => {
+  it('resolves local CJS and ESM wrappers over the Gateforge fixture subpath', () => {
+    const root = makeTempDir();
+    writeTree(root, {
+      'e2e/wrapper.cjs': [
+        "const { test: base } = require('@gate-forge/pack-playwright/fixture');",
+        'const test = base.extend({});',
+        'module.exports = { test };',
+        '',
+      ].join('\n'),
+      'e2e/wrapper.mjs': [
+        "import { test as base } from '@gate-forge/pack-playwright/fixture';",
+        'export const test = base.extend({});',
+        '',
+      ].join('\n'),
+      'e2e/cjs.spec.js': [
+        "const { test } = require('./wrapper.cjs');",
+        "test('CJS wrapper journey', async ({ page }) => {});",
+        '',
+      ].join('\n'),
+      'e2e/esm.spec.mjs': [
+        "import { test } from './wrapper.mjs';",
+        "test('ESM wrapper journey', async ({ page }) => {});",
+        '',
+      ].join('\n'),
+      'e2e/unrelated.js': [
+        "const { test } = require('./unrelated-wrapper.js');",
+        "test('not a runner test', () => {});",
+        '',
+      ].join('\n'),
+      'e2e/unrelated-wrapper.js': [
+        "const { test } = require('unrelated-test-library');",
+        'exports.test = test;',
+        '',
+      ].join('\n'),
+      'e2e/direct.spec.mts': [
+        "import { test } from 'playwright/test';",
+        "test('direct MTS journey', async ({ page }) => {});",
+        '',
+      ].join('\n'),
+    });
+    const result = scanTestFiles({ cwd: root, include: ['e2e/**/*'], exclude: [] });
+    expect(result.entries.map((entry) => entry.title).sort()).toEqual([
+      'CJS wrapper journey',
+      'ESM wrapper journey',
+      'direct MTS journey',
+    ]);
+    expect(result.unresolved).toMatchObject([
+      { file: 'e2e/unrelated.js', code: 'unresolved-test-alias', titlePath: ['not a runner test'] },
+    ]);
+  });
+  it('recognizes npm aliases only when package metadata proves the Gateforge package', () => {
+    const alias = '@suite/gateforge-runner';
+    const spec = [
+      `import { test } from '${alias}';`,
+      "test('alias journey', async ({ page }) => {});",
+      '',
+    ].join('\n');
+    const declaredRoot = makeTempDir();
+    writeTree(declaredRoot, {
+      'package.json': JSON.stringify({
+        devDependencies: { [alias]: 'npm:@gate-forge/pack-playwright@0.13.4' },
+      }),
+      'e2e/alias.spec.ts': spec,
+    });
+    const declared = scanTestFiles({ cwd: declaredRoot, include: ['e2e/**/*.ts'], exclude: [] });
+    expect(declared.entries.map((entry) => entry.title)).toEqual(['alias journey']);
+    expect(declared.entries[0]?.facts.gateforgeFixtureImport).toEqual({
+      file: 'e2e/alias.spec.ts',
+      line: 1,
+      col: 0,
+    });
+
+    const nearestRoot = makeTempDir();
+    writeTree(nearestRoot, {
+      'e2e/package.json': JSON.stringify({
+        optionalDependencies: { [alias]: 'npm:@gate-forge/pack-playwright@0.13.4' },
+      }),
+      'e2e/alias.spec.ts': spec,
+    });
+    const nearest = scanTestFiles({ cwd: nearestRoot, include: ['e2e/**/*.ts'], exclude: [] });
+    expect(nearest.entries.map((entry) => entry.title)).toEqual(['alias journey']);
+
+    const undeclaredRoot = makeTempDir();
+    writeTree(undeclaredRoot, { 'e2e/alias.spec.ts': spec });
+    const undeclared = scanTestFiles({ cwd: undeclaredRoot, include: ['e2e/**/*.ts'], exclude: [] });
+    expect(undeclared.entries).toEqual([]);
+    expect(undeclared.unresolved).toMatchObject([
+      { file: 'e2e/alias.spec.ts', code: 'unresolved-test-alias', titlePath: ['alias journey'] },
+    ]);
+
+    const installedRoot = makeTempDir();
+    writeTree(installedRoot, {
+      'node_modules/@suite/gateforge-runner/package.json': JSON.stringify({ name: '@gate-forge/pack-playwright' }),
+      'e2e/alias.spec.ts': spec,
+    });
+    const installed = scanTestFiles({ cwd: installedRoot, include: ['e2e/**/*.ts'], exclude: [] });
+    expect(installed.entries.map((entry) => entry.title)).toEqual(['alias journey']);
+  });
   it('resolves test.extend chains through the import graph into full titlePaths', () => {
     const root = makeTempDir();
     writeTree(root, {
@@ -1143,6 +1247,234 @@ describe('native playwright reconciliation', () => {
     expect(created?.parameterIdentity).toContain('#');
     // Deterministic logical keys per §5.2 (runner/project/file/titlePath).
     expect(created?.logicalKey).toBe('playwright:chromium:e2e/accounts.spec.js:creates an account');
+  });
+  it('joins fixture wrappers and runner-selected MTS files omitted from source globs', async () => {
+    const root = makePlaywrightProject({
+      'e2e/wrapper.cjs': [
+        "const { test: base } = require('@gate-forge/pack-playwright/fixture');",
+        'const test = base.extend({});',
+        'module.exports = { test };',
+      ].join('\n'),
+      'e2e/wrapped.spec.js': [
+        "const { test } = require('./wrapper.cjs');",
+        "test('wrapped journey', async ({ page }) => {});",
+        '',
+      ].join('\n'),
+      'e2e/direct.spec.mts': [
+        "import { test } from 'playwright/test';",
+        "test('direct MTS journey', async ({ page }) => {});",
+        '',
+      ].join('\n'),
+      'e2e/esm-wrapper.mjs': [
+        "import { test as base } from '@gate-forge/pack-playwright/fixture';",
+        'export const test = base.extend({});',
+        '',
+      ].join('\n'),
+      'e2e/esm-wrapped.spec.mjs': [
+        "import { test } from './esm-wrapper.mjs';",
+        "test('ESM wrapped journey', async ({ page }) => {});",
+        '',
+      ].join('\n'),
+    });
+    writeFileSync(join(root, 'package.json'), '{ "private": true }\n', 'utf8');
+    mkdirSync(join(root, 'node_modules', '@gate-forge'), { recursive: true });
+    symlinkSync(join(ROOT, 'packages', 'pack-playwright'), join(root, 'node_modules', '@gate-forge', 'pack-playwright'), 'dir');
+    const { catalog } = await discoverTestCatalog({
+      cwd: root,
+      config: fixtureConfig(['e2e/**/*.spec.js']),
+    });
+    expect(
+      catalog.entries
+        .map((entry) => [entry.title, entry.reconciliation, entry.inferredKind])
+        .sort((left, right) => String(left[0]).localeCompare(String(right[0]))),
+      JSON.stringify({ runnerSummaries: catalog.runnerSummaries, unresolved: catalog.unresolved }),
+    ).toEqual([
+      ['direct MTS journey', 'matched', 'browser-e2e'],
+      ['ESM wrapped journey', 'matched', 'browser-e2e'],
+      ['wrapped journey', 'matched', 'browser-e2e'],
+    ]);
+  });
+  it('refuses an E2E mapping until a runner-listed spec is statically readable', async () => {
+    const root = makePlaywrightProject({
+      'e2e/opaque-wrapper.mjs': [
+        "import { test } from 'unrelated-runner';",
+        'export { test };',
+        '',
+      ].join('\n'),
+      'e2e/opaque.spec.mjs': [
+        "import { test } from './opaque-wrapper.mjs';",
+        "test('opaque journey', async ({ page }) => {});",
+        '',
+      ].join('\n'),
+      'node_modules/unrelated-runner/package.json': JSON.stringify({
+        name: 'unrelated-runner',
+        type: 'module',
+        exports: './index.js',
+      }),
+      'node_modules/unrelated-runner/index.js': "export { test } from 'playwright/test';\n",
+    });
+    const config = fixtureConfig(['e2e/**/*.spec.mjs']);
+    const claimId = 'tenant.accounts:persistence:read';
+    const sidecar: TestMap = {
+      schemaVersion: 1,
+      tests: [
+        {
+          key: 'playwright:chromium:e2e/opaque.spec.mjs:opaque journey',
+          selector: {
+            runner: 'playwright',
+            project: 'chromium',
+            file: 'e2e/opaque.spec.mjs',
+            titlePath: ['opaque journey'],
+          },
+          claims: [claimId],
+          kind: 'observed-e2e',
+          reason: 'An existing UI journey proves the account operation.',
+        },
+      ],
+    };
+    const unreadable = await discoverTestCatalog({ cwd: root, config });
+    const unreadableEntry = unreadable.catalog.entries.find((entry) => entry.title === 'opaque journey');
+    expect(unreadableEntry).toMatchObject({ reconciliation: 'list-only', inferredKind: 'unknown' });
+    const refused = resolveTestMappings({
+      catalog: unreadable.catalog,
+      nativeClaims: [],
+      sidecar,
+      obligationIds: [claimId],
+    });
+    const refusal = refused.problems.find((problem) => problem.obligationId === claimId);
+    expect(refusal?.detail).toContain(
+      `'${claimId}': Gateforge could not read the code of test 'playwright:chromium:e2e/opaque.spec.mjs:opaque journey'`,
+    );
+    expect(refusal?.detail).toContain('really is observed-e2e');
+    // The mapping resolver sees the unreadable catalog row, not the wrapper's external specifier.
+    expect(refusal?.detail).toContain('unresolved test-wrapper import');
+    expect(mappingGradingClaims(refused, [])).toEqual([]);
+
+    mkdirSync(join(root, 'node_modules', '@gate-forge'), { recursive: true });
+    symlinkSync(join(ROOT, 'packages', 'pack-playwright'), join(root, 'node_modules', '@gate-forge', 'pack-playwright'), 'dir');
+    writeTree(root, {
+      'e2e/opaque-wrapper.mjs': [
+        "import { test as base } from '@gate-forge/pack-playwright/fixture';",
+        'export const test = base.extend({});',
+        '',
+      ].join('\n'),
+    });
+    const readable = await discoverTestCatalog({ cwd: root, config });
+    expect(readable.catalog.entries.find((entry) => entry.title === 'opaque journey')).toMatchObject({
+      reconciliation: 'matched',
+      inferredKind: 'browser-e2e',
+    });
+    const accepted = resolveTestMappings({
+      catalog: readable.catalog,
+      nativeClaims: [],
+      sidecar,
+      obligationIds: [claimId],
+    });
+    expect(accepted.problems).toEqual([]);
+    expect(mappingGradingClaims(accepted, [])).toHaveLength(1);
+  });
+  it('accepts E2E mappings through a proven npm alias and refuses an unproven alias', async () => {
+    const alias = '@suite/gateforge-runner';
+    const claimId = 'tenant.accounts:persistence:read';
+    const testSource = [
+      `import { test } from '${alias}/fixture';`,
+      "test('alias journey', async ({ page }) => {});",
+      '',
+    ].join('\n');
+    const aliasedRoot = makePlaywrightProject({
+      'package.json': JSON.stringify({
+        type: 'module',
+        private: true,
+        dependencies: { [alias]: 'npm:@gate-forge/pack-playwright@0.13.4' },
+      }),
+      'e2e/alias.spec.js': testSource,
+    });
+    mkdirSync(join(aliasedRoot, 'node_modules', '@suite'), { recursive: true });
+    symlinkSync(
+      join(ROOT, 'packages', 'pack-playwright'),
+      join(aliasedRoot, 'node_modules', '@suite', 'gateforge-runner'),
+      'dir',
+    );
+    const config = fixtureConfig(['e2e/**/*.spec.js']);
+    const sidecar: TestMap = {
+      schemaVersion: 1,
+      tests: [
+        {
+          key: 'playwright:chromium:e2e/alias.spec.js:alias journey',
+          selector: {
+            runner: 'playwright',
+            project: 'chromium',
+            file: 'e2e/alias.spec.js',
+            titlePath: ['alias journey'],
+          },
+          claims: [claimId],
+          kind: 'observed-e2e',
+          reason: 'The existing UI journey proves the account operation.',
+        },
+      ],
+    };
+    const aliased = await discoverTestCatalog({ cwd: aliasedRoot, config });
+    expect(aliased.catalog.entries.find((entry) => entry.title === 'alias journey')).toMatchObject({
+      reconciliation: 'matched',
+      inferredKind: 'browser-e2e',
+    });
+    const accepted = resolveTestMappings({
+      catalog: aliased.catalog,
+      nativeClaims: [],
+      sidecar,
+      obligationIds: [claimId],
+    });
+    expect(accepted.problems).toEqual([]);
+    expect(mappingGradingClaims(accepted, [])).toHaveLength(1);
+
+    const opaqueRoot = makePlaywrightProject({
+      'e2e/alias.spec.js': testSource,
+      'node_modules/@suite/gateforge-runner/package.json': JSON.stringify({
+        name: 'unrelated-runner',
+        type: 'module',
+        exports: { './fixture': './fixture.js' },
+      }),
+      'node_modules/@suite/gateforge-runner/fixture.js': "export { test } from 'playwright/test';\n",
+    });
+    const opaque = await discoverTestCatalog({ cwd: opaqueRoot, config });
+    expect(opaque.catalog.entries.find((entry) => entry.title === 'alias journey')).toMatchObject({
+      reconciliation: 'list-only',
+      inferredKind: 'unknown',
+    });
+    const refused = resolveTestMappings({
+      catalog: opaque.catalog,
+      nativeClaims: [],
+      sidecar,
+      obligationIds: [claimId],
+    });
+    expect(refused.problems.some((problem) => problem.obligationId === claimId)).toBe(true);
+    expect(mappingGradingClaims(refused, [])).toEqual([]);
+  });
+  it('joins data-driven test instances to their dynamic-title call site', async () => {
+    const root = makePlaywrightProject({
+      'e2e/data-driven.spec.js': [
+        "import { test } from 'playwright/test';",
+        "const SPECS = [{ title: 'setup flow', target: '/setup' }, { title: 'posting flow', target: '/periods' }];",
+        'for (const spec of SPECS) {',
+        '  test(spec.title, async ({ page }) => {',
+        '    await page.goto(spec.target);',
+        '  });',
+        '}',
+        '',
+      ].join('\n'),
+    });
+    const { catalog } = await discoverTestCatalog({
+      cwd: root,
+      config: fixtureConfig(['e2e/**/*.spec.js']),
+    });
+    expect(
+      catalog.entries
+        .map((entry) => [entry.title, entry.reconciliation, entry.inferredKind, entry.resolutionOrigin])
+        .sort((left, right) => String(left[0]).localeCompare(String(right[0]))),
+    ).toEqual([
+      ['posting flow', 'matched', 'browser-e2e', 'static'],
+      ['setup flow', 'matched', 'browser-e2e', 'static'],
+    ]);
   });
 
   it('discovers runner-only cases through the native list fallback (origin native-list)', async () => {

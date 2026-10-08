@@ -1,6 +1,25 @@
 # Changelog
 
 ## Unreleased
+- **Playwright discovery: follow fixture-subpath test wrappers.** Static
+  discovery now recognizes the package root and exported `/fixture`
+  subpath as Playwright test sources, including wrappers imported through
+  local CommonJS or ESM modules. It also scans concrete Playwright-listed
+  files when their path is covered by a configured source glob under another
+  recognized extension, allowing static rows to join the runner inventory
+  and retain code-based kind inference.
+- **Playwright discovery: prove npm aliases from package metadata.** A bare
+  package alias is treated as the Gateforge runner only when the root or
+  nearest package manifest maps it to the exact Gateforge package, or the
+  installed package metadata names that package. Unproven external imports
+  remain unresolved.
+- **Mapping: unreadable tests cannot carry E2E claims.** A Playwright-listed
+  test whose code static discovery did not read cannot be mapped as
+  `browser-e2e`, `observed-e2e`, or `api-e2e` until the scan can inspect it.
+- **Discovery: join data-driven registrations by scanned call-site line.**
+  When Playwright's runtime title is computed, the scanner now carries the
+  call-site facts to every listed instance at that exact line; resolvable
+  titles continue to reconcile by title identity.
 
 - **Requests started by test code inside the page are not E2E evidence.**
   Chromium fixture requests are attributed through CDP's outermost script

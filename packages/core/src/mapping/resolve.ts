@@ -233,6 +233,14 @@ const PROBLEM_RANK: Readonly<Record<MappingProblemCause, number>> = Object.freez
 
 /** Test kinds that claim end-to-end proof (mocking disqualifies them, §3.2). */
 const E2E_KINDS: ReadonlySet<string> = new Set(['browser-e2e', 'observed-e2e', 'api-e2e']);
+function unreadableE2EClaimDetail(claimId: string, testKey: string, file: string, kind: string): string {
+  return (
+    `'${claimId}': Gateforge could not read the code of test '${testKey}' (${file}), so it cannot check ` +
+    `that the test really is ${kind}. Its claims are not accepted until the scan can read it. ` +
+    'Most likely cause: an unresolved test-wrapper import or a file extension outside the configured scan globs.'
+  );
+}
+
 
 /**
  * Whether a sidecar kind declaration is a refinement of the inferred
@@ -341,6 +349,7 @@ export function resolveTestMappings(input: ResolveMappingsInput): ResolvedMappin
   const sidecarEntries = [...input.sidecar.tests].sort((a, b) => compareStrings(a.key, b.key));
   for (const entry of sidecarEntries) {
     const claims = [...new Set(entry.claims)].sort(compareStrings);
+    const unreadableE2EClaims = new Set<string>();
     const matched = input.catalog.entries
       .filter((row) => matchesSelector(row, entry.selector))
       .sort((a, b) => compareStrings(a.logicalKey, b.logicalKey));
@@ -429,6 +438,19 @@ export function resolveTestMappings(input: ResolveMappingsInput): ResolvedMappin
     // Kind contradictions (§5.3: an explicit kind may resolve `unknown`,
     // but cannot override strong observed signals or observed mocking).
     for (const row of matched) {
+      if (entry.kind !== undefined && E2E_KINDS.has(entry.kind) && row.reconciliation === 'list-only') {
+        for (const obligationId of claims) {
+          if (!knownClaim(obligationId)) continue;
+          unreadableE2EClaims.add(obligationId);
+          pushProblem({
+            cause: 'TEST_KIND_UNKNOWN',
+            obligationId,
+            detail: unreadableE2EClaimDetail(obligationId, entry.key, row.file, entry.kind),
+            locations: [row.sourceLocation],
+          });
+        }
+        continue;
+      }
       if (entry.kind === undefined) {
         if (row.inferredKind === 'unknown') {
           for (const obligationId of claims) {
@@ -514,7 +536,7 @@ export function resolveTestMappings(input: ResolveMappingsInput): ResolvedMappin
     // Bind the declaration (many-to-many allowed). Ambiguity problems
     // above stay visible; the binding itself is data for suggestions.
     for (const obligationId of claims) {
-      if (!knownClaim(obligationId)) continue;
+      if (!knownClaim(obligationId) || unreadableE2EClaims.has(obligationId)) continue;
       bindingsFor(obligationId).set(entry.key, {
         logicalKey: entry.key,
         instances: matched.map(instanceOf),
@@ -579,6 +601,21 @@ export function resolveTestMappings(input: ResolveMappingsInput): ResolvedMappin
     const instances = input.catalog.entries
       .filter((row) => row.file === claim.testFile)
       .sort((a, b) => compareStrings(a.logicalKey, b.logicalKey));
+    const unreadableInstance = instances.find((row) => row.reconciliation === 'list-only');
+    if (unreadableInstance !== undefined) {
+      pushProblem({
+        cause: 'TEST_KIND_UNKNOWN',
+        obligationId: claim.obligationId,
+        detail: unreadableE2EClaimDetail(
+          claim.obligationId,
+          claim.testId,
+          unreadableInstance.file,
+          'an E2E kind',
+        ),
+        locations: [unreadableInstance.sourceLocation],
+      });
+      continue;
+    }
     const existingBindings = byClaim.get(claim.obligationId);
     const duplicate =
       existingBindings !== undefined &&

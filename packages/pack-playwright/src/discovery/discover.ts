@@ -35,9 +35,10 @@ import {
   deriveLogicalKey,
   TestCatalogSchema,
   type CatalogParseError,
-  type CatalogUnresolved,
   type GateforgeConfig,
+  type CatalogUnresolved,
   type Location,
+  pathInScope,
   type RunnerSummary,
   type TestCatalog,
   type TestCatalogEntry,
@@ -72,6 +73,7 @@ import {
   type StaticRegistrationWarning,
   type StaticScanResult,
   type StaticUnresolved,
+  type StaticTestFacts,
 } from './static-discovery.js';
 import {
   playwrightFileScopes,
@@ -244,6 +246,33 @@ export function unnamedProjectConfigWarning(configPath: string): string {
  *   maps this to exit 2. Scanner-detectable problems are rows, not
  *   throws.
  */
+/** Runner-selected files covered by configured source globs modulo extension. */
+function listedFilesWithinSourceGlobs(
+  listedFiles: readonly string[],
+  include: readonly string[],
+): string[] {
+  const includedExtensions = new Set<string>();
+  for (const pattern of include) {
+    const basename = pattern.slice(pattern.lastIndexOf('/') + 1);
+    for (const match of basename.matchAll(/\.([A-Za-z0-9]+)(?=[,}]|$)/g)) {
+      const extension = match[1];
+      if (extension !== undefined) includedExtensions.add(`.${extension}`);
+    }
+  }
+  if (includedExtensions.size === 0) return [];
+  const extensions = [...includedExtensions];
+  const selected = new Set<string>();
+  for (const file of listedFiles) {
+    const dot = file.lastIndexOf('.');
+    if (dot <= file.lastIndexOf('/')) continue;
+    const stem = file.slice(0, dot);
+    if (extensions.some((extension) => pathInScope(`${stem}${extension}`, include))) {
+      selected.add(file);
+    }
+  }
+  return [...selected].sort();
+}
+
 export async function discoverTestCatalog(options: DiscoverOptions): Promise<DiscoverResult> {
   const { cwd, config } = options;
   const discoveryStartedAtMs = performance.now();
@@ -252,23 +281,31 @@ export async function discoverTestCatalog(options: DiscoverOptions): Promise<Dis
   // configured runner's tests, and a file whose runner injects the test
   // GLOBALS (`globals: true`) registers tests without importing them.
   const vitestScopes = vitestFileScopes(cwd);
-  const scanStartedAtMs = performance.now();
-  const scan = scanTestFiles({
-    cwd,
-    include: config.project.paths.include,
-    exclude: config.project.paths.exclude,
-    excludeFile: options.excludeFile,
-    testGlobals: (file) =>
-      vitestScopes.some((scope) => scope.globals && scopeSelectsFile(scope, cwd, file)),
-  });
-  const scanMs = performance.now() - scanStartedAtMs;
-
   const nativeStartedAtMs = performance.now();
   const native = await listNativePlaywrightTests({
     cwd,
     timeoutMs: options.playwrightTimeoutMs,
   });
   const nativeListMs = performance.now() - nativeStartedAtMs;
+  // Include a runner-selected file when the configured source globs cover
+  // its path with another recognized extension, but preserve list-only
+  // status for files wholly outside the configured source scope.
+  const scanStartedAtMs = performance.now();
+  const scan = scanTestFiles({
+    cwd,
+    include: [
+      ...config.project.paths.include,
+      ...listedFilesWithinSourceGlobs(
+        native.instances.map((instance) => instance.file),
+        config.project.paths.include,
+      ),
+    ],
+    exclude: config.project.paths.exclude,
+    excludeFile: options.excludeFile,
+    testGlobals: (file) =>
+      vitestScopes.some((scope) => scope.globals && scopeSelectsFile(scope, cwd, file)),
+  });
+  const scanMs = performance.now() - scanStartedAtMs;
   // A playwright config with no named project breaks the
   // per-project identity join test-gates depend on. This is
   // the enumeration's own answer — the config is untrusted
@@ -641,6 +678,15 @@ class CatalogBuilder {
       extras.push(`${gap.location.file}:${String(gap.location.line)}`);
       gapExtras.set(key, extras);
     }
+    const dynamicGapsByLocation = new Map<string, StaticScanResult['unresolved'][number][]>();
+    for (const gap of this.scan.unresolved) {
+      if (gap.code !== 'dynamic-title' || gap.facts === undefined) continue;
+      const locationKey = `${gap.file}\u0000${gap.location.line}`;
+      const entries = dynamicGapsByLocation.get(locationKey) ?? [];
+      entries.push(gap);
+      dynamicGapsByLocation.set(locationKey, entries);
+    }
+    const consumedDynamicGaps = new Set<StaticScanResult['unresolved'][number]>();
     // A gap the native runner ALSO enumerated is RESOLVED BY THE RUNNER:
     // the --list run loaded the file and will execute that exact case, so
     // the discovered row stands and the gap merges into it as a weak
@@ -655,8 +701,14 @@ class CatalogBuilder {
         const template = instanceTemplate.get(key);
         const staticEntry = this.staticByKey.get(key) ?? template;
         if (staticEntry !== undefined) matchedStaticKeys.add(key);
-        const gap = gapsByKey.get(key);
-        rows.push(this.playwrightRow(instance, staticEntry, gap, template));
+        const dynamicCandidates =
+          staticEntry === undefined
+            ? dynamicGapsByLocation.get(`${instance.file}\u0000${instance.location.line}`)
+            : undefined;
+        const locationGap = dynamicCandidates?.length === 1 ? dynamicCandidates[0] : undefined;
+        if (locationGap !== undefined) consumedDynamicGaps.add(locationGap);
+        const gap = gapsByKey.get(key) ?? locationGap;
+        rows.push(this.playwrightRow(instance, staticEntry, gap, template, locationGap));
       }
     }
 
@@ -681,6 +733,28 @@ class CatalogBuilder {
     for (const [key, gap] of [...gapsByKey.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))) {
       if (enumeratedKeys.has(key)) continue;
       if (!isMember(gap.file)) continue;
+      if (gap.code === 'dynamic-title' && gap.facts !== undefined) {
+        const unresolvedCallSites = this.scan.unresolved.filter(
+          (candidate) =>
+            candidate.code === 'dynamic-title' &&
+            candidate.facts !== undefined &&
+            reconciliationKey(candidate.file, candidate.titlePath) === key &&
+            !consumedDynamicGaps.has(candidate),
+        );
+        if (unresolvedCallSites.length === 0) continue;
+        const row = this.unresolvedRow(unresolvedCallSites[0] as StaticScanResult['unresolved'][number]);
+        if (unresolvedCallSites.length > 1 && row.unresolvedReason !== undefined) {
+          row.unresolvedReason = {
+            ...row.unresolvedReason,
+            detail: `${row.unresolvedReason.detail} (further call sites: ${unresolvedCallSites
+              .slice(1)
+              .map((candidate) => `${candidate.file}:${String(candidate.location.line)}`)
+              .join(', ')})`,
+          };
+        }
+        rows.push(row);
+        continue;
+      }
       const row = this.unresolvedRow(gap);
       const extras = gapExtras.get(key);
       if (extras !== undefined && row.unresolvedReason !== undefined) {
@@ -700,27 +774,30 @@ class CatalogBuilder {
     staticEntry: StaticScanResult['entries'][number] | undefined,
     staticGap?: StaticScanResult['unresolved'][number],
     template?: StaticScanResult['entries'][number],
+    locationGap?: StaticScanResult['unresolved'][number],
   ): TestCatalogEntry {
     const digest = fileDigest(this.cwd, instance.file);
     // The native list reports '' when the run has no projects; the
     // catalog identity uses null for that (same as static-only rows) —
     // an empty-string project is a schema violation, never an identity.
     const project = instance.project === '' ? null : instance.project;
-    const matched = staticEntry !== undefined;
-    // Static-first: when the static scan derived the case, its facts feed
-    // kind inference. When it could not (or the file is outside the
-    // configured globs), the native runner's OWN enumeration is the
-    // identity source (resolution origin 'native-list'): the row is
-    // DISCOVERED — the runner proved the case exists and will execute it
-    // in the supervised run — but honestly weaker-classified: no static
-    // call-site facts were read, so no strong kind rule may fire.
+    const callSiteFacts = staticEntry?.facts ?? locationGap?.facts;
+    const callSiteSignals = staticEntry?.signals ?? locationGap?.signals ?? [];
+    const callSiteFile = staticEntry?.file ?? locationGap?.file ?? instance.file;
+    const matched = callSiteFacts !== undefined;
     const inference =
-      staticEntry === undefined
+      callSiteFacts === undefined
         ? nativeOnlyInference(instance)
-        : inferTestKind({ file: staticEntry.file, title: staticEntry.title, titlePath: staticEntry.titlePath, facts: staticEntry.facts });
-    const suppression = matched
-      ? suppressionOf(staticEntry, instance.annotations, instance.location)
-      : { mocks: nativeSuppression(instance.annotations, instance.location), flags: [] };
+        : inferTestKind({
+            file: callSiteFile,
+            title: instance.title,
+            titlePath: instance.titlePath,
+            facts: callSiteFacts,
+          });
+    const suppression =
+      callSiteFacts === undefined
+        ? { mocks: nativeSuppression(instance.annotations, instance.location), flags: [] }
+        : suppressionOf(callSiteFile, callSiteFacts, callSiteSignals, instance.annotations, instance.location);
     const weakSignals = [...inference.weakSignals];
     if (template !== undefined) {
       // The identity is a concrete enumerated instance; the static facts
@@ -786,7 +863,7 @@ class CatalogBuilder {
       facts: staticEntry.facts,
     });
     const digest = fileDigest(this.cwd, staticEntry.file);
-    const suppression = suppressionOf(staticEntry, [], staticEntry.location);
+    const suppression = suppressionOf(staticEntry.file, staticEntry.facts, staticEntry.signals, [], staticEntry.location);
     const owner = this.ownerOf(staticEntry.file);
     this.recordAttribution(owner, staticEntry.file);
     const foreign = owner !== '' && owner !== this.runner;
@@ -1100,12 +1177,14 @@ function nativeOnlyInference(instance: NativeListResult['instances'][number]): I
 
 /** Splits static signals into mock vs skip/only/fixme rows. */
 function suppressionOf(
-  staticEntry: StaticScanResult['entries'][number],
+  file: string,
+  facts: StaticTestFacts,
+  signals: StaticScanResult['entries'][number]['signals'],
   annotations: readonly string[],
   annotationLocation: Location,
 ) {
-  const mocks = mockSignalsOf(staticEntry);
-  const flags = staticEntry.signals.map((signal) => ({
+  const mocks = mockSignalsOf(file, facts);
+  const flags = signals.map((signal) => ({
     kind: signal.kind,
     detail: signal.detail,
     location: signal.location,
@@ -1133,24 +1212,24 @@ function nativeSuppression(annotations: readonly string[], location: Location) {
     }));
 }
 
-/** Mock suppression signals from a static entry's facts. */
-function mockSignalsOf(staticEntry: StaticScanResult['entries'][number]) {
+/** Mock suppression signals from call-site facts. */
+function mockSignalsOf(file: string, facts: StaticTestFacts) {
   const signals: Array<{ kind: 'mock'; detail: string; location: Location }> = [];
-  if (staticEntry.facts.pageRoute !== null) {
-    signals.push({ kind: 'mock', detail: 'page.route interception inside the test body', location: staticEntry.facts.pageRoute });
+  if (facts.pageRoute !== null) {
+    signals.push({ kind: 'mock', detail: 'page.route interception inside the test body', location: facts.pageRoute });
   }
-  if (staticEntry.facts.fileRouteInterception !== null) {
+  if (facts.fileRouteInterception !== null) {
     signals.push({
       kind: 'mock',
-      detail: `PAGE_OBSERVATION_TAMPER_RISK: browser API mutation at ${staticEntry.facts.fileRouteInterception.file}:${staticEntry.facts.fileRouteInterception.line}`,
-      location: staticEntry.facts.fileRouteInterception,
+      detail: `PAGE_OBSERVATION_TAMPER_RISK: browser API mutation at ${facts.fileRouteInterception.file}:${facts.fileRouteInterception.line}`,
+      location: facts.fileRouteInterception,
     });
   }
-  if (isMockedFolderPath(staticEntry.file)) {
-    signals.push({ kind: 'mock', detail: "the spec lives in a 'mocked' folder", location: { file: staticEntry.file, line: 1, col: 0 } });
+  if (isMockedFolderPath(file)) {
+    signals.push({ kind: 'mock', detail: "the spec lives in a 'mocked' folder", location: { file, line: 1, col: 0 } });
   }
-  if (staticEntry.facts.fileMockImport !== null) {
-    signals.push({ kind: 'mock', detail: 'vi.mock/jest.mock module mock in the test file', location: staticEntry.facts.fileMockImport });
+  if (facts.fileMockImport !== null) {
+    signals.push({ kind: 'mock', detail: 'vi.mock/jest.mock module mock in the test file', location: facts.fileMockImport });
   }
   return signals;
 }
