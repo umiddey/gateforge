@@ -49,7 +49,9 @@ function withResolvers<T>(): {
 }
 
 /** The attested fixture app every observation proxy forwards to. */
-const app: Server = createServer((_req, res) => {
+let appSawInitiatorHeader = false;
+const app: Server = createServer((req, res) => {
+  appSawInitiatorHeader = req.headers['x-gateforge-initiator'] !== undefined;
   res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
   res.end(APP_MARKER);
 });
@@ -123,9 +125,9 @@ async function closeSession(session: SessionCredential): Promise<void> {
  * pooled keep-alive socket would outlive a sealed proxy's
  * listeners and mask the refused channel.
  */
-function httpGet(url: string): Promise<{ status: number; body: string }> {
+function httpGet(url: string, headers: Record<string, string> = {}): Promise<{ status: number; body: string }> {
   const { promise, resolve, reject } = withResolvers<{ status: number; body: string }>();
-  const call = get(url, { agent: false }, (res) => {
+  const call = get(url, { agent: false, headers }, (res) => {
     let body = '';
     res.on('data', (chunk: Buffer) => (body += chunk.toString()));
     res.on('end', () => resolve({ status: res.statusCode ?? 0, body }));
@@ -172,5 +174,15 @@ describe('the observation proxy serves every loopback address', () => {
         /ECONNREFUSED/,
       );
     }
+  });
+
+  it('strips the fixture initiator marker before forwarding to the app', async () => {
+    const session = await openSession();
+    appSawInitiatorHeader = false;
+    const answer = await httpGet(`${session.proxyUrl}/`, { 'x-gateforge-initiator': 'test-code' });
+    expect(answer.status).toBe(200);
+    expect(answer.body).toBe(APP_MARKER);
+    expect(appSawInitiatorHeader).toBe(false);
+    await closeSession(session);
   });
 });

@@ -122,14 +122,20 @@ test('${TITLE_CONTEXT_REQUEST}', async ({ page, context }) => {
 });
 `;
 
-const EVALUATE_FETCH_SPEC = `import { test } from '@gate-forge/pack-playwright';
+const EVALUATE_FETCH_SPEC = `const { test } = require('./support/test.cjs');
+// This wrapper shape is invisible to the static scan today; if the scan
+// learns to follow wrappers, this scenario may be refused statically first,
+// then assert not-satisfied with either reason.
 test('${TITLE_EVALUATE_FETCH}', async ({ page }) => {
   await page.goto('/');
   await page.evaluate(() => fetch('/api/eval-fetch'));
 });
 `;
 
-const EVALUATE_APP_SPEC = `import { test } from '@gate-forge/pack-playwright';
+const EVALUATE_APP_SPEC = `const { test } = require('./support/test.cjs');
+// This wrapper shape is invisible to the static scan today; if the scan
+// learns to follow wrappers, this scenario may be refused statically first,
+// then assert not-satisfied with either reason.
 test('${TITLE_EVALUATE_APP}', async ({ page }) => {
   await page.goto('/');
   await page.evaluate(() => window.appAsync());
@@ -139,9 +145,17 @@ test('${TITLE_EVALUATE_APP}', async ({ page }) => {
 const APP_ASYNC_SPEC = `import { test } from '@gate-forge/pack-playwright';
 test('${TITLE_APP_ASYNC}', async ({ page }) => {
   await page.goto('/');
-  await page.getByRole('button', { name: 'Load async' }).click();
+  await Promise.all([
+    page.waitForResponse((response) => new URL(response.url()).pathname === '/api/app-async'),
+    page.getByRole('button', { name: 'Load async' }).click(),
+  ]);
 });
 `;
+const TEST_WRAPPER = `const { test: base, expect } = require('@gate-forge/pack-playwright/fixture');
+exports.test = base.extend({});
+exports.expect = expect;
+`;
+
 
 /** The endpoint inventory: GET /api/items classified tenant, with its two observation obligations owed. */
 const API_DETECTOR = `import { endpointResourceName } from '@gate-forge/http-contract';
@@ -201,6 +215,7 @@ async function startApiApp(): Promise<{
   let seeded = false;
   const app = createServer((request, response) => {
     const path = (request.url ?? '/').split('?')[0] ?? '/';
+    requestsByPath.set(path, (requestsByPath.get(path) ?? 0) + 1);
     response.setHeader('x-gateforge-env-fingerprint', FINGERPRINT);
     if (request.method === 'GET' && path === '/') {
       response.setHeader('content-type', 'text/html');
@@ -266,7 +281,10 @@ async function runCliProcess(cwd: string, env: Record<string, string>, args: rea
 interface LedgerRecord {
   kind?: string;
   testId?: string;
-  payload?: { channel?: string; exchanges?: Array<{ method?: string; url?: string; status?: number }> };
+  payload?: {
+    channel?: string;
+    exchanges?: Array<{ method?: string; url?: string; status?: number; initiator?: string }>;
+  };
 }
 
 /**
@@ -305,8 +323,9 @@ describe('witnessed API request channel through the actual CLI', () => {
           '.gateforge.yml': `${GATEFORGE_YML.replace('adapters: .gateforge/adapters', 'adapters: .gateforge/adapters-api')}runtime: .gateforge/runtime.yml\n`,
           '.gateforge/adapters-api/.gitkeep': '',
           '.gateforge/runtime.yml': 'schemaVersion: 1\nenvAllowlist: [TEST_SERVICE_URL]\n',
-          'specs/eval-fetch.spec.js': EVALUATE_FETCH_SPEC,
-          'specs/eval-app.spec.js': EVALUATE_APP_SPEC,
+          'specs/support/test.cjs': TEST_WRAPPER,
+          'specs/eval-fetch.spec.cjs': EVALUATE_FETCH_SPEC,
+          'specs/eval-app.spec.cjs': EVALUATE_APP_SPEC,
           'specs/app-async.spec.js': APP_ASYNC_SPEC,
           '.gateforge/fixture-detector.mjs': API_DETECTOR,
           '.gateforge/policies.yml':
@@ -369,20 +388,20 @@ tests:
     kind: observed-e2e
     claims: ['${CONTEXT_REQUEST}', '${CONTEXT_STATUS}']
     reason: context.request is a direct API call, not a UI action.
-  - key: playwright:chromium:specs/eval-fetch.spec.js:${TITLE_EVALUATE_FETCH}
+  - key: playwright:chromium:specs/eval-fetch.spec.cjs:${TITLE_EVALUATE_FETCH}
     selector:
       runner: playwright
       project: chromium
-      file: specs/eval-fetch.spec.js
+      file: specs/eval-fetch.spec.cjs
       titlePath: ['${TITLE_EVALUATE_FETCH}']
     kind: observed-e2e
     claims: ['${EVAL_REQUEST}', '${EVAL_STATUS}']
     reason: page.evaluate requests are not app UI actions.
-  - key: playwright:chromium:specs/eval-app.spec.js:${TITLE_EVALUATE_APP}
+  - key: playwright:chromium:specs/eval-app.spec.cjs:${TITLE_EVALUATE_APP}
     selector:
       runner: playwright
       project: chromium
-      file: specs/eval-app.spec.js
+      file: specs/eval-app.spec.cjs
       titlePath: ['${TITLE_EVALUATE_APP}']
     kind: observed-e2e
     claims: ['${EVAL_APP_REQUEST}', '${EVAL_APP_STATUS}']
@@ -420,6 +439,22 @@ tests:
           verdicts: Array<{ obligationId: string; verdict: string; reason?: string }>;
           execution: { selectedTests: { selected: number; passed: number; failed: number } };
         };
+        const records = JSON.parse(readFileSync(repo.path('.gateforge/test-gates/records.json'), 'utf8')) as LedgerRecord[];
+        const evalFetchExchange = records
+          .filter((record) => record.kind === 'http.observed' && record.payload?.channel === 'observe')
+          .flatMap((record) => record.payload?.exchanges ?? [])
+          .find((exchange) => exchange.url?.endsWith('/api/eval-fetch'));
+        expect(evalFetchExchange?.initiator, observed).toBe('test-code');
+        const appAsyncExchange = records
+          .filter((record) => record.kind === 'http.observed' && record.payload?.channel === 'observe')
+          .flatMap((record) => record.payload?.exchanges ?? [])
+          .find((exchange) => exchange.url?.endsWith('/api/app-async'));
+        expect(appAsyncExchange, observed).toMatchObject({
+          method: 'GET',
+          url: '/api/app-async',
+          status: 200,
+        });
+        expect(appAsyncExchange?.initiator, JSON.stringify(appAsyncExchange)).toBeUndefined();
         for (const obligationId of [ITEMS_REQUEST, ITEMS_STATUS]) {
           expect(report.verdicts.find((item) => item.obligationId === obligationId), observed).toMatchObject({
             verdict: 'missing',
@@ -445,7 +480,7 @@ tests:
         for (const obligationId of testInitiatedClaims) {
           const verdict = report.verdicts.find((item) => item.obligationId === obligationId);
           expect(verdict, observed).toMatchObject({ verdict: 'missing' });
-          expect(verdict?.reason ?? '').toContain('the request was started by test code running in the page');
+          expect(verdict?.reason ?? '', observed).toContain('the request was started by test code running in the page');
         }
         for (const obligationId of [ASYNC_REQUEST, ASYNC_STATUS]) {
           expect(report.verdicts.find((item) => item.obligationId === obligationId), observed)
@@ -462,7 +497,6 @@ tests:
         expect(app.requestsByPath.get('/api/eval-fetch')).toBe(1);
         expect(app.requestsByPath.get('/api/eval-app')).toBe(1);
         expect(app.requestsByPath.get('/api/app-async')).toBe(1);
-        const records = JSON.parse(readFileSync(repo.path('.gateforge/test-gates/records.json'), 'utf8')) as LedgerRecord[];
         const recordedPaths = recordedExchangePaths(records);
         for (const path of ['/api/items', '/api/seed-only', '/api/page-request', '/api/context-request']) {
           expect(recordedPaths.some((exchangePath) => exchangePath.endsWith(path))).toBe(false);

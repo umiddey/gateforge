@@ -23,7 +23,7 @@ import { chromium, firefox, webkit, request as playwrightRequest } from 'playwri
 import type { Page, TestInfo } from 'playwright/test';
 import { createServer as createTcpServer } from 'node:net';
 import { once } from 'node:events';
-import type { APIRequestContext, Browser } from 'playwright/test';
+import type { APIRequestContext, Browser, CDPSession } from 'playwright/test';
 
 import { expect, test as base } from './consumer-runner.js';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -37,6 +37,7 @@ import { wrapDirectRequestContext } from './api-request.js';
 import { WitnessClient, type SessionPageObserverFlushRequest } from './witness-client.js';
 import type { SessionCredential } from '../witness/types.js';
 const browserDebuggingPorts = new WeakMap<Browser, number>();
+const unavailableInitiatorBrowsers = new Set<string>();
 
 /**
  * Flushes this test's page observations to the witness. A flush failure
@@ -105,6 +106,61 @@ function projectBaseURL(testInfo: TestInfo): string | undefined {
 }
 
 
+interface CdpInitiatorFrame {
+  url?: string;
+}
+
+interface CdpInitiatorStack {
+  callFrames?: CdpInitiatorFrame[];
+  parent?: CdpInitiatorStack;
+}
+
+interface CdpRequestInitiatorEvent {
+  request: { method: string; url: string };
+  initiator?: { stack?: CdpInitiatorStack };
+}
+
+/**
+ * Attaches Chromium's script initiator to requests in arrival order.
+ * Missing CDP events deliberately remain unknown and preserve prior behavior.
+ */
+interface InitiatorTracking {
+  session: CDPSession;
+  classify(method: string, url: string): Promise<'page' | 'test-code' | 'unknown'>;
+}
+
+async function attachInitiatorTracking(page: Page, appBaseURL: string): Promise<InitiatorTracking> {
+  const session = await page.context().newCDPSession(page);
+  const pending = new Map<string, Array<'page' | 'test-code' | 'unknown'>>();
+  const appOriginPrefix = `${new URL(appBaseURL).origin}/`;
+  session.on('Network.requestWillBeSent', (event: CdpRequestInitiatorEvent) => {
+    if (!event.request.url.startsWith(appOriginPrefix)) return;
+    let deepest = event.initiator?.stack;
+    while (deepest?.parent !== undefined) deepest = deepest.parent;
+    const outermost = deepest?.callFrames?.at(-1);
+    const verdict = outermost === undefined ? 'unknown' : outermost.url ? 'page' : 'test-code';
+    const key = `${event.request.method} ${event.request.url}`;
+    const queue = pending.get(key) ?? [];
+    queue.push(verdict);
+    pending.set(key, queue);
+  });
+  await session.send('Network.enable');
+  await session.send('Debugger.enable');
+  await session.send('Debugger.setAsyncCallStackDepth', { maxDepth: 32 });
+  return {
+    session,
+    async classify(method, url) {
+      const key = `${method} ${url}`;
+      // CDP normally precedes interception; allow its event to arrive if
+      // scheduling races the route callback. No event means unknown.
+      if ((pending.get(key)?.length ?? 0) === 0) await delay(50);
+      const queue = pending.get(key);
+      const verdict = queue?.shift();
+      if (queue?.length === 0) pending.delete(key);
+      return verdict ?? 'unknown';
+    },
+  };
+}
 /**
  * Routes browser requests for the configured app origin through the
  * supervisor-issued session proxy, preserving the app URL and path.
@@ -128,6 +184,7 @@ export async function routePageThroughSessionProxy(
   appBaseURL: string,
   sessionProxyURL: string,
   onUnroutedOrigin?: (origin: string) => void,
+  initiatorForRequest?: (method: string, url: string) => Promise<'page' | 'test-code' | 'unknown'>,
 ): Promise<void> {
   const appOrigin = new URL(appBaseURL);
   const sessionOrigin = new URL(sessionProxyURL);
@@ -149,8 +206,13 @@ export async function routePageThroughSessionProxy(
       await route.continue();
       return;
     }
+    const originalURL = requestURL.href;
     requestURL.host = sessionOrigin.host;
-    await route.continue({ url: requestURL.href });
+    const initiator = await initiatorForRequest?.(route.request().method(), originalURL);
+    const headers = initiator === 'test-code'
+      ? { ...route.request().headers(), 'x-gateforge-initiator': 'test-code' }
+      : undefined;
+    await route.continue({ url: requestURL.href, ...(headers === undefined ? {} : { headers }) });
   });
 }
 
@@ -338,7 +400,7 @@ const extended = browserRunner.extend<EvidenceFixtures>({
       await settleDirectExchangeReports(testInfo);
     }
   }, { auto: true }],
-  page: async ({ page, browser }, use, testInfo) => {
+  page: async ({ page, browser, browserName }, use, testInfo) => {
     if (!process.env[ENV_WITNESS_URL]) {
       await use(page);
       return;
@@ -389,10 +451,25 @@ const extended = browserRunner.extend<EvidenceFixtures>({
         testId: session.testId,
       });
     };
+    let initiatorTracking: InitiatorTracking | undefined;
+    if (browserName === 'chromium') {
+      initiatorTracking = await attachInitiatorTracking(page, appBaseURL);
+    } else if (!unavailableInitiatorBrowsers.has(browserName)) {
+      unavailableInitiatorBrowsers.add(browserName);
+      console.warn(
+        `initiator check unavailable for ${browserName}; requests started by test code cannot be told apart`,
+      );
+    }
     if (session.proxyUrl !== null) {
       const sessionProxyUrl: string = session.proxyUrl;
       const reporter = createUnroutedOriginReporter({ witness, session, appBaseURL });
-      await routePageThroughSessionProxy(page, appBaseURL, sessionProxyUrl, reporter.report);
+      await routePageThroughSessionProxy(
+        page,
+        appBaseURL,
+        sessionProxyUrl,
+        reporter.report,
+        initiatorTracking?.classify,
+      );
       // Do not wrap page/context.request: Playwright's Route.fetch uses
       // the context request internally to forward browser traffic here.
       try {
@@ -401,7 +478,11 @@ const extended = browserRunner.extend<EvidenceFixtures>({
         try {
           await reporter.settled();
         } finally {
-          await flushPageObserver();
+          try {
+            await flushPageObserver();
+          } finally {
+            await initiatorTracking?.session.detach();
+          }
         }
       }
       return;
@@ -409,7 +490,11 @@ const extended = browserRunner.extend<EvidenceFixtures>({
     try {
       await use(page);
     } finally {
-      await flushPageObserver();
+      try {
+        await flushPageObserver();
+      } finally {
+        await initiatorTracking?.session.detach();
+      }
     }
   },
   request: async ({ request }, use, testInfo) => {

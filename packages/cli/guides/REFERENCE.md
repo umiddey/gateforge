@@ -1147,6 +1147,17 @@ else):
 | `http:effect-verified`, `http:read-result-verified` | AVAILABLE (behavior-case channel) — graded across the approved required cases with witness-issued `behavior.case` records; needs a compiled `behaviorPolicy` requirement set |
 | `auth:*`, `validation:*`, `task:*`, `webhook:*`, `workflow:*` | AVAILABLE (behavior-case channel) — same required-case aggregation over engine-controlled requests with independent state scopes. A repository that declares no case for the obligation stays blocking `missing`: the grader never falls back to transport evidence |
 
+For browser requests observed through the Playwright fixture, Chromium also
+checks the request's CDP script initiator. A request whose outermost async
+call-stack frame has no URL (for example, `page.evaluate` or an injected
+script) is retained as an observation but never satisfies transport
+evidence; when it is the only matching exchange, the verifier directs the
+owner to drive the operation through the UI. Requests without a script stack
+and requests whose outermost frame belongs to page code remain eligible.
+This initiator distinction is Chromium-only. Firefox and WebKit preserve
+their prior behavior and emit a diagnostic that the distinction is
+unavailable.
+
 
 A behavior case may declare a `signatureProfile` on its `request`
 action: an algorithm plus bounded `;key=value` parameters

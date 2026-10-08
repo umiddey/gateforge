@@ -689,6 +689,7 @@ interface ObservedExchangeFacts {
   method: unknown;
   url: unknown;
   status: unknown;
+  initiator?: unknown;
 }
 
 /**
@@ -701,7 +702,7 @@ interface ObservedExchangeFacts {
 type ExchangeGrade =
   | { ok: true }
   | { ok: false; status: 'invalid'; reason: string; ownRoute: boolean }
-  | { ok: false; status: 'missing'; reason: string };
+  | { ok: false; status: 'missing'; reason: string; testInitiated?: true };
 
 /**
  * Grades ONE observed HTTP exchange against the obligation's endpoint
@@ -808,6 +809,16 @@ function gradeObservedExchange(
         `but the obligation requires endpoint '${input.obligation.resourceId}'; evidence from ` +
         'a different endpoint can never satisfy it',
       ownRoute: false,
+    };
+  }
+  if (facts.initiator === 'test-code') {
+    return {
+      ok: false,
+      status: 'missing',
+      testInitiated: true,
+      reason:
+        `'${input.obligation.id}': the request was started by test code running in the page ` +
+        "(page.evaluate / injected script), not by the app's UI. Drive the operation through the UI.",
     };
   }
   if (input.obligation.contract === 'http:response-status-ok') {
@@ -989,6 +1000,7 @@ function gradeObservedTransport(input: ClaimEvidenceInput): ClaimOutcome | null 
   // endpoints the same session also made (a login before the call).
   const ownInvalidReasons: string[] = [];
   const invalidReasons: string[] = [];
+  const testInitiatedReasons: string[] = [];
   const missingReasons: string[] = [];
   for (const entry of records) {
     const label = String(entry.record.recordId);
@@ -1011,12 +1023,13 @@ function gradeObservedTransport(input: ClaimEvidenceInput): ClaimOutcome | null 
     }
     let invalid: string | null = null;
     let ownInvalid: string | null = null;
+    let testInitiated: string | null = null;
     let missing: string | null = null;
     let matchedHere = false;
     for (const raw of exchanges) {
       const facts =
         typeof raw === 'object' && raw !== null && !Array.isArray(raw)
-          ? { method: raw['method'], url: raw['url'], status: raw['status'] }
+          ? { method: raw['method'], url: raw['url'], status: raw['status'], initiator: raw['initiator'] }
           : { method: undefined, url: undefined, status: undefined };
       const grade = gradeObservedExchange(facts, input, subject, inventoryBlock, candidates);
       if (grade.ok) {
@@ -1029,12 +1042,15 @@ function gradeObservedTransport(input: ClaimEvidenceInput): ClaimOutcome | null 
         } else if (invalid === null) {
           invalid = grade.reason;
         }
+      } else if (grade.testInitiated) {
+        if (testInitiated === null) testInitiated = grade.reason;
       } else if (missing === null) {
         missing = grade.reason;
       }
     }
     if (matchedHere) satisfied.push(label);
     else if (ownInvalid !== null) ownInvalidReasons.push(ownInvalid);
+    else if (testInitiated !== null) testInitiatedReasons.push(testInitiated);
     else if (invalid !== null) invalidReasons.push(invalid);
     else if (missing !== null) missingReasons.push(missing);
   }
@@ -1048,6 +1064,9 @@ function gradeObservedTransport(input: ClaimEvidenceInput): ClaimOutcome | null 
   }
   if (ownInvalidReasons.length > 0) {
     return { status: 'invalid', reason: ownInvalidReasons.sort(compareStrings)[0] as string };
+  }
+  if (testInitiatedReasons.length > 0) {
+    return { status: 'missing', reason: testInitiatedReasons.sort(compareStrings)[0] as string };
   }
   if (invalidReasons.length > 0) {
     return { status: 'invalid', reason: invalidReasons.sort(compareStrings)[0] as string };
@@ -1130,7 +1149,10 @@ function gradeTransportObservation(input: ClaimEvidenceInput): ClaimOutcome {
   }
   if (observed.status === 'satisfied') return observed;
   if (observed.status === 'invalid') return observed;
-  if (directDiagnosis !== null) return { status: 'missing', reason: directDiagnosis, recordIds: [] };
+  if (
+    observed.status === 'missing' &&
+    observed.reason?.includes('the request was started by test code running in the page')
+  ) return observed;
   return {
     status: 'missing',
     reason: [anchored.reason, observed.reason].sort(compareStrings)[0] as string,

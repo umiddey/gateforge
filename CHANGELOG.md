@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Requests started by test code inside the page are not E2E evidence.**
+  Chromium fixture requests are attributed through CDP's outermost script
+  initiator; page-evaluated and injected-script requests cannot satisfy
+  observed transport claims. Requests without script initiators and real
+  app code remain eligible. Other browsers retain existing behavior and
+  report that test-code initiators cannot be distinguished.
 - **Deliberate tightening: test-code API requests are never E2E evidence.**
   This reverses 0.13.2's crediting of Playwright API calls: requests made
   by test code go directly to the app, never through the session proxy, and

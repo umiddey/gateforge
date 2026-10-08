@@ -147,7 +147,7 @@
  * At shutdown the witness appends the record ids it issued to
  * `manifest.json` in the run-state dir (pin #4/#7).
  */
-import { createServer, request, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { createServer, request, type IncomingMessage, type OutgoingHttpHeaders, type Server, type ServerResponse } from 'node:http';
 import { createHash, randomUUID } from 'node:crypto';
 import { lookup } from 'node:dns/promises';
 import { readFileSync, renameSync, writeFileSync } from 'node:fs';
@@ -410,6 +410,8 @@ interface ObservedExchange {
    * The body was not parsed at all; the finalize names the conflict.
    */
   collectionConflict?: string[];
+  /** Set by the Playwright fixture for a request initiated in evaluated test code. */
+  initiator?: 'test-code';
 }
 
 /**
@@ -1064,6 +1066,7 @@ async function startObservedProxy(
       // claims. With no declared mount path the URL is forwarded and
       // recorded byte-identical to today.
       const forwardUrl = stripMountPath(req.url ?? '/', state.options.mountPath);
+      const testCodeInitiated = req.headers['x-gateforge-initiator'] === 'test-code';
       // In-flight accounting (plan §11.4): a proxy exchange that starts
       // before `/run-context` binds must refuse the bind — otherwise
       // traffic from an older invocation could be signed under the new
@@ -1169,6 +1172,7 @@ async function startObservedProxy(
             requestContentType: contentTypeOf(req.headers['content-type']),
             sessionId,
             tick: (state.tick += 1),
+            ...(testCodeInitiated ? { initiator: 'test-code' as const } : {}),
             ...(collectionShape !== null
               ? {
                   collectionRows: parseCollectionRows(
@@ -1204,6 +1208,8 @@ async function startObservedProxy(
         res.writeHead(status, upstream.headers);
         upstream.pipe(res);
       };
+      const forwardHeaders: OutgoingHttpHeaders = { ...req.headers, host: proxyTargetUrl.host };
+      delete forwardHeaders['x-gateforge-initiator'];
       const forward = request(
         {
           protocol: proxyTargetUrl.protocol,
@@ -1211,7 +1217,7 @@ async function startObservedProxy(
           port: proxyTargetUrl.port,
           method: req.method,
           path: forwardUrl,
-          headers: { ...req.headers, host: proxyTargetUrl.host },
+          headers: forwardHeaders,
           agent: false,
         },
         (upstream) => {
@@ -5689,25 +5695,30 @@ function zeroTrafficCause(state: WitnessState, session: TestSession): string {
  * is a typed `missing-traffic` note at the call site, never a record.
  */
 interface TransportSnapshot {
-  readonly exchanges: ReadonlyArray<{ method: string; url: string; status: number }>;
+  readonly exchanges: ReadonlyArray<{ method: string; url: string; status: number; initiator?: 'test-code' }>;
   readonly truncated: boolean;
 }
 
 function transportSnapshot(state: WitnessState, session: TestSession): TransportSnapshot {
   const watermark = state.runContext === null ? 0 : state.observedSeqAtBind;
   const seen: Record<string, true> = Object.create(null) as Record<string, true>;
-  const exchanges: Array<{ method: string; url: string; status: number }> = [];
+  const exchanges: Array<{ method: string; url: string; status: number; initiator?: 'test-code' }> = [];
   let truncated = false;
   for (const exchange of state.observed) {
     if (exchange.sessionId !== session.sessionId || exchange.seq <= watermark) continue;
-    const key = `${exchange.method} ${exchange.path} ${String(exchange.status)}`;
+    const key = `${exchange.method} ${exchange.path} ${String(exchange.status)} ${exchange.initiator ?? 'page'}`;
     if (key in seen) continue;
     seen[key] = true;
     if (exchanges.length >= OBSERVED_EXCHANGES_CAP) {
       truncated = true;
       continue;
     }
-    exchanges.push({ method: exchange.method, url: exchange.path, status: exchange.status });
+    exchanges.push({
+      method: exchange.method,
+      url: exchange.path,
+      status: exchange.status,
+      ...(exchange.initiator === 'test-code' ? { initiator: exchange.initiator } : {}),
+    });
   }
   return { exchanges, truncated };
 }
@@ -5770,6 +5781,7 @@ async function finalizeObserveClaim(
   const matches: Array<{ exchange: ObservedExchange; id: string | null }> = [];
   for (const exchange of state.observed) {
     if (exchange.sessionId !== session.sessionId || exchange.seq <= watermark) continue;
+    if (exchange.initiator === 'test-code') continue;
     if (exchange.method !== binding.method) continue;
     if (exchange.status < 200 || exchange.status > 299) continue;
     const matched = matchObserveTemplate(exchange.path, binding.path);

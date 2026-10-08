@@ -951,6 +951,25 @@ describe('transport Observe channel (plan 0.9.2 item D)', () => {
     ]);
   });
 
+  it('does not credit an Observe exchange initiated by evaluated test code', () => {
+    const testInitiated = observedRecord(transportObligation.id, {
+      exchanges: [{ method: 'GET', url: '/accounts/456', status: 200, initiator: 'test-code' }],
+    });
+    const outcome = httpOutcome(transportObligation, [testInitiated]);
+    expect(outcome.verdict).toBe('missing');
+    expect(outcome.reason).toBe(
+      "'tenant.accounts:http:request-observed': the request was started by test code running in the page " +
+        "(page.evaluate / injected script), not by the app's UI. Drive the operation through the UI.",
+    );
+    const appRequest = observedRecord(transportObligation.id, {
+      exchanges: [
+        { method: 'GET', url: '/accounts/456', status: 200, initiator: 'test-code' },
+        { method: 'GET', url: '/accounts/456', status: 200 },
+      ],
+    });
+    expect(httpOutcome(transportObligation, [appRequest]).verdict).toBe('satisfied');
+  });
+
   it('I6 (d): an engine-only claim grades the same whatever the observe records are', () => {
     // The channel that says nothing cannot reword the channel that did:
     // with no admissible `http.observed` record the anchor outcome is
