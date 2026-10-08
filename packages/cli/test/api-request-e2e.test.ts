@@ -164,7 +164,7 @@ async function startApiApp(): Promise<{
   let seeded = false;
   const app = createServer((request, response) => {
     const path = (request.url ?? '/').split('?')[0] ?? '/';
-    requestsByPath.set(path, (requestsByPath.get(path) ?? 0) + 1);
+    response.setHeader('x-gateforge-env-fingerprint', FINGERPRINT);
     if (request.method === 'GET' && path === '/') {
       response.setHeader('content-type', 'text/html');
       response.end('<button>Load items</button><div id="result"></div><script>document.querySelector("button").onclick=async()=>{await fetch("/api/ui-items");document.querySelector("#result").textContent="Items loaded"}</script>');
