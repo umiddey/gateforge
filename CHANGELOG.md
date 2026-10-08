@@ -8,6 +8,11 @@
   included when an E2E mapping contradicts the inferred kind. Unfollowable
   fixtures remain `unknown`; runtime proof rules are unchanged.
 
+- **HTTP-client kind signals follow reached helpers and Playwright API
+  requests (F4).** Discovery attributes HTTP calls in imported helpers only
+  to tests whose bodies reach them, and recognizes `page.request` and
+  `context.request` methods as API-client calls.
+
 ## 0.13.9
 
 Theme: Gateforge exists to catch fake tests. This release closes three ways a

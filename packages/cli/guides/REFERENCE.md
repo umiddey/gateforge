@@ -2044,6 +2044,13 @@ signals for every instance registered at that line. Resolvable titles
 continue to require title-path identity; a different literal title is
 never joined by line alone.
 
+Static Playwright discovery assigns the `http-client-call` kind signal to
+`fetch`/`axios` calls and to API-client methods called through
+`page.request` or `context.request`. It follows the same bounded import and
+per-test helper reachability used for route-tamper attribution: a helper's
+HTTP call counts only for a test that calls a reachable helper, not every
+test that merely imports the module.
+
 ### Provenance trust model (GF-23, audited 2026-08-31, three rounds)
 
 `records.json` and `manifest.json` live in the suite-writable state
