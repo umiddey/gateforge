@@ -815,10 +815,7 @@ describe('kind/category inference rules', () => {
     expect(result.kindSignals[0]?.ruleId).toBe('api-request-fixture');
   });
 
-  it('a gateforge-pack request fixture stays kindless: the witnessed API channel is marked observed-e2e', () => {
-    // The pack's API request channel rehosts those calls through the
-    // session proxy, so a strong api-e2e inference here would block the
-    // exact `observed-e2e` declaration the channel exists to prove.
+  it('a gateforge-pack request fixture still infers api-e2e', () => {
     const result = inferTestKind({
       file: 'e2e/api.spec.ts',
       title: 'calls the service',
@@ -829,8 +826,8 @@ describe('kind/category inference rules', () => {
         gateforgeFixtureImport: { file: 'e2e/api.spec.ts', line: 1, col: 0 },
       },
     });
-    expect(result.inferredKind).toBe('unknown');
-    expect(result.kindSignals).toEqual([]);
+    expect(result.inferredKind).toBe('api-e2e');
+    expect(result.kindSignals[0]?.ruleId).toBe('api-request-fixture');
   });
 
   it('an http client call fires api-e2e even without fixtures', () => {

@@ -214,19 +214,13 @@ export const SERVER_E2E_TEST_KIND = 'server-e2e';
 export const OBSERVE_CHANNEL = 'observe';
 
 /**
- * Payload discriminant the witness stamps on the ONE run-scoped record
- * carrying the hook-scope exchanges the fixture reported (0.13.9). The
- * verdict engine reads `channel: 'setup'` records purely for the
- * missing-claim diagnosis — a setup record can never satisfy anything.
- * Mirrors `SETUP_CHANNEL` in core's `pack-verifiers.ts` — keep the two
- * in lockstep.
+ * Payload discriminant for run-scoped direct API exchanges. These records
+ * are diagnostic only and can never satisfy a claim. Mirrors
+ * `DIRECT_CHANNEL` in core's `pack-verifiers.ts`.
  */
-export const SETUP_CHANNEL = 'setup';
+export const SETUP_CHANNEL = 'direct';
 
-/**
- * Upper bound on the distinct hook-scope exchanges one run keeps (the
- * diagnosis needs the first few, never the whole hook traffic).
- */
+/** Upper bound on the distinct direct API exchanges kept for diagnosis. */
 export const SETUP_EXCHANGES_CAP = 8;
 
 /** The mapping kind that unlocks the Observe channel. */

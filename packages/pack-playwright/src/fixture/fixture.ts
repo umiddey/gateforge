@@ -14,10 +14,10 @@
  * raw `playwright/test` bypasses the fixture and produces claims with no
  * records (the engine grades the obligation `missing`; GF-24).
  *
- * API tests are witnessed too: the `request` fixture, the owned
- * `page.request`/`context.request`, and the exported `request` factory
- * (its `newContext`) rehost app-origin calls onto the test's session
- * proxy through {@link ./api-request.ts} — see the module doc there.
+ * API requests made directly from test code are never E2E evidence. The
+ * `request` fixture, owned `page.request`/`context.request`, and exported
+ * `request` factory all go directly to the app; only browser page traffic
+ * rides the session proxy.
  */
 import { chromium, firefox, webkit, request as playwrightRequest } from 'playwright';
 import type { Page, TestInfo } from 'playwright/test';
@@ -33,7 +33,7 @@ import {
   type EvidenceApi,
   type SurfaceDescriptor,
 } from './evidence.js';
-import { rehostContextRequest, sessionApiRouting, wrapApiRequestContext, wrapSetupRequestContext } from './api-request.js';
+import { wrapSetupRequestContext } from './api-request.js';
 import { WitnessClient, type SessionPageObserverFlushRequest } from './witness-client.js';
 import type { SessionCredential } from '../witness/types.js';
 const browserDebuggingPorts = new WeakMap<Browser, number>();
@@ -338,18 +338,19 @@ const extended = browserRunner.extend<EvidenceFixtures>({
     };
     if (session.proxyUrl !== null) {
       const sessionProxyUrl: string = session.proxyUrl;
-      // The reporter rides along so a page that loads ANOTHER origin
-      // (a suite base URL Gateforge was never told about) reaches the
-      // witness as a name, not as silence.
       const reporter = createUnroutedOriginReporter({ witness, session, appBaseURL });
-      await routePageThroughSessionProxy(page, appBaseURL, sessionProxyUrl, reporter.report);
-      // The owned APIRequestContext (`page.request`/`context.request`)
-      // rides the SAME session: app-origin calls rehost onto the proxy,
-      // other origins pass through, plausible mismatches are reported.
-      rehostContextRequest(page.context(), {
-        baseURL: projectBaseURL(testInfo),
-        routing: async () => sessionApiRouting(appBaseURL, sessionProxyUrl),
-        onUnroutedOrigin: reporter.report,
+      Object.defineProperty(page.context(), 'request', {
+        value: wrapSetupRequestContext(page.context().request, {
+          baseURL: projectBaseURL(testInfo),
+          onExchange: (exchange) => {
+            void witness.reportSessionSetupExchanges({
+              sessionId: session.sessionId,
+              sessionToken: session.sessionToken,
+              exchanges: [exchange],
+            }).catch(() => undefined);
+          },
+        }),
+        configurable: true,
       });
       try {
         await use(page);
@@ -382,38 +383,16 @@ const extended = browserRunner.extend<EvidenceFixtures>({
     if (session === null) {
       throw new Error(`No supervisor-issued witness session for ${testInfo.testId}.`);
     }
-    if (workerHookDepth > 0) {
-      await use(wrapSetupRequestContext(request, {
-        ...(projectBaseURL(testInfo) === undefined ? {} : { baseURL: projectBaseURL(testInfo) }),
-        onExchange: (exchange) => {
-          void witness.reportSessionSetupExchanges({
-            sessionId: session.sessionId,
-            sessionToken: session.sessionToken,
-            exchanges: [exchange],
-          }).catch(() => undefined);
-        },
-      }));
-      return;
-    }
-    if (session.proxyUrl === null) {
-      // No proxy channel exists for this session: nothing can be
-      // witnessed, and unwrapped behavior is today's behavior.
-      await use(request);
-      return;
-    }
-    const sessionProxyUrl: string = session.proxyUrl;
-    const reporter = createUnroutedOriginReporter({ witness, session, appBaseURL });
-    try {
-      await use(
-        wrapApiRequestContext(request, {
-          baseURL: projectBaseURL(testInfo),
-          routing: async () => sessionApiRouting(appBaseURL, sessionProxyUrl),
-          onUnroutedOrigin: reporter.report,
-        }),
-      );
-    } finally {
-      await reporter.settled();
-    }
+    await use(wrapSetupRequestContext(request, {
+      ...(projectBaseURL(testInfo) === undefined ? {} : { baseURL: projectBaseURL(testInfo) }),
+      onExchange: (exchange) => {
+        void witness.reportSessionSetupExchanges({
+          sessionId: session.sessionId,
+          sessionToken: session.sessionToken,
+          exchanges: [exchange],
+        }).catch(() => undefined);
+      },
+    }));
   },
   surface: async ({}, use): Promise<void> => {
     await use(undefined);
@@ -576,15 +555,6 @@ export const request = {
     if (session === null) {
       throw new Error(`No supervisor-issued witness session for ${testInfo.testId}.`);
     }
-    if (session.proxyUrl === null) {
-      // No proxy channel exists for this session: nothing can be
-      // witnessed, and unwrapped behavior is today's behavior.
-      return await directContext(testInfo);
-    }
-    const routing = sessionApiRouting(appBaseURL, session.proxyUrl);
-    return wrapApiRequestContext(await playwrightRequest.newContext(options), {
-      ...(options.baseURL === undefined ? {} : { baseURL: options.baseURL }),
-      routing: async () => routing,
-    });
+    return await directContext(testInfo);
   },
 };

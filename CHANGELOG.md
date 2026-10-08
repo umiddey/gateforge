@@ -2,11 +2,12 @@
 
 ## Unreleased
 
-- **pack-playwright and witness: diagnose uncredited hook-scope API
-  requests.** App-origin calls made through API contexts created in hooks
-  or at module scope are reported as bounded run-scoped diagnostics. They
-  never satisfy claims; a matching missing HTTP claim now names the setup
-  context and directs the owner to open the context in the test body.
+- **Deliberate tightening: test-code API requests are never E2E evidence.**
+  This reverses 0.13.2's crediting of Playwright API calls: requests made
+  by test code go directly to the app, never through the session proxy, and
+  never satisfy observed HTTP claims. Consumers whose claims came from
+  API-only tests will see those claims go missing; drive the operation
+  through the app's UI instead. Matching direct calls remain diagnostic only.
 - **pack-fastapi: preserve registration order across slash variants.**
   Merged route registrations retain their source order so ambiguous route
   attribution follows the actual framework registration sequence.

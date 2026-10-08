@@ -171,7 +171,7 @@ async function runCliProcess(cwd: string, env: Record<string, string>, args: rea
 interface LedgerRecord {
   kind?: string;
   testId?: string;
-  payload?: { exchanges?: Array<{ url?: string }> };
+  payload?: { channel?: string; exchanges?: Array<{ url?: string }> };
 }
 
 /**
@@ -184,6 +184,7 @@ function recordedExchangePaths(records: LedgerRecord[], testId?: string): string
     .filter(
       (record) =>
         record.kind === 'http.observed' &&
+        record.payload?.channel !== 'direct' &&
         (testId === undefined || record.testId === testId),
     )
     .flatMap((record) => record.payload?.exchanges ?? [])
@@ -222,18 +223,18 @@ tests:
       project: chromium
       file: specs/api.spec.js
       titlePath: ['${TITLE_FIXTURE}']
-    kind: observed-e2e
+    kind: api-e2e
     claims: ['${ITEMS_REQUEST}', '${ITEMS_STATUS}']
-    reason: The fixture request context drives GET /api/items through the session proxy.
+    reason: API-only test; direct calls are not observed E2E evidence.
   - key: playwright:chromium:specs/api.spec.js:${TITLE_IMPORTED}
     selector:
       runner: playwright
       project: chromium
       file: specs/api.spec.js
       titlePath: ['${TITLE_IMPORTED}']
-    kind: observed-e2e
+    kind: api-e2e
     claims: ['${ITEMS_REQUEST}', '${ITEMS_STATUS}']
-    reason: An imported request.newContext drives GET /api/items through the session proxy inside the test.
+    reason: API-only test; direct calls are not observed E2E evidence.
 `,
         });
         repo.git(['add', '-A']);
@@ -255,49 +256,23 @@ tests:
         const run = await runCliProcess(repo.root, runEnv, ['test-gates', '--changed', '--format', 'json']);
         const observed = `${run.stdout}\n${run.stderr}`;
         const report = JSON.parse(run.stdout) as {
-          verdicts: Array<{ obligationId: string; verdict: string }>;
+          verdicts: Array<{ obligationId: string; verdict: string; reason?: string }>;
           execution: { selectedTests: { selected: number; passed: number; failed: number } };
         };
         // API calls from test code are not browser evidence.
         for (const obligationId of [ITEMS_REQUEST, ITEMS_STATUS]) {
-          expect(report.verdicts.find((verdict) => verdict.obligationId === obligationId), observed).toMatchObject({
-            verdict: 'unsatisfied',
-          });
+          const verdict = report.verdicts.find((item) => item.obligationId === obligationId);
+          expect(verdict, observed).toMatchObject({ verdict: 'missing' });
         }
-        expect(run.code, observed).toBe(0);
+        expect(run.code, observed).toBe(1);
         expect(report.execution.selectedTests).toMatchObject({ selected: 2, passed: 2, failed: 0 });
-        // The beforeEach setup call reached the app once per test, and the
-        // witnessed ledger proves CREDIT stayed honest: the session
-        // snapshot carries /api/items but never /api/setup (a direct
-        // setup call never rides any session proxy).
+        expect(app.requestsByPath.get('/api/items')).toBe(2);
+        // API calls reach the app directly but never appear as observed
+        // browser exchanges in the witnessed ledger.
         expect(app.requestsByPath.get('/api/setup')).toBe(2);
         const records = JSON.parse(readFileSync(repo.path('.gateforge/test-gates/records.json'), 'utf8')) as LedgerRecord[];
         const recordedPaths = recordedExchangePaths(records);
-        expect(recordedPaths.some((path) => path.endsWith('/api/items'))).toBe(true);
-        expect(recordedPaths.some((path) => path.endsWith('/api/setup'))).toBe(false);
-        // Per-test attribution: each test's OWN session ledger
-        // carries its /api/items exchange — the `request`
-        // fixture AND the imported `request.newContext()` each
-        // ride their own session's proxy, not any other path.
-        // The runner-outcomes document joins each test's title
-        // to the runner test id its session (and therefore its
-        // records) were opened under.
-        const outcomesDoc = JSON.parse(readFileSync(repo.path('.gateforge/test-gates/runner-outcomes.json'), 'utf8')) as {
-          outcomes?: Array<{ testId?: string; titlePath?: string[] }>;
-        };
-        const outcomes = outcomesDoc.outcomes ?? [];
-        for (const title of [TITLE_FIXTURE, TITLE_IMPORTED]) {
-          const row = outcomes.find((candidate) => (candidate.titlePath ?? []).includes(title));
-          const testId = row?.testId;
-          // A missing row (or id) means the test never ran under
-          // a session at all: the join below must not pass
-          // vacuously, so it filters on an id no record carries.
-          expect(testId, `runner test id for '${title}'`).toBeDefined();
-          expect(
-            recordedExchangePaths(records, testId ?? '').some((path) => path.endsWith('/api/items')),
-            `session ledger for runner test ${String(testId)}`,
-          ).toBe(true);
-        }
+        expect(recordedPaths.some((path) => path.endsWith('/api/items'))).toBe(false);
       });
     } finally {
       await app.stop();

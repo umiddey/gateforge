@@ -98,14 +98,8 @@ const KIND_RULES: ReadonlyArray<{
     ruleId: 'api-request-fixture',
     kind: 'api-e2e',
     applies: (input) => {
-      // A request fixture taken from the GATEFORGE pack is the witnessed
-      // API request channel: its calls rehost through the test's session
-      // proxy, so the test is a transport candidate an owner marks
-      // `observed-e2e`. A strong api-e2e proposal here would block the
-      // exact declaration the channel exists to prove. A plain
-      // playwright request fixture still reads api-e2e, exactly as
-      // before.
-      if (input.facts.gateforgeFixtureImport !== null) return null;
+      // Direct API requests are never E2E evidence, regardless of whether
+      // the test imports the Gateforge runner.
       const apiParams = input.facts.signatureParams.filter((name) => API_FIXTURE_PARAMS.includes(name));
       if (apiParams.length === 0) return null;
       return { evidence: `test signature declares API fixture(s): ${apiParams.join(', ')}` };

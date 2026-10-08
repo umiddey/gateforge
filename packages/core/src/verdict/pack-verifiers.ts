@@ -1087,10 +1087,10 @@ function gradeObservedTransport(input: ClaimEvidenceInput): ClaimOutcome | null 
  *   ClaimOutcome: satisfied only for a witnessed exchange matching the
  *   endpoint shape (plus 2xx for status-ok), on either channel.
  */
-const SETUP_CHANNEL = 'setup';
+const DIRECT_CHANNEL = 'direct';
 
-/** Names a hook-scoped call without treating it as transport evidence. */
-function setupTrafficDiagnosis(input: ClaimEvidenceInput): string | null {
+/** Names a test-code API call without treating it as transport evidence. */
+function directTrafficDiagnosis(input: ClaimEvidenceInput): string | null {
   const candidates = (input.httpRoutes ?? []) as readonly HttpRouteCandidate[];
   for (const entry of input.evidence) {
     if (
@@ -1098,7 +1098,7 @@ function setupTrafficDiagnosis(input: ClaimEvidenceInput): string | null {
       entry.record.kind !== HTTP_OBSERVED_KIND
     ) continue;
     const payload = payloadOf(entry.record);
-    if (payload?.['channel'] !== SETUP_CHANNEL || !Array.isArray(payload['exchanges'])) continue;
+    if (payload?.['channel'] !== DIRECT_CHANNEL || !Array.isArray(payload['exchanges'])) continue;
     for (const raw of payload['exchanges']) {
       if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) continue;
       const method = raw['method'];
@@ -1113,7 +1113,7 @@ function setupTrafficDiagnosis(input: ClaimEvidenceInput): string | null {
       if (!path.ok) continue;
       const attributed = resolveHttpRoute(method, path.path, candidates, input.obligation.resourceId);
       if (attributed.status === 'match') {
-        return `'${input.obligation.id}': an API request context created in a hook (beforeAll/beforeEach) made this request; hook traffic is setup and never credited. Open the context in the test body`;
+        return `'${input.obligation.id}': the test called this endpoint directly from test code (Playwright API request), not through the app's UI. API calls from test code are never E2E evidence: drive the operation through the UI so the app makes the call.`;
       }
     }
   }
@@ -1124,9 +1124,9 @@ function gradeTransportObservation(input: ClaimEvidenceInput): ClaimOutcome {
   const anchored = gradeAnchoredTransport(input);
   if (anchored.status !== 'missing') return anchored;
   const observed = gradeObservedTransport(input);
-  const setupDiagnosis = setupTrafficDiagnosis(input);
+  const directDiagnosis = directTrafficDiagnosis(input);
   if (observed === null) {
-    return setupDiagnosis === null ? anchored : { status: 'missing', reason: setupDiagnosis, recordIds: [] };
+    return directDiagnosis === null ? anchored : { status: 'missing', reason: directDiagnosis, recordIds: [] };
   }
   if (observed.status === 'satisfied') return observed;
   if (observed.status === 'invalid') return observed;
