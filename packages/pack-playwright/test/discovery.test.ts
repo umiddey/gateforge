@@ -1298,6 +1298,7 @@ describe('native playwright reconciliation', () => {
       `'${claimId}': Gateforge could not read the code of test 'playwright:chromium:e2e/opaque.spec.mjs:opaque journey'`,
     );
     expect(refusal?.detail).toContain('really is observed-e2e');
+    // The mapping resolver sees the unreadable catalog row, not the wrapper's external specifier.
     expect(refusal?.detail).toContain('unresolved test-wrapper import');
     expect(mappingGradingClaims(refused, [])).toEqual([]);
 
