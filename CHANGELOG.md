@@ -7,7 +7,9 @@
   by test code go directly to the app, never through the session proxy, and
   never satisfy observed HTTP claims. Consumers whose claims came from
   API-only tests will see those claims go missing; drive the operation
-  through the app's UI instead. Matching direct calls remain diagnostic only.
+  through the app's UI instead. Direct-call diagnostics cover the `request`
+  fixture and `request.newContext()`; `page.request` and `context.request`
+  are not credited and do not receive that specialized diagnostic.
 - **pack-fastapi: preserve registration order across slash variants.**
   Merged route registrations retain their source order so ambiguous route
   attribution follows the actual framework registration sequence.
