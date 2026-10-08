@@ -349,10 +349,28 @@ export function resolveTestMappings(input: ResolveMappingsInput): ResolvedMappin
   const sidecarEntries = [...input.sidecar.tests].sort((a, b) => compareStrings(a.key, b.key));
   for (const entry of sidecarEntries) {
     const claims = [...new Set(entry.claims)].sort(compareStrings);
-    const unreadableE2EClaims = new Set<string>();
     const matched = input.catalog.entries
       .filter((row) => matchesSelector(row, entry.selector))
       .sort((a, b) => compareStrings(a.logicalKey, b.logicalKey));
+    const unreadableE2EClaims = new Set<string>();
+    const setupRefusedClaims = new Set<string>();
+    for (const row of matched) {
+      if (row.setupProjectDependents === undefined) continue;
+      for (const obligationId of claims) {
+        if (!knownClaim(obligationId)) continue;
+        setupRefusedClaims.add(obligationId);
+        pushProblem({
+          cause: 'TEST_MAPPING_AMBIGUOUS',
+          obligationId,
+          detail:
+            `test '${row.logicalKey}' belongs to setup project '${row.project}' (a dependency of ` +
+            `${row.setupProjectDependents.map((name) => `'${name}'`).join(', ')}); setup tests prepare state ` +
+            'and never carry claims — move the claim to a test that drives the product',
+          locations: [row.sourceLocation],
+        });
+      }
+    }
+    if (setupRefusedClaims.size > 0) continue;
 
     // Wildcard prohibition (§5.2): a file-level selector covers a whole
     // file — an unsafe declaration that binds NOTHING (fail closed).
@@ -608,6 +626,19 @@ export function resolveTestMappings(input: ResolveMappingsInput): ResolvedMappin
     const instances = input.catalog.entries
       .filter((row) => row.file === claim.testFile)
       .sort((a, b) => compareStrings(a.logicalKey, b.logicalKey));
+    const setupInstance = instances.find((row) => row.setupProjectDependents !== undefined);
+    if (setupInstance !== undefined) {
+      pushProblem({
+        cause: 'TEST_MAPPING_AMBIGUOUS',
+        obligationId: claim.obligationId,
+        detail:
+          `test '${setupInstance.logicalKey}' belongs to setup project '${setupInstance.project}' ` +
+          `(a dependency of ${setupInstance.setupProjectDependents?.map((name) => `'${name}'`).join(', ')}); ` +
+          'setup tests prepare state and never carry claims — move the claim to a test that drives the product',
+        locations: [setupInstance.sourceLocation],
+      });
+      continue;
+    }
     const unreadableInstance = instances.find((row) => row.reconciliation === 'list-only');
     if (unreadableInstance !== undefined) {
       pushProblem({
@@ -650,7 +681,7 @@ export function resolveTestMappings(input: ResolveMappingsInput): ResolvedMappin
   );
   for (const hint of hints) {
     const row = rowsByKey.get(hint.logicalKey);
-    if (row === undefined || !registry.has(hint.obligationId)) continue;
+    if (row === undefined || row.setupProjectDependents !== undefined || !registry.has(hint.obligationId)) continue;
     const bindings = bindingsFor(hint.obligationId);
     if (bindings.has(hint.logicalKey)) continue;
     bindings.set(hint.logicalKey, {
@@ -1165,6 +1196,8 @@ function inferredCandidates(
   const contractFamily = (obligationId.split(':')[1] ?? '').toLowerCase();
   const observedE2e = OBSERVED_E2E_CONTRACT_FAMILIES[contractFamily] === true;
   for (const row of catalog.entries) {
+    // Setup projects prepare state; their tests are never product claims or reuse candidates.
+    if (row.setupProjectDependents !== undefined) continue;
     // ELIGIBILITY before ranking: a `static-only` row is a test-shaped file
     // no runner enumerated (a Vitest jsdom suite inside a
     // Playwright-configured repository, say). It can never produce the

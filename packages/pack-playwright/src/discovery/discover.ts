@@ -298,6 +298,22 @@ export async function discoverTestCatalog(options: DiscoverOptions): Promise<Dis
         : { configured: [], other: [...vitestScopes, ...playwrightScopes] };
   const builder = new CatalogBuilder(cwd, scan, native, config.runner, scopes);
   const entries: TestCatalogEntry[] = builder.buildEntries();
+  if (native.projectDependencies !== undefined) {
+    const dependentsByProject = new Map<string, string[]>();
+    for (const [dependent, dependencies] of Object.entries(native.projectDependencies)) {
+      for (const dependency of dependencies) {
+        const dependents = dependentsByProject.get(dependency) ?? [];
+        dependents.push(dependent);
+        dependentsByProject.set(dependency, dependents);
+      }
+    }
+    for (const entry of entries) {
+      const dependents = entry.project === null ? undefined : dependentsByProject.get(entry.project);
+      if (dependents !== undefined && dependents.length > 0) {
+        entry.setupProjectDependents = [...new Set(dependents)].sort();
+      }
+    }
+  }
   const runnerSummaries: RunnerSummary[] = [builder.playwrightSummary()];
 
     // Registered pytest suites: diagnostic-only identities (§3.5).
