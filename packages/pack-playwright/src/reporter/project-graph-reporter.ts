@@ -58,8 +58,8 @@ type SelectionValue = string | RegExp;
 interface RunnerProject {
   name?: string;
   dependencies?: readonly string[];
-  /** The RESOLVED per-project `use`; only its `storageState` and `browserName` are read. */
-  use?: { storageState?: unknown; browserName?: unknown };
+  /** The RESOLVED per-project `use`; only its `storageState`, `browserName`, and `defaultBrowserType` are read. */
+  use?: { storageState?: unknown; browserName?: unknown; defaultBrowserType?: unknown };
   /** The RESOLVED per-project test root (absolute). */
   testDir?: string;
   testMatch?: SelectionValue | readonly SelectionValue[];
@@ -203,10 +203,17 @@ export class ProjectGraphReporter {
       }
       // The RESOLVED browser the runner will use for this project — its
       // own answer, with devices already merged, never a parse of the
-      // consumer config. Only a plain non-empty string crosses.
-      const browserName = project.use?.browserName;
-      if (typeof browserName === 'string' && browserName.length > 0) {
-        projectBrowsers[name] = browserName;
+      // consumer config. Playwright 1.58 materializes `use.browserName`;
+      // 1.63 materializes the device-derived browser as
+      // `use.defaultBrowserType` instead. Either is the runner's own
+      // answer; only a plain non-empty string crosses. A project that
+      // resolves NEITHER (no declared browser, no device) has an
+      // undetermined browser and is left out: every downstream
+      // browser-dependent rule fails closed.
+      const resolvedUse = project.use ?? {};
+      const browser = resolvedUse.browserName ?? resolvedUse.defaultBrowserType;
+      if (typeof browser === 'string' && browser.length > 0) {
+        projectBrowsers[name] = browser;
       }
       // The runner's own file selection. Only plain globs and RegExps
       // cross; a function-valued selector is consumer CODE, and a
