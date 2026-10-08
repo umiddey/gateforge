@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased
+
+- **cli: a selected step of a serial journey selects the whole serial
+  group.** A named selection narrows the supervised Playwright run to
+  the mapped tests' exact `file:line` locations, so a serial journey
+  whose MAPPED steps were its later ones executed without the group's
+  own earlier steps — the steps that create the state the later steps
+  read — and failed by construction (a real consumer serial describe of
+  8 dependent steps with 3 mapped could never run green). When a
+  selected test belongs to a describe in serial mode, the run now
+  selects every test of that group in file order: the runner receives
+  every step's location, the expected set registers every step, and
+  each step's own claims are graded like any selected test's (a step
+  that declares nothing contributes nothing). Serial mode is read
+  STATICALLY from the spec source — Playwright's own list mode never
+  exposes a suite's declared mode — and detects exactly three
+  declaration forms: `test.describe.serial(...)`, a describe whose body
+  calls `test.describe.configure({ mode: 'serial' })` (before or after
+  the tests it governs), and the file-level
+  `test.describe.configure({ mode: 'serial' })` (the whole file is one
+  serial scope). A describe that declares nothing serial is never
+  expanded, and an expansion never leaks beyond the selected test's own
+  file or project. The run names each expansion on its output
+  (`selection: added 2 tests of serial group 'journey'
+  (specs/journey.spec.js)`) and the report carries an additive
+  `serialExpansions` field. A full run selects everything already, a
+  re-seal replays its parent's file-scoped plan, and a changed slice
+  for Playwright is file-granular, so none of those print an expansion;
+  members are drawn from the planned set only, so quarantined tests are
+  never re-added.
+
 ## 0.13.7
 
 - **pack-fastapi: a once-called registry function now orders its

@@ -304,6 +304,18 @@ export interface RenderRunOptions {
    */
   selectors?: readonly { selector: string; logicalKeys: readonly string[] }[];
   /**
+   * Serial-group selection (additive): one entry per expanded serial
+   * group, naming the file, the group, and the members the selection
+   * grew by. Present only when a narrowed selection actually expanded;
+   * it reports what ran and never grants gate authority.
+   */
+  serialExpansions?: readonly {
+    describe: string | null;
+    file: string;
+    added: number;
+    logicalKeys: readonly string[];
+  }[];
+  /**
    * Effective evaluation scope (plan §12.4); included in json/SARIF and
    * summarized in text when the scope expanded. Defaults to the full
    * `all` scope when omitted.
@@ -590,6 +602,7 @@ function jsonReport(
     };
   }
   if (options.selectors !== undefined) report['selectors'] = options.selectors;
+  if (options.serialExpansions !== undefined) report['serialExpansions'] = options.serialExpansions;
   return report;
 }
 

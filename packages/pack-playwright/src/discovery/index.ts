@@ -5,6 +5,7 @@
  */
 export * from './adapter-projection.js';
 export * from './static-discovery.js';
+export * from './serial-scopes.js';
 export * from './git-ignore.js';
 export * from './inference.js';
 export * from './reconcile.js';

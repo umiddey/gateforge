@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { expandSerialSelection } from '../src/serial-expansion.js';
-import type { PlannedRow } from './execution.js';
+import type { PlannedRow } from '../src/execution.js';
 
 const DIRECTORIES: string[] = [];
 
@@ -97,9 +97,9 @@ describe('expandSerialSelection', () => {
       reads.planned.logicalKey,
       writes.planned.logicalKey,
     ]);
-    // The added members are exactly steps 1-2, in FILE order (not the
-    // logical-key order the plan sorts rows by).
-    expect(result.addedLogicalKeys).toEqual([writes.planned.logicalKey, lists.planned.logicalKey]);
+    // The added members are exactly steps 1-2: the record lists them in
+    // FILE order, the key set is the plan's own sorted order.
+    expect(result.addedLogicalKeys).toEqual([lists.planned.logicalKey, writes.planned.logicalKey]);
     expect(result.expansions).toEqual([
       {
         describe: 'journey',
@@ -238,11 +238,11 @@ describe('expandSerialSelection', () => {
     ]);
 
     // `lists` is absent from the full planned set (quarantined rows
-    // leave planning before this point), and BOTH later steps are
-    // selected: one record, one added member, no duplicates.
+    // leave planning before this point), so expanding `reads` adds only
+    // the member the plan still carries — never the quarantined one.
     const result = expandSerialSelection({
       cwd: root,
-      rows: [lists, reads],
+      rows: [reads],
       allRows: [writes, reads],
       lineOf: lines,
     });

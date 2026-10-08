@@ -319,6 +319,7 @@ import { pruneRunHistory, recordRunHistory } from '../history.js';
 import { ProgressStream, resolveProgressTarget, type ProgressOutcome, type ProgressTarget } from '../progress.js';
 import { writeRunScopeView, writeStateFile, writeTestFailures } from '../state.js';
 import { keepFailureArtifacts } from '../failure-artifacts.js';
+import { expandSerialSelection } from '../serial-expansion.js';
 
 export const TEST_GATES_USAGE =
   'usage: gateforge test-gates [--changed] [--scope full|changed] [--suite <command>] [--out <dir>] ' +
@@ -2332,6 +2333,22 @@ function quarantinedFrameworkIds(
 }
 
 /**
+ * The catalog lookup the serial expansion ranges and orders members by:
+ * one logical key's source line, or undefined when the catalog never
+ * located the test.
+ *
+ * Args:
+ *   catalog: the current test catalog.
+ *
+ * Returns:
+ *   (logicalKey: string) => number | undefined: the line lookup.
+ */
+function catalogLineOf(catalog: TestCatalog): (logicalKey: string) => number | undefined {
+  const lines = new Map(catalog.entries.map((entry) => [entry.logicalKey, entry.sourceLocation.line]));
+  return (logicalKey) => lines.get(logicalKey);
+}
+
+/**
  * Builds one planned row from a contract-enumerated test identity
  * (plan 2026-09-25, runner-agnostic evidence): the adapter's logical
  * key (`<file>#<title path>`), null project, and the runner's own
@@ -3223,10 +3240,49 @@ async function runSupervisedTestGatesInner(
         );
   // The selected logical keys, hoisted for the grading step below: a
   // named run grades exactly the claims of the tests it ran.
-  const namedTestIds: string[] | null =
+  let namedTestIds: string[] | null =
     namedSelections === null
       ? null
       : [...new Set(namedSelections.flatMap((entry) => [...entry.logicalKeys]))].sort();
+  if (namedSelections !== null) {
+    const named = new Set(namedTestIds ?? []);
+    plannedRows = plannedRows.filter((row) => named.has(row.planned.logicalKey));
+    // A test this run did not execute can never have produced
+    // evidence, so a claim row alone proves nothing: the graded SET is
+    // `namedObligationIds` below, and the declaration inventory stays
+    // whole. (A per-test filter here would silently drop a
+    // declaration whose source location a sibling declaration in the
+    // same file already occupies — the inventory is deduplicated per
+    // source location, not per test.)
+  }
+  // Serial-group expansion (serial journeys fail by construction when a
+  // mapped later step runs without the group's own earlier steps): a
+  // selected test inside a describe in serial mode selects the WHOLE
+  // group, in file order. The expansion joins the graded set too — an
+  // added step's own claims are graded like any selected test's, and a
+  // step that declares nothing contributes nothing. A full run already
+  // selects everything; a re-seal replays the parent receipt's own
+  // file-scoped plan; a non-Playwright runner has no serial scopes; and
+  // a spec that declares nothing serial expands nothing.
+  const serialExpansion =
+    runnerName === 'playwright' &&
+    catalog !== null &&
+    reSealPlan === null &&
+    (namedSelections !== null || options.scope === 'changed')
+      ? expandSerialSelection({
+          cwd: io.cwd,
+          rows: plannedRows,
+          allRows: allPlannedRows,
+          lineOf: catalogLineOf(catalog),
+        })
+      : null;
+  if (serialExpansion !== null && serialExpansion.addedLogicalKeys.length > 0) {
+    plannedRows = serialExpansion.rows;
+    if (namedTestIds !== null) {
+      namedTestIds = [...new Set([...namedTestIds, ...serialExpansion.addedLogicalKeys])].sort();
+    }
+  }
+  const serialExpansionRecords = serialExpansion?.expansions ?? [];
   // What the SELECTION declares, through EITHER surface: the trusted
   // mapping resolution's bindings (the sidecar) or the current claim
   // declarations of the selected tests (native Playwright annotations
@@ -3265,17 +3321,6 @@ async function runSupervisedTestGatesInner(
     }
     return [...declared].sort();
   })();
-  if (namedSelections !== null) {
-    const named = new Set(namedTestIds ?? []);
-    plannedRows = plannedRows.filter((row) => named.has(row.planned.logicalKey));
-    // A test this run did not execute can never have produced
-    // evidence, so a claim row alone proves nothing: the graded SET is
-    // `namedObligationIds` below, and the declaration inventory stays
-    // whole. (A per-test filter here would silently drop a
-    // declaration whose source location a sibling declaration in the
-    // same file already occupies — the inventory is deduplicated per
-    // source location, not per test.)
-  }
   // Dependency closure for a NARROWED plan (`--scope changed` or
   // `--test`): Playwright runs a dependency project's tests before the
   // dependent project, so a plan that selected only a `chromium` test
@@ -3316,6 +3361,18 @@ async function runSupervisedTestGatesInner(
         : options.scope === 'changed'
           ? `scope: changed (${plannedRows.length} tests) — ${providerChangedFiles.length} changed files (provider: ${providerIdentity})`
           : `scope: full (${fullPlannedCount} planned tests) — add --scope changed for the ${affectedTestCount} tests affected by ${providerChangedFiles.length} changed files (provider: ${providerIdentity})`,
+    );
+  }
+  // Serial-group selection: the run names each expansion on the
+  // narration stream (stderr in every format — stdout stays pure json
+  // under `--format json`), so the growth beyond the named or mapped
+  // rows is on the record in plain words, and in the report's additive
+  // `serialExpansions` field.
+  for (const expansion of serialExpansionRecords) {
+    const group =
+      expansion.describe === null ? 'the file-level serial scope' : `serial group '${expansion.describe}'`;
+    io.stderr.write(
+      `selection: added ${String(expansion.added)} test${expansion.added === 1 ? '' : 's'} of ${group} (${expansion.file})\n`,
     );
   }
   const inventoryBlocking: BlockingEntry[] =
@@ -5927,6 +5984,10 @@ async function runSupervisedTestGatesInner(
     diagnosticContext,
     ...(options.resultOnly ? { outcome: 'partial-selection' as const } : {}),
     ...(namedSelections !== null ? { selectors: namedSelections } : {}),
+    // Serial-group selection (additive): what each expansion added, so
+    // the report says out loud that the selection grew beyond the named
+    // or mapped rows. Empty adds no key.
+    ...(serialExpansionRecords.length === 0 ? {} : { serialExpansions: serialExpansionRecords }),
     ...(chaosRun === null
       ? {}
       : { chaos: { ...chaosRun, ...(chaosSchedule === null ? {} : { schedule: chaosSchedule }) } }),
@@ -5954,6 +6015,7 @@ async function runSupervisedTestGatesInner(
           diagnosticContext,
           ...(options.resultOnly ? { outcome: 'partial-selection' as const } : {}),
           ...(namedSelections !== null ? { selectors: namedSelections } : {}),
+          ...(serialExpansionRecords.length === 0 ? {} : { serialExpansions: serialExpansionRecords }),
           ...(chaosRun === null
             ? {}
             : { chaos: { ...chaosRun, ...(chaosSchedule === null ? {} : { schedule: chaosSchedule }) } }),

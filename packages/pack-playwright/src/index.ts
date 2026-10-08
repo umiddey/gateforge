@@ -231,6 +231,11 @@ export {
   CypressRunnerAdapter,
   pytestPluginDir,
   PYTEST_PLUGIN_MODULE,
+  serialScopesOf,
+  readSerialScopes,
+  serialScopeOfTest,
+  scopeCoversTest,
+  serialScopeTitle,
 } from './discovery/index.js';
 export type {
   StaticScanOptions,
@@ -267,6 +272,7 @@ export type {
   CypressRunnerAdapterOptions,
   CypressRunReport,
   VitestJsonReport,
+  SerialScope,
 } from './discovery/index.js';
 export type {
   RunnerAdapter,

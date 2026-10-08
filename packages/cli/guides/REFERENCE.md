@@ -183,6 +183,30 @@ refuses to trust, so it executes the whole spec, drops every unselected
 outcome and session (an unselected test never becomes evidence), and
 says `also ran N other test(s) in the same file — not graded`.
 
+##### Serial groups select whole (Playwright)
+
+A serial journey cannot run in slices: a `test.describe.serial(...)`
+describe — or a describe whose body calls
+`test.describe.configure({ mode: 'serial' })`, including the file-level
+form — chains its steps on shared state, so a mapped later step without
+the group's own earlier steps fails by construction. When a selected
+test belongs to a serial group, the run selects the WHOLE group, in
+file order: the runner receives every step's location, the expected set
+registers every step, and each step's own claims are graded like any
+selected test's (a step that declares nothing contributes nothing). The
+run names each expansion on its output and the report carries an
+additive `serialExpansions` field:
+
+```text
+scope: named (3 tests) — ...
+selection: added 2 tests of serial group 'journey' (specs/journey.spec.js)
+```
+
+Detection is static — Playwright's own list mode never exposes a
+suite's declared mode — and it reads exactly the three declaration
+forms above. A describe that declares nothing serial is never expanded,
+and an expansion never leaks beyond the selected test's own file.
+
 #### What a named run grades, and its exit codes
 
 A named run grades **only the selection**: the obligations its selected
