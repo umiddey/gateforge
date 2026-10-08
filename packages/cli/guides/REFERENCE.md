@@ -1956,6 +1956,16 @@ the runner. A difference stops the run before tests start and names each
 project, file, and title present in only one inventory. Static discovery
 also warns when `process.env.GATEFORGE_*` controls test registration.
 
+For Playwright, static discovery follows bounded local ESM imports and
+CommonJS `require` wrappers back to the package root or its exported
+`/fixture` subpath. Proven bindings let the scanner retain test-code
+signals—such as browser fixtures—for kind inference before the static row
+is reconciled with the runner's listed identity. Unrelated external modules
+are not assumed to export Playwright's `test`. A runner-listed file is also
+scanned when its path matches a configured source glob with another
+recognized extension; files wholly outside that source scope remain
+runner-list-only, and configured exclusions still apply.
+
 ### Provenance trust model (GF-23, audited 2026-08-31, three rounds)
 
 `records.json` and `manifest.json` live in the suite-writable state

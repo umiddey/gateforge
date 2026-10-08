@@ -1,6 +1,13 @@
 # Changelog
 
 ## Unreleased
+- **Playwright discovery: follow fixture-subpath test wrappers.** Static
+  discovery now recognizes the package root and exported `/fixture`
+  subpath as Playwright test sources, including wrappers imported through
+  local CommonJS or ESM modules. It also scans concrete Playwright-listed
+  files when their path is covered by a configured source glob under another
+  recognized extension, allowing static rows to join the runner inventory
+  and retain code-based kind inference.
 
 - **Deliberate tightening: test-code API requests are never E2E evidence.**
   This reverses 0.13.2's crediting of Playwright API calls: requests made

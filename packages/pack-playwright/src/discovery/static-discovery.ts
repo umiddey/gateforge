@@ -220,20 +220,20 @@ const TEST_BINDING_NAMES = new Set(['test', 'it']);
 const TEST_STRUCTURE_NAMES = new Set(['test', 'it', 'describe']);
 
 /**
- * The gateforge pack's own module specifier (`packages/pack-playwright`):
- * its exported `test` IS a playwright test function (`base.extend` over
- * `playwright/test` — see `fixture/fixture.ts`, which documents this
- * import as the only sanctioned runner). Binding it lets the static scan
- * follow the documented consumer shape
- * (`import { test as gateforgeTest } from '@gate-forge/pack-playwright'`)
- * instead of emitting unresolvable rows for it. Every OTHER
- * module-external import stays unresolved — fail-closed is unchanged.
+ * The package root and exported `fixture` subpath both expose the pack's
+ * Playwright test function (`base.extend` over `playwright/test` — see
+ * `fixture/fixture.ts`). Binding either sanctioned runner source lets the
+ * static scan follow documented package imports instead of emitting
+ * unresolvable rows. Every OTHER module-external import stays unresolved —
+ * fail-closed is unchanged.
  */
 export const GATEFORGE_PACK_SPECIFIER = '@gate-forge/pack-playwright';
 
 /** Whether the specifier is the gateforge pack's runner module. */
 function isPackSpecifier(specifier: string): boolean {
-  return specifier === GATEFORGE_PACK_SPECIFIER;
+  // The package root and fixture subpath both export Playwright's `test`.
+  // Other pack subpaths (reporter, vitest, witness, attestation) do not.
+  return specifier === GATEFORGE_PACK_SPECIFIER || specifier === `${GATEFORGE_PACK_SPECIFIER}/fixture`;
 }
 
 /** Chain segments that modify a test/describe call without changing identity. */
