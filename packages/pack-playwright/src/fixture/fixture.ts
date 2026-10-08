@@ -132,6 +132,8 @@ interface InitiatorTracking {
 async function attachInitiatorTracking(page: Page, appBaseURL: string): Promise<InitiatorTracking> {
   const session = await page.context().newCDPSession(page);
   const pending = new Map<string, Array<'page' | 'test-code' | 'unknown'>>();
+  // Route callbacks that arrived before their CDP event, oldest first.
+  const waiting = new Map<string, Array<(verdict: 'page' | 'test-code' | 'unknown') => void>>();
   const appOriginPrefix = `${new URL(appBaseURL).origin}/`;
   session.on('Network.requestWillBeSent', (event: CdpRequestInitiatorEvent) => {
     if (!event.request.url.startsWith(appOriginPrefix)) return;
@@ -140,6 +142,11 @@ async function attachInitiatorTracking(page: Page, appBaseURL: string): Promise<
     const outermost = deepest?.callFrames?.at(-1);
     const verdict = outermost === undefined ? 'unknown' : outermost.url ? 'page' : 'test-code';
     const key = `${event.request.method} ${event.request.url}`;
+    const waiter = waiting.get(key)?.shift();
+    if (waiter !== undefined) {
+      waiter(verdict);
+      return;
+    }
     const queue = pending.get(key) ?? [];
     queue.push(verdict);
     pending.set(key, queue);
@@ -149,15 +156,29 @@ async function attachInitiatorTracking(page: Page, appBaseURL: string): Promise<
   await session.send('Debugger.setAsyncCallStackDepth', { maxDepth: 32 });
   return {
     session,
-    async classify(method, url) {
+    classify(method, url) {
       const key = `${method} ${url}`;
-      // CDP normally precedes interception; allow its event to arrive if
-      // scheduling races the route callback. No event means unknown.
-      if ((pending.get(key)?.length ?? 0) === 0) await delay(50);
       const queue = pending.get(key);
-      const verdict = queue?.shift();
+      const queued = queue?.shift();
       if (queue?.length === 0) pending.delete(key);
-      return verdict ?? 'unknown';
+      if (queued !== undefined) return Promise.resolve(queued);
+      // A burst of requests can deliver a CDP event just after its route
+      // callback. Wait for that event only, never a fixed pause: a fixed
+      // pause shifts the app's request timing. No event in 50 ms: unknown.
+      return new Promise((resolve) => {
+        const waiters = waiting.get(key) ?? [];
+        const timer = setTimeout(() => {
+          const index = waiters.indexOf(settle);
+          if (index >= 0) waiters.splice(index, 1);
+          resolve('unknown');
+        }, 50);
+        const settle = (verdict: 'page' | 'test-code' | 'unknown'): void => {
+          clearTimeout(timer);
+          resolve(verdict);
+        };
+        waiters.push(settle);
+        waiting.set(key, waiters);
+      });
     },
   };
 }
