@@ -379,6 +379,33 @@ describe('gateforge adapters scaffold', () => {
       expect(existsSync(repo.path('.gateforge/adapters/tenant.accounts.mjs'))).toBe(false);
     });
   });
+
+  it('probes a composed-collection adapter through its first page instead of skipping it', async () => {
+    await withTempRepo({}, async (repo) => {
+      install(repo, PLUGIN_WITH_COLLECTION_ONLY);
+      const scaffold = await runCli(repo, ['adapters', 'scaffold'], {
+        GATEFORGE_TARGET_FINGERPRINT: FINGERPRINT,
+      });
+      expect(scaffold.code, `${scaffold.stdout}\n${scaffold.stderr}`).toBe(0);
+      // Review the generated listPath adapter into the composed shape:
+      // the collection read composes through listCollection and there
+      // is NO static path to name.
+      const generated = readFileSync(repo.path('.gateforge/adapters/tenant.accounts.mjs'), 'utf8');
+      expect(generated).toContain('listPath: "/api/accounts"');
+      repo.writeFiles({
+        '.gateforge/adapters/tenant.accounts.mjs': generated.replace(
+          'listPath: "/api/accounts"',
+          "listCollection: (readAll) => readAll('/api/accounts', { collectionKey: firstArrayOf })",
+        ),
+      });
+      installWitnessKit(repo);
+      const check = await runCli(repo, ['adapters', 'check', '--probe', '--base-url', appUrl]);
+      expect(check.code, `${check.stdout}\n${check.stderr}`).toBe(0);
+      // The probe row reports the real first-page GET, not a skip.
+      expect(check.stdout).toContain('[ok] tenant.accounts /api/accounts?page=1&page_size=100');
+      expect(check.stdout).not.toContain('composed collection reads are probed by the run');
+    });
+  });
 });
 
 describe('gateforge adapters on a fresh example project', () => {

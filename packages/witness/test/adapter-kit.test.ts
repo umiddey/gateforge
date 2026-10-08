@@ -358,3 +358,113 @@ describe('adapter kit: witness-side login', () => {
     );
   });
 });
+
+describe('adapter kit: composed-collection probe', () => {
+  // `listCollection` composes its reads itself, so there is no static
+  // first-page path to name. The probe used to fall through to the
+  // by-id path and dereference the absent readPath — a TypeError that
+  // crashed `gateforge adapters check --probe`. It must instead read
+  // the collection's FIRST page through the same walker the witness
+  // uses, issue exactly that one GET (never a full walk), and report
+  // what the app answered.
+  let probeServer: Server;
+  let probeBase: string;
+  /** Every path the fixture served, in arrival order. */
+  let served: string[];
+
+  beforeAll(async () => {
+    served = [];
+    probeServer = createServer((req, res) => {
+      served.push(req.url ?? '/');
+      const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+      const send = (status: number, body: unknown): void => {
+        res.writeHead(status, {
+          'content-type': 'application/json; charset=utf-8',
+          'x-gateforge-env-fingerprint': 'composed-probe-v1',
+        });
+        res.end(JSON.stringify(body));
+      };
+      if (url.pathname === '/composed/rows') {
+        const page = Number(url.searchParams.get('page') ?? '1');
+        const size = Number(url.searchParams.get('page_size') ?? '100');
+        send(200, { rows: page === 1 ? [{ id: 'w-1' }, { id: 'w-2' }] : [] });
+        return;
+      }
+      if (url.pathname === '/cursor/rows') {
+        const cursor = url.searchParams.get('cursor');
+        send(200, {
+          rows: cursor === null ? [{ id: 'c-1' }] : [],
+          ...(cursor === null ? { next: 'page-2' } : {}),
+        });
+        return;
+      }
+      send(404, { error: 'not found' });
+    });
+    await new Promise<void>((resolve) => probeServer.listen(0, '127.0.0.1', resolve));
+    probeBase = `http://127.0.0.1:${String((probeServer.address() as AddressInfo).port)}`;
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((resolve) => probeServer.close(() => resolve()));
+  });
+
+  it('probes a listCollection adapter through its first page instead of throwing', async () => {
+    const adapter = defineHttpAdapter({
+      resourceId: 'demo.widgets',
+      deletion: 'hard',
+      environmentFingerprint: 'composed-probe-v1',
+      listCollection: (readAll) => readAll('/composed/rows', { collectionKey: 'rows' }),
+      collectionKey: 'rows',
+    });
+    const result = await adapter.probe({ baseUrl: probeBase }, '0');
+    expect(result.status).toBe(200);
+    expect(result.path).toBe('/composed/rows?page=1&page_size=100');
+    // One GET: the collection's first page, never a full walk.
+    expect(served).toEqual(['/composed/rows?page=1&page_size=100']);
+  });
+
+  it('probes a cursor-composed collection through its first parent page', async () => {
+    served = [];
+    const adapter = defineHttpAdapter({
+      resourceId: 'demo.cursors',
+      deletion: 'hard',
+      environmentFingerprint: 'composed-probe-v1',
+      paging: { kind: 'cursor' },
+      pageCursor: (body) => {
+        if (body === null || typeof body !== 'object' || !('next' in body)) return undefined;
+        const next: unknown = body['next'];
+        return typeof next === 'string' ? next : undefined;
+      },
+      listCollection: (readAll) =>
+        readAll(
+          (cursor) => (cursor === undefined ? '/cursor/rows' : `/cursor/rows?cursor=${cursor}`),
+          { collectionKey: 'rows' },
+        ),
+      collectionKey: 'rows',
+    });
+    const result = await adapter.probe({ baseUrl: probeBase });
+    expect(result.status).toBe(200);
+    expect(result.path).toBe('/cursor/rows');
+    expect(served).toEqual(['/cursor/rows']);
+  });
+
+  it('the collection read itself still walks every page (probe changes nothing there)', async () => {
+    served = [];
+    const adapter = defineHttpAdapter({
+      resourceId: 'demo.widgets',
+      deletion: 'hard',
+      environmentFingerprint: 'composed-probe-v1',
+      paging: { kind: 'page', pageSize: 2 },
+      listCollection: (readAll) => readAll('/composed/rows', { collectionKey: 'rows' }),
+      collectionKey: 'rows',
+    });
+    const rows = await adapter.list?.(makeCtx(probeBase, 'demo.widgets'));
+    // Two pages of two rows each (the fixture answers page 2 empty) —
+    // the walk is untouched by the probe's single-page read.
+    expect(rows).toEqual([{ id: 'w-1' }, { id: 'w-2' }]);
+    expect(served).toEqual([
+      '/composed/rows?page=1&page_size=2',
+      '/composed/rows?page=2&page_size=2',
+    ]);
+  });
+});
