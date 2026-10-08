@@ -13,7 +13,13 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseConfig, type GateforgeConfig } from '@gate-forge/core';
+import {
+  mappingGradingClaims,
+  parseConfig,
+  resolveTestMappings,
+  type GateforgeConfig,
+  type TestMap,
+} from '@gate-forge/core';
 import {
   diffNativePlaywrightTests,
   collectPytestSuite,
@@ -1239,6 +1245,84 @@ describe('native playwright reconciliation', () => {
       ['ESM wrapped journey', 'matched', 'browser-e2e'],
       ['wrapped journey', 'matched', 'browser-e2e'],
     ]);
+  });
+  it('refuses an E2E mapping until a runner-listed spec is statically readable', async () => {
+    const root = makePlaywrightProject({
+      'e2e/opaque-wrapper.mjs': [
+        "import { test } from 'unrelated-runner';",
+        'export { test };',
+        '',
+      ].join('\n'),
+      'e2e/opaque.spec.mjs': [
+        "import { test } from './opaque-wrapper.mjs';",
+        "test('opaque journey', async ({ page }) => {});",
+        '',
+      ].join('\n'),
+      'node_modules/unrelated-runner/package.json': JSON.stringify({
+        name: 'unrelated-runner',
+        type: 'module',
+        exports: './index.js',
+      }),
+      'node_modules/unrelated-runner/index.js': "export { test } from 'playwright/test';\n",
+    });
+    const config = fixtureConfig(['e2e/**/*.spec.mjs']);
+    const claimId = 'tenant.accounts:persistence:read';
+    const sidecar: TestMap = {
+      schemaVersion: 1,
+      tests: [
+        {
+          key: 'playwright:chromium:e2e/opaque.spec.mjs:opaque journey',
+          selector: {
+            runner: 'playwright',
+            project: 'chromium',
+            file: 'e2e/opaque.spec.mjs',
+            titlePath: ['opaque journey'],
+          },
+          claims: [claimId],
+          kind: 'observed-e2e',
+          reason: 'An existing UI journey proves the account operation.',
+        },
+      ],
+    };
+    const unreadable = await discoverTestCatalog({ cwd: root, config });
+    const unreadableEntry = unreadable.catalog.entries.find((entry) => entry.title === 'opaque journey');
+    expect(unreadableEntry).toMatchObject({ reconciliation: 'list-only', inferredKind: 'unknown' });
+    const refused = resolveTestMappings({
+      catalog: unreadable.catalog,
+      nativeClaims: [],
+      sidecar,
+      obligationIds: [claimId],
+    });
+    const refusal = refused.problems.find((problem) => problem.obligationId === claimId);
+    expect(refusal?.detail).toContain(
+      `'${claimId}': Gateforge could not read the code of test 'playwright:chromium:e2e/opaque.spec.mjs:opaque journey'`,
+    );
+    expect(refusal?.detail).toContain('really is observed-e2e');
+    expect(refusal?.detail).toContain('unrelated-runner');
+    expect(mappingGradingClaims(refused, [])).toEqual([]);
+
+    mkdirSync(join(root, 'node_modules', '@gate-forge'), { recursive: true });
+    symlinkSync(join(ROOT, 'packages', 'pack-playwright'), join(root, 'node_modules', '@gate-forge', 'pack-playwright'), 'dir');
+    writeTree(root, {
+      'e2e/opaque-wrapper.mjs': [
+        "import { test as base } from '@gate-forge/pack-playwright/fixture';",
+        'export const test = base.extend({});',
+        '',
+      ].join('\n'),
+    });
+    const readable = await discoverTestCatalog({ cwd: root, config });
+    expect(readable.catalog.entries.find((entry) => entry.title === 'opaque journey')).toMatchObject({
+      reconciliation: 'matched',
+      inferredKind: 'browser-e2e',
+    });
+    const accepted = resolveTestMappings({
+      catalog: readable.catalog,
+      nativeClaims: [],
+      sidecar,
+      obligationIds: [claimId],
+    });
+    expect(accepted.problems).toEqual([]);
+    expect(mappingGradingClaims(accepted, [])).toHaveLength(1);
   });
 
   it('discovers runner-only cases through the native list fallback (origin native-list)', async () => {
