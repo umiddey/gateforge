@@ -1,6 +1,6 @@
 {
   "name": "@gate-forge/cli",
-  "version": "0.13.8",
+  "version": "0.13.9",
   "gateforgeCompatibility": {
     "supervisedFixtureProtocol": "gateforge.supervised-playwright.v1"
   },
@@ -33,16 +33,16 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@gate-forge/core": "^0.13.8",
-    "@gate-forge/http-contract": "^0.13.8",
-    "@gate-forge/pack-fastapi": "^0.13.8",
-    "@gate-forge/pack-alembic": "^0.13.8",
-    "@gate-forge/pack-http": "^0.13.8",
-    "@gate-forge/pack-react-router": "^0.13.8",
-    "@gate-forge/pack-playwright": "^0.13.8",
-    "@gate-forge/pack-sqlalchemy": "^0.13.8",
-    "@gate-forge/pack-task": "^0.13.8",
-    "@gate-forge/plugin-protocol": "^0.13.8",
+    "@gate-forge/core": "^0.13.9",
+    "@gate-forge/http-contract": "^0.13.9",
+    "@gate-forge/pack-fastapi": "^0.13.9",
+    "@gate-forge/pack-alembic": "^0.13.9",
+    "@gate-forge/pack-http": "^0.13.9",
+    "@gate-forge/pack-react-router": "^0.13.9",
+    "@gate-forge/pack-playwright": "^0.13.9",
+    "@gate-forge/pack-sqlalchemy": "^0.13.9",
+    "@gate-forge/pack-task": "^0.13.9",
+    "@gate-forge/plugin-protocol": "^0.13.9",
     "picomatch": "^4.0.7",
     "yaml": "^2.8.1"
   },
