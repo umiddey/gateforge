@@ -1604,6 +1604,26 @@ function isStorageOnlyStatement(node: ts.Statement, params: ReadonlySet<string>)
   return false;
 }
 
+/**
+ * Collects the LOCAL names a script function's parameter pattern binds:
+ * the identifier itself, or — for object/array destructuring — each
+ * bound element's local name, recursively. Destructured properties are
+ * serialized data exactly like a whole parameter, so they are usable as
+ * storage keys/values too. False when the pattern binds nothing
+ * trackable (computed properties) — the script then stays a tamper.
+ */
+function collectBoundParamNames(pattern: ts.BindingName, into: Set<string>): boolean {
+  if (ts.isIdentifier(pattern)) {
+    into.add(pattern.text);
+    return true;
+  }
+  for (const element of pattern.elements) {
+    if (!ts.isBindingElement(element)) return false;
+    if (!collectBoundParamNames(element.name, into)) return false;
+  }
+  return true;
+}
+
 /** Applies the storage-only body grammar to one resolved script function. */
 function isStorageOnlyScriptFunction(
   script: ts.ArrowFunction | ts.FunctionExpression | ts.FunctionDeclaration,
@@ -1617,8 +1637,7 @@ function isStorageOnlyScriptFunction(
   if (call.arguments.length !== script.parameters.length + 1) return false;
   const params = new Set<string>();
   for (const parameter of script.parameters) {
-    if (!ts.isIdentifier(parameter.name)) return false;
-    params.add(parameter.name.text);
+    if (!collectBoundParamNames(parameter.name, params)) return false;
   }
   const body = script.body;
   if (body === undefined) return false;
