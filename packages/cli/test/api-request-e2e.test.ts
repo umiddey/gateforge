@@ -28,6 +28,10 @@ const TITLE_UI = 'API seed followed by browser UI request';
 const TITLE_SEED_ONLY = 'direct seed alone is not UI evidence';
 const TITLE_PAGE_REQUEST = 'page.request alone is not UI evidence';
 const TITLE_CONTEXT_REQUEST = 'context.request alone is not UI evidence';
+const TITLE_EVALUATE_FETCH = 'page evaluate fetch is not UI evidence';
+const TITLE_EVALUATE_APP = 'page evaluate app function is not UI evidence';
+const TITLE_APP_ASYNC = 'app async handler remains UI evidence';
+const TITLE_INIT_WRAPPER = 'init script wrapper does not hide UI evidence';
 
 /** The endpoint the witness must observe (resource name is deterministic). */
 const ITEMS_RESOURCE = endpointResourceName('GET', '/api/items');
@@ -45,6 +49,18 @@ const PAGE_STATUS = `tenant.${PAGE_RESOURCE}:http:response-status-ok`;
 const CONTEXT_RESOURCE = endpointResourceName('GET', '/api/context-request');
 const CONTEXT_REQUEST = `tenant.${CONTEXT_RESOURCE}:http:request-observed`;
 const CONTEXT_STATUS = `tenant.${CONTEXT_RESOURCE}:http:response-status-ok`;
+const EVAL_RESOURCE = endpointResourceName('GET', '/api/eval-fetch');
+const EVAL_REQUEST = `tenant.${EVAL_RESOURCE}:http:request-observed`;
+const EVAL_STATUS = `tenant.${EVAL_RESOURCE}:http:response-status-ok`;
+const EVAL_APP_RESOURCE = endpointResourceName('GET', '/api/eval-app');
+const EVAL_APP_REQUEST = `tenant.${EVAL_APP_RESOURCE}:http:request-observed`;
+const EVAL_APP_STATUS = `tenant.${EVAL_APP_RESOURCE}:http:response-status-ok`;
+const ASYNC_RESOURCE = endpointResourceName('GET', '/api/app-async');
+const ASYNC_REQUEST = `tenant.${ASYNC_RESOURCE}:http:request-observed`;
+const ASYNC_STATUS = `tenant.${ASYNC_RESOURCE}:http:response-status-ok`;
+const WRAPPER_RESOURCE = endpointResourceName('GET', '/api/init-wrapper');
+const WRAPPER_REQUEST = `tenant.${WRAPPER_RESOURCE}:http:request-observed`;
+const WRAPPER_STATUS = `tenant.${WRAPPER_RESOURCE}:http:response-status-ok`;
 
 const PLAYWRIGHT_CONFIG = `import { defineConfig } from 'playwright/test';
 export default defineConfig({
@@ -108,6 +124,30 @@ test('${TITLE_CONTEXT_REQUEST}', async ({ page, context }) => {
   const response = await context.request.get('/api/context-request');
   expect(response.status()).toBe(200);
 });
+test('${TITLE_EVALUATE_FETCH}', async ({ page }) => {
+  await page.goto('/');
+  await page.evaluate(() => fetch('/api/eval-fetch'));
+});
+
+test('${TITLE_EVALUATE_APP}', async ({ page }) => {
+  await page.goto('/');
+  await page.evaluate(() => window.appAsync());
+});
+
+test('${TITLE_APP_ASYNC}', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Load async' }).click();
+});
+
+test('${TITLE_INIT_WRAPPER}', async ({ page }) => {
+  await page.addInitScript(() => {
+    const original = window.fetch;
+    window.fetch = (...args) => original(...args);
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Load wrapped' }).click();
+});
+
 `;
 
 /** The endpoint inventory: GET /api/items classified tenant, with its two observation obligations owed. */
@@ -149,9 +189,14 @@ export default {
     route('seed_only_get', 'GET', '/api/seed-only', 12);
     route('page_request_get', 'GET', '/api/page-request', 13);
     route('context_request_get', 'GET', '/api/context-request', 14);
+    route('eval_get', 'GET', '/api/eval-fetch', 15);
+    route('eval_app_get', 'GET', '/api/eval-app', 16);
+    route('async_get', 'GET', '/api/app-async', 17);
+    route('wrapper_get', 'GET', '/api/init-wrapper', 18);
     return { resources, unresolved: [], findings: [], classificationSignals };
   },
 };
+
 `;
 
 /** Fixture API with direct-only routes and a button-driven UI request. */
@@ -164,11 +209,10 @@ async function startApiApp(): Promise<{
   let seeded = false;
   const app = createServer((request, response) => {
     const path = (request.url ?? '/').split('?')[0] ?? '/';
-    requestsByPath.set(path, (requestsByPath.get(path) ?? 0) + 1);
     response.setHeader('x-gateforge-env-fingerprint', FINGERPRINT);
     if (request.method === 'GET' && path === '/') {
       response.setHeader('content-type', 'text/html');
-      response.end('<button>Load items</button><div id="result"></div><script>document.querySelector("button").onclick=async()=>{await fetch("/api/ui-items");document.querySelector("#result").textContent="Items loaded"}</script>');
+      response.end('<button>Load items</button><button>Load async</button><button>Load wrapped</button><div id="result"></div><script>window.appAsync=async()=>{await new Promise(r=>setTimeout(r,0));await fetch("/api/eval-app")};document.querySelectorAll("button")[0].onclick=async()=>{await fetch("/api/ui-items");document.querySelector("#result").textContent="Items loaded"};document.querySelectorAll("button")[1].onclick=async()=>{await new Promise(r=>setTimeout(r,0));await fetch("/api/app-async")};document.querySelectorAll("button")[2].onclick=async()=>{await fetch("/api/init-wrapper")}</script>');
       return;
     }
     if (request.method === 'POST' && path === '/api/seed') {
@@ -184,7 +228,11 @@ async function startApiApp(): Promise<{
         path === '/api/ui-items' ||
         path === '/api/seed-only' ||
         path === '/api/page-request' ||
-        path === '/api/context-request')
+        path === '/api/context-request' ||
+        path === '/api/eval-fetch' ||
+        path === '/api/eval-app' ||
+        path === '/api/app-async' ||
+        path === '/api/init-wrapper')
     ) {
       response.setHeader('content-type', 'application/json');
       response.end(JSON.stringify({ ok: true, seeded }));
@@ -327,6 +375,42 @@ tests:
     kind: observed-e2e
     claims: ['${CONTEXT_REQUEST}', '${CONTEXT_STATUS}']
     reason: context.request is a direct API call, not a UI action.
+  - key: playwright:chromium:specs/api.spec.js:${TITLE_EVALUATE_FETCH}
+    selector:
+      runner: playwright
+      project: chromium
+      file: specs/api.spec.js
+      titlePath: ['${TITLE_EVALUATE_FETCH}']
+    kind: observed-e2e
+    claims: ['${EVAL_REQUEST}', '${EVAL_STATUS}']
+    reason: page.evaluate requests are not app UI actions.
+  - key: playwright:chromium:specs/api.spec.js:${TITLE_EVALUATE_APP}
+    selector:
+      runner: playwright
+      project: chromium
+      file: specs/api.spec.js
+      titlePath: ['${TITLE_EVALUATE_APP}']
+    kind: observed-e2e
+    claims: ['${EVAL_APP_REQUEST}', '${EVAL_APP_STATUS}']
+    reason: page.evaluate requests are not app UI actions.
+  - key: playwright:chromium:specs/api.spec.js:${TITLE_APP_ASYNC}
+    selector:
+      runner: playwright
+      project: chromium
+      file: specs/api.spec.js
+      titlePath: ['${TITLE_APP_ASYNC}']
+    kind: observed-e2e
+    claims: ['${ASYNC_REQUEST}', '${ASYNC_STATUS}']
+    reason: The app UI handler owns this request.
+  - key: playwright:chromium:specs/api.spec.js:${TITLE_INIT_WRAPPER}
+    selector:
+      runner: playwright
+      project: chromium
+      file: specs/api.spec.js
+      titlePath: ['${TITLE_INIT_WRAPPER}']
+    kind: observed-e2e
+    claims: ['${WRAPPER_REQUEST}', '${WRAPPER_STATUS}']
+    reason: The app UI handler owns this request.
 `,
         });
         repo.git(['add', '-A']);
@@ -370,19 +454,30 @@ tests:
           const verdict = report.verdicts.find((item) => item.obligationId === obligationId);
           expect(verdict, observed).toMatchObject({ verdict: 'missing' });
         }
-        for (const obligationId of [ITEMS_REQUEST, ITEMS_STATUS, SEED_ONLY_REQUEST, SEED_ONLY_STATUS]) {
+        const testInitiatedClaims = [
+          EVAL_REQUEST, EVAL_STATUS, EVAL_APP_REQUEST, EVAL_APP_STATUS,
+        ];
+        for (const obligationId of testInitiatedClaims) {
           const verdict = report.verdicts.find((item) => item.obligationId === obligationId);
-          expect(verdict?.reason ?? '', obligationId).toContain('the test called this endpoint directly from test code');
+          expect(verdict, observed).toMatchObject({ verdict: 'missing' });
+          expect(verdict?.reason ?? '').toContain('the request was started by test code running in the page');
+        }
+        for (const obligationId of [ASYNC_REQUEST, ASYNC_STATUS, WRAPPER_REQUEST, WRAPPER_STATUS]) {
+          expect(report.verdicts.find((item) => item.obligationId === obligationId), observed)
+            .toMatchObject({ verdict: 'satisfied' });
         }
         expect(run.code, observed).toBe(1);
-        expect(report.execution.selectedTests).toMatchObject({ selected: 6, passed: 6, failed: 0 });
+        expect(report.execution.selectedTests).toMatchObject({ selected: 10, passed: 10, failed: 0 });
         expect(app.requestsByPath.get('/api/items')).toBe(2);
-        expect(app.requestsByPath.get('/api/setup')).toBe(6);
+        expect(app.requestsByPath.get('/api/setup')).toBe(10);
         expect(app.requestsByPath.get('/api/seed')).toBe(1);
-        expect(app.requestsByPath.get('/api/ui-items')).toBe(1);
         expect(app.requestsByPath.get('/api/seed-only')).toBe(1);
         expect(app.requestsByPath.get('/api/page-request')).toBe(1);
         expect(app.requestsByPath.get('/api/context-request')).toBe(1);
+        expect(app.requestsByPath.get('/api/eval-fetch')).toBe(1);
+        expect(app.requestsByPath.get('/api/eval-app')).toBe(1);
+        expect(app.requestsByPath.get('/api/app-async')).toBe(1);
+        expect(app.requestsByPath.get('/api/init-wrapper')).toBe(1);
         const records = JSON.parse(readFileSync(repo.path('.gateforge/test-gates/records.json'), 'utf8')) as LedgerRecord[];
         const recordedPaths = recordedExchangePaths(records);
         for (const path of ['/api/items', '/api/seed-only', '/api/page-request', '/api/context-request']) {
