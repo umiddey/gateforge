@@ -527,6 +527,239 @@ describe('static discovery', () => {
     expect(tamperRisk?.detail).toContain('e2e/page.spec.ts:4');
   });
 
+  it('a parameterized storage-only init script is not a tamper (0.13.10 F2)', () => {
+    // The measured real-world shape: a helper passes its OWN runtime
+    // value as the script argument, and the script body uses the
+    // parameter only as a storage key/value:
+    //   page.addInitScript((key) => localStorage.setItem(key, "true"), key)
+    // The parameter can only ever be serialized data inside the init
+    // script, so a body made solely of storage calls on it mutates
+    // nothing the witness cannot verify from its independent observer.
+    const safeCalls = [
+      "page.addInitScript((key) => localStorage.getItem(key), 'boot-done')",
+      "page.addInitScript((key) => localStorage.setItem(key, 'true'), bootKey)",
+      "page.addInitScript((key) => { localStorage.setItem(key, 'true'); sessionStorage.removeItem(key); }, 'boot')",
+      "page.addInitScript((key) => window.sessionStorage.setItem(key, key), bootKey)",
+      "page.addInitScript((count) => localStorage.setItem('runs', count), 3)",
+    ];
+    for (const call of safeCalls) {
+      const root = makeTempDir();
+      writeTree(root, {
+        'e2e/page.spec.ts': [
+          "import { test } from 'playwright/test';",
+          "const bootKey = 'boot-done';",
+          "test('opens orders', async ({ page }) => {",
+          `  ${call};`,
+          "  await page.goto('/orders');",
+          '});',
+          '',
+        ].join('\n'),
+      });
+      const result = scanTestFiles({ cwd: root, include: ['e2e/**/*.ts'], exclude: [] });
+      const test = rowFor(result.entries, 'e2e/page.spec.ts');
+      expect(test.facts.fileRouteInterception, call).toBeNull();
+      expect(
+        inferenceOf(test).mockSignals.some((signal) =>
+          signal.detail.startsWith('PAGE_OBSERVATION_TAMPER_RISK:'),
+        ),
+        call,
+      ).toBe(false);
+    }
+
+    // Still tampers (fail closed): a parameter used OUTSIDE a storage
+    // key/value, any non-storage statement mixed in, an arity mismatch
+    // between declared parameters and passed arguments, and a
+    // non-parameter identifier in a key/value position.
+    const unsafeCalls = [
+      'page.addInitScript((key) => console.log(key))',
+      "page.addInitScript((key) => { localStorage.setItem(key, 'true'); window.fetch = () => {}; })",
+      'page.addInitScript(() => { Object.defineProperty(window, "telemetry", { get: () => ({ enabled: true }) }); })',
+      "page.addInitScript((key) => localStorage.setItem(key, 'true'), 'a', 'b')",
+      "page.addInitScript((key, other) => localStorage.setItem(key, 'true'), 'a')",
+      "page.addInitScript((key) => localStorage.setItem(closureKey, 'true'), 'a')",
+      "page.addInitScript(([key]) => localStorage.setItem(key, 'true'), 'a')",
+    ];
+    for (const call of unsafeCalls) {
+      const root = makeTempDir();
+      writeTree(root, {
+        'e2e/page.spec.ts': [
+          "import { test } from 'playwright/test';",
+          "const closureKey = 'boot-done';",
+          "test('opens orders', async ({ page }) => {",
+          `  ${call};`,
+          "  await page.goto('/orders');",
+          '});',
+          '',
+        ].join('\n'),
+      });
+      const result = scanTestFiles({ cwd: root, include: ['e2e/**/*.ts'], exclude: [] });
+      const test = rowFor(result.entries, 'e2e/page.spec.ts');
+      expect(test.facts.fileRouteInterception, call).not.toBeNull();
+      expect(
+        inferenceOf(test).mockSignals.some((signal) =>
+          signal.detail.startsWith('PAGE_OBSERVATION_TAMPER_RISK:'),
+        ),
+        call,
+      ).toBe(true);
+    }
+  });
+
+  it('a storage-only init script passed as a local function reference is not a tamper (0.13.10 F2)', () => {
+    // The second measured real-world shape: the script is a LOCAL
+    // arrow/function passed by NAME (`page.context().addInitScript(seed)`),
+    // with a body guarded by try/catch + an if over a storage read and
+    // values built by inert builtins (`JSON.stringify`, `new Date()
+    // .toISOString()`) and closure constants. The reference form changes
+    // nothing about capability: the body still only ever touches
+    // localStorage/sessionStorage.
+    const safeSpecs: Array<[string, string[]]> = [
+      [
+        'guarded body via page.context() reference',
+        [
+          "const seedConsent = () => {",
+          '  try {',
+          "    if (window.localStorage.getItem('consent_v1') === null) {",
+          "      window.localStorage.setItem('consent_v1', JSON.stringify({",
+          '        version: 1,',
+          '        decided_at: new Date().toISOString(),',
+          '        categories: { necessary: true, analytics: false },',
+          '      }));',
+          '    }',
+          '  } catch {}',
+          '};',
+          'await page.context().addInitScript(seedConsent);',
+        ],
+      ],
+      [
+        'plain reference via page',
+        [
+          "const seed = () => { localStorage.setItem('flag', 'on'); };",
+          'await page.addInitScript(seed);',
+        ],
+      ],
+      [
+        'function-declaration reference',
+        [
+          "function seedVisits() { sessionStorage.setItem('visits', '1'); }",
+          'await page.addInitScript(seedVisits);',
+        ],
+      ],
+      [
+        'closure constant key through a reference',
+        [
+          "const consentKey = 'consent_v1';",
+          'const seed = () => {',
+          "  if (localStorage.getItem(consentKey) === null) localStorage.setItem(consentKey, '{}');",
+          '};',
+          'await page.addInitScript(seed);',
+        ],
+      ],
+      [
+        'one alias hop to the script function',
+        [
+          "const seed = () => localStorage.setItem('a', 'b');",
+          'const alias = seed;',
+          'await page.addInitScript(alias);',
+        ],
+      ],
+      [
+        'direct arrow via page.context()',
+        [
+          "await page.context().addInitScript(() => { localStorage.setItem('ctx', '1'); });",
+        ],
+      ],
+    ];
+    for (const [name, lines] of safeSpecs) {
+      const root = makeTempDir();
+      writeTree(root, {
+        'e2e/page.spec.ts': [
+          "import { test } from 'playwright/test';",
+          "test('opens orders', async ({ page }) => {",
+          ...lines,
+          "  await page.goto('/orders');",
+          '});',
+          '',
+        ].join('\n'),
+      });
+      const result = scanTestFiles({ cwd: root, include: ['e2e/**/*.ts'], exclude: [] });
+      const test = rowFor(result.entries, 'e2e/page.spec.ts');
+      expect(test.facts.fileRouteInterception, name).toBeNull();
+      expect(
+        inferenceOf(test).mockSignals.some((signal) =>
+          signal.detail.startsWith('PAGE_OBSERVATION_TAMPER_RISK:'),
+        ),
+        name,
+      ).toBe(false);
+    }
+
+    // Still tampers (fail closed): a referenced body that touches the
+    // page or network, an unresolved closure identifier in a value
+    // position, a non-function reference, and the same seed handed to
+    // page.evaluate (the evaluate rule is unchanged in this release).
+    const unsafeSpecs: Array<[string, string[]]> = [
+      [
+        'referenced body mutating the page',
+        [
+          "const seed = () => { document.title = 'seeded'; };",
+          'await page.addInitScript(seed);',
+        ],
+      ],
+      [
+        'referenced body calling fetch',
+        [
+          "const seed = () => { fetch('/telemetry'); };",
+          'await page.addInitScript(seed);',
+        ],
+      ],
+      [
+        'unresolved closure identifier in a value position',
+        [
+          'const seed = () => {',
+          "  localStorage.setItem('k', runtimeValue);",
+          '};',
+          'await page.addInitScript(seed);',
+        ],
+      ],
+      [
+        'reference to a non-function binding',
+        [
+          "const seed = 'not a function';",
+          'await page.addInitScript(seed);',
+        ],
+      ],
+      [
+        'the same seed handed to page.evaluate stays a tamper',
+        [
+          "const seed = () => { localStorage.setItem('flag', 'on'); };",
+          'await page.addInitScript(seed);',
+          'await page.evaluate(seed);',
+        ],
+      ],
+    ];
+    for (const [name, lines] of unsafeSpecs) {
+      const root = makeTempDir();
+      writeTree(root, {
+        'e2e/page.spec.ts': [
+          "import { test } from 'playwright/test';",
+          "test('opens orders', async ({ page }) => {",
+          ...lines,
+          "  await page.goto('/orders');",
+          '});',
+          '',
+        ].join('\n'),
+      });
+      const result = scanTestFiles({ cwd: root, include: ['e2e/**/*.ts'], exclude: [] });
+      const test = rowFor(result.entries, 'e2e/page.spec.ts');
+      expect(test.facts.fileRouteInterception, name).not.toBeNull();
+      expect(
+        inferenceOf(test).mockSignals.some((signal) =>
+          signal.detail.startsWith('PAGE_OBSERVATION_TAMPER_RISK:'),
+        ),
+        name,
+      ).toBe(true);
+    }
+  });
+
   it("a mocked/mock/mocks FOLDER segment mocks its specs (0.9.2)", () => {
     const root = makeTempDir();
     writeTree(root, {
