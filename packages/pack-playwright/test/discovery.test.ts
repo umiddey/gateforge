@@ -865,6 +865,71 @@ describe('static discovery', () => {
     }
   });
 
+  it('attributes HTTP-client calls to tests that reach imported helpers and recognizes Playwright API requests (0.13.10 F4)', () => {
+    const root = makeTempDir();
+    writeTree(root, {
+      'e2e/helpers/api.js': [
+        'export async function seedViaApi(request) {',
+        "  await request.post('/seed');",
+        '}',
+        'export async function getViaPage(page) {',
+        "  await page.request.get('/items');",
+        '}',
+        'export async function postViaContext(context) {',
+        "  await context.request.post('/items');",
+        '}',
+        '',
+      ].join('\n'),
+      'e2e/caller.spec.ts': [
+        "import { test } from 'playwright/test';",
+        "import { seedViaApi } from './helpers/api.js';",
+        "test('calls imported request helper', async ({ request }) => {",
+        '  await seedViaApi(request);',
+        '});',
+        '',
+      ].join('\n'),
+      'e2e/unused.spec.ts': [
+        "import { test } from 'playwright/test';",
+        "import { seedViaApi } from './helpers/api.js';",
+        "test('imports but never calls helper', async ({ request }) => {});",
+        '',
+      ].join('\n'),
+      'e2e/direct.spec.ts': [
+        "import { test } from 'playwright/test';",
+        "test('uses page request', async ({ page }) => {",
+        "  await page.request.get('/items');",
+        '});',
+        "test('uses context request', async ({ context }) => {",
+        "  await context.request.post('/items');",
+        '});',
+        '',
+      ].join('\n'),
+      'e2e/helper-api.spec.ts': [
+        "import { test } from 'playwright/test';",
+        "import { getViaPage, postViaContext } from './helpers/api.js';",
+        "test('uses page request helper', async ({ page }) => {",
+        '  await getViaPage(page);',
+        '});',
+        "test('uses context request helper', async ({ context }) => {",
+        '  await postViaContext(context);',
+        '});',
+        '',
+      ].join('\n'),
+    });
+    const result = scanTestFiles({ cwd: root, include: ['e2e/**/*.ts'], exclude: [] });
+    const hasHttpSignal = (entry: StaticTestEntry): boolean =>
+      inferenceOf(entry).kindSignals.some((signal) => signal.ruleId === 'http-client-call');
+
+    expect(hasHttpSignal(rowFor(result.entries, 'e2e/caller.spec.ts'))).toBe(true);
+    expect(hasHttpSignal(rowFor(result.entries, 'e2e/unused.spec.ts'))).toBe(false);
+    const direct = result.entries.filter((entry) => entry.file === 'e2e/direct.spec.ts');
+    expect(direct).toHaveLength(2);
+    expect(direct.every(hasHttpSignal)).toBe(true);
+    const imported = result.entries.filter((entry) => entry.file === 'e2e/helper-api.spec.ts');
+    expect(imported).toHaveLength(2);
+    expect(imported.every(hasHttpSignal)).toBe(true);
+  });
+
   it('attributes an imported helper tamper to the tests that reach it (0.13.10 F3)', () => {
     // A helper module with one risky export and one safe one: today the
     // tamper is a FILE-wide fact, so every test of every file importing
