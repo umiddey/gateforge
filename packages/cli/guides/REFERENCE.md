@@ -2045,11 +2045,13 @@ continue to require title-path identity; a different literal title is
 never joined by line alone.
 
 Static Playwright discovery assigns the `http-client-call` kind signal to
-`fetch`/`axios` calls and to API-client methods called through
-`page.request` or `context.request`. It follows the same bounded import and
-per-test helper reachability used for route-tamper attribution: a helper's
-HTTP call counts only for a test that calls a reachable helper, not every
-test that merely imports the module.
+`fetch`/`axios` calls in the test file and to API-client methods called
+through `page.request` or `context.request`. It follows the same bounded
+import and per-test helper reachability used for route-tamper attribution:
+only Playwright API request calls in imported test infrastructure count,
+and a helper call counts only for a test that reaches it, not every test
+that merely imports the module. Fetch/axios calls in imported product
+modules are not treated as Playwright API evidence.
 
 ### Provenance trust model (GF-23, audited 2026-08-31, three rounds)
 

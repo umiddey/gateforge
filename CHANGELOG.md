@@ -9,9 +9,10 @@
   fixtures remain `unknown`; runtime proof rules are unchanged.
 
 - **HTTP-client kind signals follow reached helpers and Playwright API
-  requests (F4).** Discovery attributes HTTP calls in imported helpers only
-  to tests whose bodies reach them, and recognizes `page.request` and
-  `context.request` methods as API-client calls.
+  requests (F4).** Discovery recognizes `page.request` and `context.request`
+  calls through imports, attributed only to tests that call a reachable test
+  helper. `fetch`/`axios` calls are detected in the test file; calls in
+  imported product modules do not count as Playwright API evidence.
 
 ## 0.13.9
 
