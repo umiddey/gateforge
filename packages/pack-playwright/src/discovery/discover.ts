@@ -38,7 +38,6 @@ import {
   type GateforgeConfig,
   type CatalogUnresolved,
   type Location,
-  pathInScope,
   type RunnerSummary,
   type TestCatalog,
   type TestCatalogEntry,
@@ -246,33 +245,6 @@ export function unnamedProjectConfigWarning(configPath: string): string {
  *   maps this to exit 2. Scanner-detectable problems are rows, not
  *   throws.
  */
-/** Runner-selected files covered by configured source globs modulo extension. */
-function listedFilesWithinSourceGlobs(
-  listedFiles: readonly string[],
-  include: readonly string[],
-): string[] {
-  const includedExtensions = new Set<string>();
-  for (const pattern of include) {
-    const basename = pattern.slice(pattern.lastIndexOf('/') + 1);
-    for (const match of basename.matchAll(/\.([A-Za-z0-9]+)(?=[,}]|$)/g)) {
-      const extension = match[1];
-      if (extension !== undefined) includedExtensions.add(`.${extension}`);
-    }
-  }
-  if (includedExtensions.size === 0) return [];
-  const extensions = [...includedExtensions];
-  const selected = new Set<string>();
-  for (const file of listedFiles) {
-    const dot = file.lastIndexOf('.');
-    if (dot <= file.lastIndexOf('/')) continue;
-    const stem = file.slice(0, dot);
-    if (extensions.some((extension) => pathInScope(`${stem}${extension}`, include))) {
-      selected.add(file);
-    }
-  }
-  return [...selected].sort();
-}
-
 export async function discoverTestCatalog(options: DiscoverOptions): Promise<DiscoverResult> {
   const { cwd, config } = options;
   const discoveryStartedAtMs = performance.now();
@@ -287,18 +259,15 @@ export async function discoverTestCatalog(options: DiscoverOptions): Promise<Dis
     timeoutMs: options.playwrightTimeoutMs,
   });
   const nativeListMs = performance.now() - nativeStartedAtMs;
-  // Include a runner-selected file when the configured source globs cover
-  // its path with another recognized extension, but preserve list-only
-  // status for files wholly outside the configured source scope.
+  // Every file Playwright lists is a test it will run, so its code is read
+  // even outside the configured source globs: an unread test could carry
+  // an E2E claim nobody checked. Owner exclusions still apply.
   const scanStartedAtMs = performance.now();
   const scan = scanTestFiles({
     cwd,
     include: [
       ...config.project.paths.include,
-      ...listedFilesWithinSourceGlobs(
-        native.instances.map((instance) => instance.file),
-        config.project.paths.include,
-      ),
+      ...new Set(native.instances.map((instance) => instance.file)),
     ],
     exclude: config.project.paths.exclude,
     excludeFile: options.excludeFile,
