@@ -8,6 +8,9 @@
   files when their path is covered by a configured source glob under another
   recognized extension, allowing static rows to join the runner inventory
   and retain code-based kind inference.
+- **Mapping: unreadable tests cannot carry E2E claims.** A Playwright-listed
+  test whose code static discovery did not read cannot be mapped as
+  `browser-e2e`, `observed-e2e`, or `api-e2e` until the scan can inspect it.
 
 - **Deliberate tightening: test-code API requests are never E2E evidence.**
   This reverses 0.13.2's crediting of Playwright API calls: requests made

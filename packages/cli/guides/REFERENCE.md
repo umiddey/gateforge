@@ -499,6 +499,12 @@ catalog, lists up to five of that file's real keys.
   strong code-signal inference. In particular, `api-e2e` is not E2E evidence
   for observed claims and cannot be reclassified as `observed-e2e`;
   `tests mark` refuses such contradictions with both source locations.
+- A test that Playwright lists but static discovery did not read cannot
+  carry an E2E claim: Gateforge blocks sidecar and native claims for that
+  row until code is readable. This is distinct from a scanned test whose
+  code signals are inconclusive; a declared kind may still resolve that
+  scanned row's `unknown`. Likely causes include an unresolved wrapper
+  import or a file extension outside configured source globs.
 - Agents may edit the sidecar directly; both paths receive identical
   validation. `mark` is idempotent: re-running an exact declaration writes
   nothing and reports `no changes`.
