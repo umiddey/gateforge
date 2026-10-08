@@ -197,7 +197,7 @@ function recordedExchangePaths(records: LedgerRecord[], testId?: string): string
 }
 
 describe('witnessed API request channel through the actual CLI', () => {
-  it('witnesses APIRequestContext traffic and keeps hook setup uncredited on an extended runner', async () => {
+  it('does not credit test-code API requests as E2E evidence', async () => {
     const app = await startApiApp();
     try {
       await withTempRepo({}, async (repo) => {
@@ -258,10 +258,10 @@ tests:
           verdicts: Array<{ obligationId: string; verdict: string }>;
           execution: { selectedTests: { selected: number; passed: number; failed: number } };
         };
-        // Both claims prove through the session proxy — for BOTH tests.
+        // API calls from test code are not browser evidence.
         for (const obligationId of [ITEMS_REQUEST, ITEMS_STATUS]) {
           expect(report.verdicts.find((verdict) => verdict.obligationId === obligationId), observed).toMatchObject({
-            verdict: 'satisfied',
+            verdict: 'unsatisfied',
           });
         }
         expect(run.code, observed).toBe(0);
