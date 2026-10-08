@@ -1479,26 +1479,29 @@ describe('native playwright reconciliation', () => {
 
   it('discovers runner-only cases through the native list fallback (origin native-list)', async () => {
     const root = makePlaywrightProject({
-      'e2e/listed.spec.js': "import { test } from 'playwright/test';\ntest('enumerated', () => {});\n",
-      'e2e/hidden.spec.js': "import { test } from 'playwright/test';\ntest('outside configured globs', () => {});\n",
+      'e2e/listed.spec.js':
+        "import { test } from 'playwright/test';\ntest('enumerated', async ({ page }) => { await page.goto('/'); });\n",
+      'e2e/hidden.spec.js':
+        "import { test } from 'playwright/test';\ntest('excluded from scanning', async ({ page }) => { await page.goto('/'); });\n",
+      'e2e/outside.spec.js':
+        "import { test } from 'playwright/test';\ntest('outside configured globs', async ({ page }) => { await page.goto('/'); });\n",
     });
     const config = fixtureConfig(['e2e/listed.spec.js']);
+    config.project.paths.exclude.push('e2e/hidden.spec.js');
     const { catalog } = await discoverTestCatalog({ cwd: root, config });
-    // The native runner PROVED the outside-glob case exists and will
-    // execute it: the row is DISCOVERED with its resolution origin
-    // labeled 'native-list' (weaker classification, never a fabricated
-    // kind from absent facts) — visible and enforced, not unresolved.
     const listOnly = catalog.entries.filter((entry) => entry.reconciliation === 'list-only');
-    expect(listOnly.map((entry) => entry.title)).toEqual(['outside configured globs']);
+    expect(listOnly.map((entry) => entry.title)).toEqual(['excluded from scanning']);
     expect(listOnly[0]?.discoveryStatus).toBe('discovered');
     expect(listOnly[0]?.resolutionOrigin).toBe('native-list');
     expect(listOnly[0]?.inferredKind).toBe('unknown');
     expect(listOnly[0]?.kindSignals).toEqual([]);
     expect(listOnly[0]?.weakSignals.some((signal) => signal.ruleId === 'native-list-only')).toBe(true);
     expect(listOnly[0]?.unresolvedReason).toBeUndefined();
-    // The statically derived case carries the 'static' origin label.
     const matched = catalog.entries.filter((entry) => entry.reconciliation === 'matched');
-    expect(matched.map((entry) => entry.resolutionOrigin)).toEqual(['static']);
+    expect(matched.map((entry) => [entry.title, entry.inferredKind, entry.resolutionOrigin]).sort()).toEqual([
+      ['enumerated', 'browser-e2e', 'static'],
+      ['outside configured globs', 'browser-e2e', 'static'],
+    ]);
     expect(catalog.inventoryComplete).toBe(true);
   });
 
