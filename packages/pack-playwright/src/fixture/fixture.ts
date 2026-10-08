@@ -33,7 +33,7 @@ import {
   type EvidenceApi,
   type SurfaceDescriptor,
 } from './evidence.js';
-import { wrapSetupRequestContext } from './api-request.js';
+import { wrapDirectRequestContext } from './api-request.js';
 import { WitnessClient, type SessionPageObserverFlushRequest } from './witness-client.js';
 import type { SessionCredential } from '../witness/types.js';
 const browserDebuggingPorts = new WeakMap<Browser, number>();
@@ -340,10 +340,10 @@ const extended = browserRunner.extend<EvidenceFixtures>({
       const sessionProxyUrl: string = session.proxyUrl;
       const reporter = createUnroutedOriginReporter({ witness, session, appBaseURL });
       Object.defineProperty(page.context(), 'request', {
-        value: wrapSetupRequestContext(page.context().request, {
+        value: wrapDirectRequestContext(page.context().request, {
           baseURL: projectBaseURL(testInfo),
           onExchange: (exchange) => {
-            void witness.reportSessionSetupExchanges({
+            void witness.reportSessionDirectExchanges({
               sessionId: session.sessionId,
               sessionToken: session.sessionToken,
               exchanges: [exchange],
@@ -383,10 +383,10 @@ const extended = browserRunner.extend<EvidenceFixtures>({
     if (session === null) {
       throw new Error(`No supervisor-issued witness session for ${testInfo.testId}.`);
     }
-    await use(wrapSetupRequestContext(request, {
+    await use(wrapDirectRequestContext(request, {
       ...(projectBaseURL(testInfo) === undefined ? {} : { baseURL: projectBaseURL(testInfo) }),
       onExchange: (exchange) => {
-        void witness.reportSessionSetupExchanges({
+        void witness.reportSessionDirectExchanges({
           sessionId: session.sessionId,
           sessionToken: session.sessionToken,
           exchanges: [exchange],
@@ -510,7 +510,7 @@ export const request = {
       const context = await playwrightRequest.newContext(
         fallbackBaseURL === undefined ? options : { ...options, baseURL: fallbackBaseURL },
       );
-      return wrapSetupRequestContext(context, {
+      return wrapDirectRequestContext(context, {
         ...(fallbackBaseURL === undefined ? {} : { baseURL: fallbackBaseURL }),
         onExchange: (exchange) => {
           let owner = testInfo;
@@ -523,7 +523,7 @@ export const request = {
           }
           void resolveSessionBounded(new WitnessClient(), owner.testId, owner.workerIndex, 0).then((session) => {
             if (session === null) return;
-            void new WitnessClient().reportSessionSetupExchanges({
+            void new WitnessClient().reportSessionDirectExchanges({
               sessionId: session.sessionId,
               sessionToken: session.sessionToken,
               exchanges: [exchange],

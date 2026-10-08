@@ -218,10 +218,10 @@ export const OBSERVE_CHANNEL = 'observe';
  * are diagnostic only and can never satisfy a claim. Mirrors
  * `DIRECT_CHANNEL` in core's `pack-verifiers.ts`.
  */
-export const SETUP_CHANNEL = 'direct';
+export const DIRECT_CHANNEL = 'direct';
 
 /** Upper bound on the distinct direct API exchanges kept for diagnosis. */
-export const SETUP_EXCHANGES_CAP = 8;
+export const DIRECT_EXCHANGES_CAP = 8;
 
 /** The mapping kind that unlocks the Observe channel. */
 export const OBSERVED_E2E_TEST_KIND = 'observed-e2e';

@@ -9,7 +9,7 @@ import {
   rewriteApiUrl,
   sessionApiRouting,
   wrapApiRequestContext,
-  wrapSetupRequestContext,
+  wrapDirectRequestContext,
   type SessionApiRouting,
 } from '../src/fixture/api-request.js';
 
@@ -134,7 +134,7 @@ describe('wrapApiRequestContext — the explicit wrapper', () => {
   });
 });
 
-describe('wrapSetupRequestContext — the hook-scope reporter wrapper', () => {
+describe('wrapDirectRequestContext — the direct API diagnostic wrapper', () => {
   /** A recording stand-in whose every verb answers `status`. */
   function fakeStatusContext(status: number): {
     context: APIRequestContext;
@@ -181,7 +181,7 @@ describe('wrapSetupRequestContext — the hook-scope reporter wrapper', () => {
   it('reports every call with its resolved URL and the response status', async () => {
     const { context } = fakeStatusContext(200);
     const seen: Array<{ method: string; url: string; status: number }> = [];
-    const wrapped = wrapSetupRequestContext(context, {
+    const wrapped = wrapDirectRequestContext(context, {
       baseURL: APP,
       onExchange: (exchange) => seen.push(exchange),
     });
@@ -195,7 +195,7 @@ describe('wrapSetupRequestContext — the hook-scope reporter wrapper', () => {
 
   it('keeps the call answer untouched even when the reporter throws', async () => {
     const { context } = fakeStatusContext(404);
-    const wrapped = wrapSetupRequestContext(context, {
+    const wrapped = wrapDirectRequestContext(context, {
       baseURL: APP,
       onExchange: () => {
         throw new Error('reporter exploded');
@@ -208,7 +208,7 @@ describe('wrapSetupRequestContext — the hook-scope reporter wrapper', () => {
   it('reports non-2xx statuses too — the diagnosis names where the call went', async () => {
     const { context } = fakeStatusContext(500);
     const seen: Array<{ method: string; url: string; status: number }> = [];
-    const wrapped = wrapSetupRequestContext(context, {
+    const wrapped = wrapDirectRequestContext(context, {
       onExchange: (exchange) => seen.push(exchange),
     });
     await wrapped.get('http://localhost:13001/api/items');

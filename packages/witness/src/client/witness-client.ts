@@ -36,8 +36,8 @@ import type {
   SessionPageObserverFlushRequest,
   SessionResolveRequest,
   SessionResolveResponse,
-  SessionSetupExchangesRequest,
-  SessionSetupExchangesResponse,
+  SessionDirectExchangesRequest,
+  SessionDirectExchangesResponse,
 } from '../witness/types.js';
 
 export type { SessionPageObserverFlushRequest };
@@ -206,22 +206,13 @@ export class WitnessClient {
   }
 
   /**
-   * POST /sessions/setup-exchanges (0.13.9): reports the app-origin
-   * calls a HOOK-created (or module-scope) API context made. That
-   * traffic never rides any session proxy, so the witness never sees it
-   * — this report is the only way a claim whose call went through such
-   * a context can name the cause instead of a bare anchor refusal.
-   *
-   * It is DIAGNOSTIC: the witness keeps the exchanges RUN-scoped in
-   * memory, never credits them, and the observe finalize stamps the ONE
-   * witnessed `channel: 'setup'` record the verdict engine reads purely
-   * for its missing-claim reason. Session authenticated, so it can only
-   * ever report while the caller's session is open.
+   * Reports direct API exchanges for run-scoped diagnosis only. Direct
+   * exchanges are never attributed as UI evidence and never satisfy a claim.
    */
-  async reportSessionSetupExchanges(
-    request: SessionSetupExchangesRequest,
-  ): Promise<SessionSetupExchangesResponse> {
-    return this.request<SessionSetupExchangesResponse>('/sessions/setup-exchanges', request);
+  async reportSessionDirectExchanges(
+    request: SessionDirectExchangesRequest,
+  ): Promise<SessionDirectExchangesResponse> {
+    return this.request<SessionDirectExchangesResponse>('/sessions/direct-exchanges', request);
   }
 
   /** POST /sessions/page-observer registers the fixture-launched browser with the witness. */

@@ -1,25 +1,11 @@
 /**
- * The witnessed API request channel.
- *
- * API tests that use Playwright's APIRequestContext — the `request`
- * fixture, `page.request`/`context.request`, or `request.newContext()`
- * imported from this pack — never pass `page.route`, so the session
- * proxy never sees their exchanges and their endpoint traffic could
- * never be witnessed. This module wraps an APIRequestContext so every
- * call whose resolved URL carries the app origin is rehosted onto the
- * test's session proxy: the SAME host swap `routePageThroughSessionProxy`
- * performs (path, query, headers and body untouched). Every other origin
- * passes through raw; a non-app origin that is still plausibly the app
- * (the app base's own host, or loopback) is reported through the same
- * unrouted-origin reporter the page channel uses.
- *
- * The wrapper is an explicit object implementing APIRequestContext's
- * request methods with `dispose`/`storageState` passthrough — no Proxy,
- * so types stay honest. One honest limitation: a `Request` OBJECT target
- * (`context.fetch(request)`) cannot be rehosted (no public constructor);
- * it passes through untouched, exactly like a foreign origin.
+ * Playwright API-context helpers. Calls made from test code go directly to
+ * the app and are reported to the witness only as run-scoped diagnostics;
+ * they never pass through the session proxy and never satisfy E2E claims.
+ * Browser page traffic has a separate proxy route and is the only transport
+ * channel that can support observed-E2E claims.
  */
-import type { BrowserContext, APIRequestContext, APIResponse } from 'playwright';
+import type { APIRequestContext, APIResponse } from 'playwright';
 
 /** The validated origin pair one session's API calls route between. */
 export interface SessionApiRouting {
@@ -169,24 +155,24 @@ export function wrapApiRequestContext(
   };
 }
 /** A hook-scope call observed outside the session proxy (diagnostic only). */
-export interface SetupExchange {
+export interface DirectExchange {
   method: string;
   url: string;
   status: number;
 }
 
-export interface WrapSetupRequestContextOptions {
+export interface WrapDirectRequestContextOptions {
   baseURL?: string;
-  onExchange: (exchange: SetupExchange) => void;
+  onExchange: (exchange: DirectExchange) => void;
 }
 
 /**
- * Reports direct app-origin API calls made by setup-scoped contexts.
- * Reporting is best-effort and cannot change the underlying response.
+ * Reports direct app-origin API calls made by test contexts. Reporting is
+ * best-effort and cannot change the underlying response.
  */
-export function wrapSetupRequestContext(
+export function wrapDirectRequestContext(
   underlying: APIRequestContext,
-  options: WrapSetupRequestContextOptions,
+  options: WrapDirectRequestContextOptions,
 ): APIRequestContext {
   const invoke = async (
     method: string,
@@ -227,20 +213,3 @@ export function wrapSetupRequestContext(
 }
 
 
-/**
- * Rehosts the owned APIRequestContext of a witnessed page's context
- * (`page.request` and `context.request` are the SAME lazily-created
- * object; shadowing it on the context instance covers both access
- * paths). The underlying context is materialized first and delegated to.
- *
- * Args:
- *   context: the browser context of the witnessed page.
- *   options: the same arguments {@link wrapApiRequestContext} takes.
- *
- * Returns:
- *   void.
- */
-export function rehostContextRequest(context: BrowserContext, options: WrapApiRequestContextOptions): void {
-  const wrapped = wrapApiRequestContext(context.request, options);
-  Object.defineProperty(context, 'request', { value: wrapped, configurable: true });
-}

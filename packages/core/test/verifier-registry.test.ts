@@ -1703,7 +1703,7 @@ describe('hook-scope setup exchanges (0.13.9 diagnosis)', () => {
   function setupRecord(obligationId: string, exchanges: ReadonlyArray<Record<string, unknown>>): Record<string, unknown> {
     return record(obligationId, {
       kind: 'http.observed',
-      payload: { channel: 'setup', exchanges: [...exchanges] },
+      payload: { channel: 'direct', exchanges: [...exchanges] },
     });
   }
 
@@ -1732,16 +1732,16 @@ describe('hook-scope setup exchanges (0.13.9 diagnosis)', () => {
 
   const OLD_REASON = `'${HOOK_OBLIGATION.id}': no 'ui.action' anchor from the declaring test`;
 
-  it('a hook-scope exchange matching the endpoint names the hook context as the cause', () => {
+  it('a direct exchange matching the endpoint names the cause without counting as evidence', () => {
     const outcome = outcomeWithSetup(HOOK_OBLIGATION, [
       setupRecord(HOOK_OBLIGATION.id, [
         { method: 'GET', url: 'http://localhost:13001/accounts/77', status: 200 },
       ]),
     ]);
     expect(outcome.verdict).toBe('missing');
-    expect(outcome.reason).toContain('context created in a hook (beforeAll/beforeEach)');
-    expect(outcome.reason).toContain('hook traffic is setup and never credited');
-    expect(outcome.reason).toContain('Open the context in the test body');
+    expect(outcome.reason).toBe(
+      `'${HOOK_OBLIGATION.id}': the test called this endpoint directly from test code (Playwright API request), not through the app's UI. API calls from test code are never E2E evidence: drive the operation through the UI so the app makes the call.`,
+    );
   });
 
   it('a genuinely absent call keeps the old reason byte-identical', () => {

@@ -1,15 +1,7 @@
 /**
- * Hook-scope setup exchanges, witness side (0.13.9): the fixture reports
- * the app-origin calls a hook-created (or module-scope) API context made
- * — traffic that never rides any session proxy and is never credited —
- * so a claim whose call went through such a context can NAME the cause.
- *
- * The report is session-AUTHENTICATED (the fixture can only report for
- * the session whose credential it holds) but RUN-SCOPED in the witness:
- * it binds to no session's evidence and can never satisfy anything. The
- * observe finalize stamps it into ONE witnessed `http.observed` record
- * carrying `channel: 'setup'`, once per run — the only way it reaches
- * the verdict engine, which reads it purely for the diagnosis.
+ * Direct API exchanges, witness side: reports are session-authenticated
+ * but run-scoped, diagnostic only, and can never satisfy a claim. Finalize
+ * stamps one witnessed `http.observed` record carrying `channel: 'direct'`.
  */
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -88,27 +80,27 @@ async function declareObserve(): Promise<void> {
   if (answer.status !== 200) throw new Error(`observe declarations failed: ${JSON.stringify(answer.body)}`);
 }
 
-/** Reports one hook-scope exchange through the session credential. */
-async function reportSetupExchanges(
+/** Reports direct API exchanges through the session credential. */
+async function reportDirectExchanges(
   session: SessionCredential,
   exchanges: ReadonlyArray<{ method: string; url: string; status: number }>,
 ): Promise<{ status: number; body: Record<string, unknown> }> {
-  return post('/sessions/setup-exchanges', {
+  return post('/sessions/direct-exchanges', {
     sessionId: session.sessionId,
     sessionToken: session.sessionToken,
     exchanges: [...exchanges],
   });
 }
 
-/** The one setup-channel record in the ledger, if any. */
-function setupRecordOf(records: ReadonlyArray<Record<string, unknown>>): Record<string, unknown> | null {
+/** The one direct-channel record in the ledger, if any. */
+function directRecordOf(records: ReadonlyArray<Record<string, unknown>>): Record<string, unknown> | null {
   return (
     records.find(
       (candidate) =>
         candidate['kind'] === 'http.observed' &&
         typeof candidate['payload'] === 'object' &&
         candidate['payload'] !== null &&
-        (candidate['payload'] as Record<string, unknown>)['channel'] === 'setup',
+        (candidate['payload'] as Record<string, unknown>)['channel'] === 'direct',
     ) ?? null
   );
 }
@@ -132,11 +124,11 @@ afterEach(async () => {
   rmSync(adaptersDir, { recursive: true, force: true });
 });
 
-describe('POST /sessions/setup-exchanges', () => {
+describe('POST /sessions/direct-exchanges', () => {
   it('records hook-scope exchanges and the finalize stamps one witnessed setup record', async () => {
     await declareObserve();
     const session = await openSession();
-    const report = await reportSetupExchanges(session, [
+    const report = await reportDirectExchanges(session, [
       { method: 'GET', url: `${appBaseUrl}/api/widgets/77`, status: 200 },
     ]);
     expect(report.status).toBe(200);
@@ -144,7 +136,7 @@ describe('POST /sessions/setup-exchanges', () => {
     const finalize = await post('/observe/finalize', { sessionId: session.sessionId }, true);
     expect(finalize.status).toBe(200);
 
-    const record = setupRecordOf(await getRecords());
+    const record = directRecordOf(await getRecords());
     expect(record).not.toBeNull();
     expect(record?.['trust']).toBe('witnessed');
     expect(record?.['testId']).toBe(TEST_ID);
@@ -157,7 +149,7 @@ describe('POST /sessions/setup-exchanges', () => {
   it('issues the setup record once per run, never per finalize', async () => {
     await declareObserve();
     const session = await openSession();
-    await reportSetupExchanges(session, [
+    await reportDirectExchanges(session, [
       { method: 'GET', url: `${appBaseUrl}/api/widgets/77`, status: 200 },
     ]);
     await post('/observe/finalize', { sessionId: session.sessionId }, true);
@@ -166,7 +158,7 @@ describe('POST /sessions/setup-exchanges', () => {
     expect(second.status).toBe(200);
     await post('/observe/finalize', { sessionId: (second.body as Record<string, unknown>)['sessionId'] }, true);
     const records = await getRecords();
-    expect(records.filter((candidate) => setupRecordOf([candidate]) !== null)).toHaveLength(1);
+    expect(records.filter((candidate) => directRecordOf([candidate]) !== null)).toHaveLength(1);
   });
 
   it('keeps a bounded, deduplicated exchange set', async () => {
@@ -177,13 +169,13 @@ describe('POST /sessions/setup-exchanges', () => {
       url: `${appBaseUrl}/api/widgets/${String(index)}`,
       status: 200,
     }));
-    const first = await reportSetupExchanges(session, many);
+    const first = await reportDirectExchanges(session, many);
     expect(first.status).toBe(200);
     // A repeat is dropped (same exchange), not duplicated.
-    const repeat = await reportSetupExchanges(session, [many[0] as { method: string; url: string; status: number }]);
+    const repeat = await reportDirectExchanges(session, [many[0] as { method: string; url: string; status: number }]);
     expect(repeat.status).toBe(200);
     await post('/observe/finalize', { sessionId: session.sessionId }, true);
-    const payload = setupRecordOf(await getRecords())?.['payload'] as Record<string, unknown>;
+    const payload = directRecordOf(await getRecords())?.['payload'] as Record<string, unknown>;
     const exchanges = payload['exchanges'] as Array<unknown>;
     expect(exchanges.length).toBeLessThanOrEqual(8);
     expect(new Set(exchanges).size).toBe(exchanges.length);
@@ -192,15 +184,15 @@ describe('POST /sessions/setup-exchanges', () => {
   it('refuses a foreign credential, a sealed session, and a malformed report', async () => {
     await declareObserve();
     const session = await openSession();
-    const foreign = await post('/sessions/setup-exchanges', {
+    const foreign = await post('/sessions/direct-exchanges', {
       sessionId: session.sessionId,
       sessionToken: 'not-the-issued-token',
       exchanges: [{ method: 'GET', url: `${appBaseUrl}/x`, status: 200 }],
     });
     expect(foreign.status).toBe(403);
-    const malformed = await reportSetupExchanges(session, []);
+    const malformed = await reportDirectExchanges(session, []);
     expect(malformed.status).toBe(400);
-    const notAnExchange = await post('/sessions/setup-exchanges', {
+    const notAnExchange = await post('/sessions/direct-exchanges', {
       sessionId: session.sessionId,
       sessionToken: session.sessionToken,
       exchanges: [{ method: 'GET', url: 42, status: 'two-hundred' }],
@@ -210,7 +202,7 @@ describe('POST /sessions/setup-exchanges', () => {
     // other submission.
     const close = await post('/sessions/close', { sessionId: session.sessionId, outcome: 'passed' }, true);
     expect(close.status).toBe(200);
-    const late = await reportSetupExchanges(session, [
+    const late = await reportDirectExchanges(session, [
       { method: 'GET', url: `${appBaseUrl}/x`, status: 200 },
     ]);
     expect(late.status).toBe(409);
@@ -220,6 +212,6 @@ describe('POST /sessions/setup-exchanges', () => {
     await declareObserve();
     const session = await openSession();
     await post('/observe/finalize', { sessionId: session.sessionId }, true);
-    expect(setupRecordOf(await getRecords())).toBeNull();
+    expect(directRecordOf(await getRecords())).toBeNull();
   });
 });

@@ -183,8 +183,8 @@ import {
   OBSERVED_KIND,
   PERSISTENCE_KIND,
   RUN_HEADER,
-  SETUP_CHANNEL,
-  SETUP_EXCHANGES_CAP,
+  DIRECT_CHANNEL,
+  DIRECT_EXCHANGES_CAP,
   VERIFIER_HEADER,
 } from '../constants.js';
 import { PageObserverRegistrationError, registerPageObserver, sweepPageVisits } from './page-observer-registration.js';
@@ -620,21 +620,16 @@ interface WitnessState {
    */
   sessionPageOrigins: Map<string, SessionPageOriginReport>;
   /**
-   * Hook-scope exchanges the fixture reported (0.13.9): the app-origin
-   * calls a hook-created or module-scope API context made. RUN-scoped —
-   * unlike the per-session origin diagnostics beside it — because a
-   * hook context outlives any one session window and the diagnosis is
-   * about the RUN's suite shape, not one test.
+   * Direct API exchanges the fixture reported. RUN-scoped so calls made
+   * through contexts shared across tests remain diagnostic only.
    *
-   * Witness MEMORY only, deduplicated by `(method, url, status)`,
-   * bounded at SETUP_EXCHANGES_CAP. It reaches the verdict engine ONLY
-   * as the ONE witnessed `channel: 'setup'` record the observe finalize
-   * stamps (see `setupRecordIssued`); no claim can ever satisfy from
-   * it.
+   * Witness memory only, deduplicated by `(method, url, status)`, and
+   * bounded at DIRECT_EXCHANGES_CAP. Finalize stamps one witnessed
+   * `channel: 'direct'` record which can never satisfy a claim.
    */
-  setupExchanges: Array<{ method: string; url: string; status: number }>;
-  /** Whether the run's setup record has already been stamped. */
-  setupRecordIssued: boolean;
+  directExchanges: Array<{ method: string; url: string; status: number }>;
+  /** Whether the run's direct record has already been stamped. */
+  directRecordIssued: boolean;
   pageObservers: Map<string, { flush(): Promise<void>; close(): Promise<void> }>;
   pageObservationRecords: Map<string, string[]>;
   /**
@@ -1602,8 +1597,8 @@ export async function startWitness(options: WitnessOptions): Promise<WitnessHand
     workerSessions: new Map(),
     sessionIdentities: new Map(),
     sessionPageOrigins: new Map(),
-    setupExchanges: [],
-    setupRecordIssued: false,
+    directExchanges: [],
+    directRecordIssued: false,
     pageObservers: new Map(),
     // The engine browser is OPTIONAL here and required only by the
     // ENGINE-BROWSER proof channel: this package is runner-neutral and
@@ -2505,8 +2500,8 @@ async function handleRequest(
       await handleSessionPageOrigins(state, res, (await readBody(req)) as Record<string, unknown>);
       return;
     }
-    if (req.method === 'POST' && path === '/sessions/setup-exchanges') {
-      await handleSessionSetupExchanges(state, res, (await readBody(req)) as Record<string, unknown>);
+    if (req.method === 'POST' && path === '/sessions/direct-exchanges') {
+      await handleSessionDirectExchanges(state, res, (await readBody(req)) as Record<string, unknown>);
       return;
     }
 
@@ -4158,17 +4153,17 @@ async function handleSessionPageOrigins(
   sendJson(res, 200, { recorded: true as const });
 }
 
-/** Stores bounded, deduplicated hook-scope exchanges in run memory. */
-async function handleSessionSetupExchanges(
+/** Stores bounded, deduplicated direct API exchanges in run memory. */
+async function handleSessionDirectExchanges(
   state: WitnessState,
   res: ServerResponse,
   body: Record<string, unknown>,
 ): Promise<void> {
-  if (!isPlainObject(body)) throw new HttpError(400, 'setup exchange report body must be an object');
+  if (!isPlainObject(body)) throw new HttpError(400, 'direct exchange report body must be an object');
   requireOpenSession(state, body);
   const reported = body['exchanges'];
   if (!Array.isArray(reported) || reported.length === 0) {
-    throw new HttpError(400, 'setup exchange report requires at least one exchange');
+    throw new HttpError(400, 'direct exchange report requires at least one exchange');
   }
   const exchanges = reported.map((item) => {
     if (
@@ -4182,18 +4177,18 @@ async function handleSessionSetupExchanges(
       item['status'] < 100 ||
       item['status'] > 599
     ) {
-      throw new HttpError(400, 'each setup exchange must have an uppercase method, URL, and HTTP status');
+      throw new HttpError(400, 'each direct exchange must have an uppercase method, URL, and HTTP status');
     }
     return { method: item['method'], url: item['url'], status: item['status'] };
   });
   for (const exchange of exchanges) {
-    if (state.setupExchanges.some((prior) =>
+    if (state.directExchanges.some((prior) =>
       prior.method === exchange.method && prior.url === exchange.url && prior.status === exchange.status
     )) continue;
-    if (state.setupExchanges.length >= SETUP_EXCHANGES_CAP) break;
-    state.setupExchanges.push(exchange);
+    if (state.directExchanges.length >= DIRECT_EXCHANGES_CAP) break;
+    state.directExchanges.push(exchange);
   }
-  sendJson(res, 200, { recorded: true as const, kept: state.setupExchanges.length });
+  sendJson(res, 200, { recorded: true as const, kept: state.directExchanges.length });
 }
 
 
@@ -5632,13 +5627,13 @@ async function handleObserveFinalize(
   // transport record carries. Persistence-vs-persistence consumption is
   // untouched: it still matches against the LIVE log, so one exchange
   // can never credit two persistence claims.
-  if (!state.setupRecordIssued && state.setupExchanges.length > 0 && session.claims.length > 0) {
+  if (!state.directRecordIssued && state.directExchanges.length > 0 && session.claims.length > 0) {
     const claimId = [...session.claims].sort(compareStrings)[0] as string;
     issueRecord(state, claimId, HTTP_OBSERVED_KIND, session.testId, {
-      channel: SETUP_CHANNEL,
-      exchanges: state.setupExchanges.map((exchange) => ({ ...exchange })),
+      channel: DIRECT_CHANNEL,
+      exchanges: state.directExchanges.map((exchange) => ({ ...exchange })),
     }, 'engine-observed');
-    state.setupRecordIssued = true;
+    state.directRecordIssued = true;
   }
 
   const transport = transportSnapshot(state, session);

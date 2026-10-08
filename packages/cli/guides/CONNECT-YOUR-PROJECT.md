@@ -418,23 +418,23 @@ Keep the suite's own journeys, steps, assertions and fixtures; change only
 which `test` object they extend. Under a witnessed run, every test then runs
 under a supervisor-issued session whose traffic the witness can observe.
 
-API tests are witnessed the same way: a test that takes `request` from the
-Gateforge fixture module — or calls `request.newContext()` imported from it
-INSIDE the test body — has every app-origin call rehosted onto the session
-proxy (path, query, headers and body untouched), so `observed-e2e` transport
-claims prove for them too. Calls made outside a test body (`beforeAll`,
-`afterAll`, module scope) go to the app directly and stay uncredited.
+API requests made by test code are not E2E evidence. The Gateforge
+`request` fixture, `page.request`/`context.request`, and the exported
+`request.newContext()` factory go directly to the app. Direct exchanges may
+appear in run-scoped diagnostics, but never satisfy observed claims. Only
+the app's UI-driven browser page traffic is E2E evidence; use the suite's
+normal UI action and assert its visible result to prove transport behavior.
 
 ### 6b. Point the suite at the origin Gateforge routes
 
-Rebasing the fixture is only half of it. The fixture rewrites requests to
-`GATEFORGE_APP_BASE_URL` onto the supervisor's session observation proxy — and
-only those. A suite whose own base URL differs (`E2E_BASE_URL` resolving to
+Rebasing the fixture is only half of it. Browser page requests to
+`GATEFORGE_APP_BASE_URL` use the supervisor's session observation proxy.
+A suite whose own base URL differs (`E2E_BASE_URL` resolving to
 `http://localhost:13001` while Gateforge runs at `http://localhost:13101`, or a
 variable that never reaches the test process at all because it is not in
-`envAllowlist`) sends every request past the witness, and its `observed-e2e`
-claims finalize with "no HTTP exchange passed through this session's
-observation proxy" while the tests pass.
+`envAllowlist`) sends browser traffic past the witness, and its
+`observed-e2e` claims finalize with "no HTTP exchange passed through this
+session's observation proxy" while the tests pass.
 
 So, for the suite you just rebased:
 
