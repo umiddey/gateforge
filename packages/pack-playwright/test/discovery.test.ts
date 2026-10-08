@@ -948,6 +948,31 @@ describe('static discovery', () => {
     expect(inferenceOf(entry).inferredKind).toBe('browser-e2e');
   });
 
+  it('does not attribute application fetch calls reached through imported product code', () => {
+    const root = makeTempDir();
+    writeTree(root, {
+      'src/accounts.js': [
+        'export async function fetchAccounts() {',
+        "  return fetch('/api/accounts');",
+        '}',
+        '',
+      ].join('\n'),
+      'unit/accounts.spec.ts': [
+        "import { test } from 'playwright/test';",
+        "import { fetchAccounts } from '../src/accounts.js';",
+        "test('formats account data', async () => {",
+        '  await fetchAccounts();',
+        '});',
+        '',
+      ].join('\n'),
+    });
+    const result = scanTestFiles({ cwd: root, include: ['unit/**/*.spec.ts'], exclude: [] });
+    const entry = rowFor(result.entries, 'unit/accounts.spec.ts');
+    const inference = inferenceOf(entry);
+    expect(inference.inferredKind).toBe('unit');
+    expect(inference.kindSignals.some((signal) => signal.ruleId === 'http-client-call')).toBe(false);
+  });
+
   it('attributes an imported helper tamper to the tests that reach it (0.13.10 F3)', () => {
     // A helper module with one risky export and one safe one: today the
     // tamper is a FILE-wide fact, so every test of every file importing
