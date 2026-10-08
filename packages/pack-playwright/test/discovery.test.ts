@@ -930,6 +930,24 @@ describe('static discovery', () => {
     expect(imported.every(hasHttpSignal)).toBe(true);
   });
 
+  it('keeps browser kind when a browser test also uses the API request fixture', () => {
+    const root = makeTempDir();
+    writeTree(root, {
+      'e2e/mixed.spec.ts': [
+        "import { test } from 'playwright/test';",
+        "test('navigates after API setup', async ({ page, request }) => {",
+        "  await page.goto('/accounts');",
+        "  await request.post('/seed');",
+        '});',
+        '',
+      ].join('\n'),
+    });
+    const result = scanTestFiles({ cwd: root, include: ['e2e/**/*.ts'], exclude: [] });
+    const entry = rowFor(result.entries, 'e2e/mixed.spec.ts');
+    expect(inferenceOf(entry).kindSignals.some((signal) => signal.ruleId === 'http-client-call')).toBe(true);
+    expect(inferenceOf(entry).inferredKind).toBe('browser-e2e');
+  });
+
   it('attributes an imported helper tamper to the tests that reach it (0.13.10 F3)', () => {
     // A helper module with one risky export and one safe one: today the
     // tamper is a FILE-wide fact, so every test of every file importing
