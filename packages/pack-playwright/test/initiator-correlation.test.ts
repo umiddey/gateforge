@@ -57,7 +57,7 @@ async function startApp(): Promise<{ url: string; server: Server }> {
 
 async function setNextPath(page: Page, path: string): Promise<void> {
   await page.evaluate((value) => {
-    (window as Window & { nextPath: string }).nextPath = value;
+    Object.assign(globalThis, { nextPath: value });
   }, path);
 }
 
