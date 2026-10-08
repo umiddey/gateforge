@@ -221,6 +221,43 @@ const PRUNED_DIRS = new Set(['.git', 'node_modules', 'dist', 'test-results', 'pl
 /** File extensions the scanner parses (everything else is skipped). */
 const PARSEABLE_EXTENSIONS = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs'];
 
+/**
+ * TypeScript's ESM extension substitution (0.13.9): a RELATIVE specifier
+ * that literally ends in one of these JavaScript extensions names the
+ * TypeScript sibling of the same stem whenever the literal file does not
+ * exist — `.js` prefers `.ts` and falls back to `.tsx`; `.mjs`, `.cjs`,
+ * and `.jsx` map one-to-one. This is exactly the rule the runner's own
+ * loader applies, so `./helpers.mjs` on disk as `helpers.mts` resolves
+ * here the way it resolves at runtime; without it every such spec
+ * sprouted a blocking `<unresolved-title>` row the runner provably
+ * enumerated (0.13.9 consumer run). The suffixes are mutually exclusive
+ * (`.mjs`/`.cjs`/`.jsx` never end in a literal `.js`), so first match
+ * wins.
+ */
+const TS_EXTENSION_SUBSTITUTIONS: ReadonlyArray<readonly [from: string, to: readonly string[]]> = [
+  ['.js', ['.ts', '.tsx']],
+  ['.mjs', ['.mts']],
+  ['.cjs', ['.cts']],
+  ['.jsx', ['.tsx']],
+];
+
+/**
+ * The TypeScript-sibling candidates for a `.js`-style specifier.
+ *
+ * Args:
+ *   joined: the repo-relative specifier path with the JS extension.
+ *
+ * Returns:
+ *   string[]: same-stem TypeScript paths, best-first; empty when the
+ *   specifier does not end in a substitutable extension.
+ */
+function typescriptSubstituteCandidates(joined: string): string[] {
+  for (const [from, to] of TS_EXTENSION_SUBSTITUTIONS) {
+    if (joined.endsWith(from)) return to.map((extension) => `${joined.slice(0, -from.length)}${extension}`);
+  }
+  return [];
+}
+
 /** Playwright's exported test-function binding names. */
 const TEST_BINDING_NAMES = new Set(['test', 'it']);
 
@@ -1073,6 +1110,16 @@ function resolveSpecifier(state: ScanState, cwd: string, fromFile: string, speci
     if (state.seeded.has(candidate) || state.traversed.has(candidate)) return candidate;
   }
   for (const candidate of candidates) {
+    if (isFile(join(cwd, candidate))) return candidate;
+  }
+  // TypeScript's extension substitution (0.13.9), only after EVERY
+  // literal candidate failed — the literal file always wins when it
+  // exists, exactly as TypeScript resolves it.
+  const substituted = typescriptSubstituteCandidates(joined);
+  for (const candidate of substituted) {
+    if (state.seeded.has(candidate) || state.traversed.has(candidate)) return candidate;
+  }
+  for (const candidate of substituted) {
     if (isFile(join(cwd, candidate))) return candidate;
   }
   return null;
