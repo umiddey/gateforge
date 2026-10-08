@@ -8,6 +8,11 @@
   files when their path is covered by a configured source glob under another
   recognized extension, allowing static rows to join the runner inventory
   and retain code-based kind inference.
+- **Playwright discovery: prove npm aliases from package metadata.** A bare
+  package alias is treated as the Gateforge runner only when the root or
+  nearest package manifest maps it to the exact Gateforge package, or the
+  installed package metadata names that package. Unproven external imports
+  remain unresolved.
 - **Mapping: unreadable tests cannot carry E2E claims.** A Playwright-listed
   test whose code static discovery did not read cannot be mapped as
   `browser-e2e`, `observed-e2e`, or `api-e2e` until the scan can inspect it.

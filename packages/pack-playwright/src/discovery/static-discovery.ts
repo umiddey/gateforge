@@ -233,11 +233,85 @@ const TEST_STRUCTURE_NAMES = new Set(['test', 'it', 'describe']);
  */
 export const GATEFORGE_PACK_SPECIFIER = '@gate-forge/pack-playwright';
 
-/** Whether the specifier is the gateforge pack's runner module. */
-function isPackSpecifier(specifier: string): boolean {
-  // The package root and fixture subpath both export Playwright's `test`.
-  // Other pack subpaths (reporter, vitest, witness, attestation) do not.
-  return specifier === GATEFORGE_PACK_SPECIFIER || specifier === `${GATEFORGE_PACK_SPECIFIER}/fixture`;
+/** Reads package metadata without loading or executing consumer code. */
+function readPackageMetadata(state: ScanState, absolutePath: string): Record<string, unknown> | null {
+  const cached = state.packageMetadata.get(absolutePath);
+  if (cached !== undefined) return cached;
+  let metadata: Record<string, unknown> | null = null;
+  if (isFile(absolutePath)) {
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(absolutePath, 'utf8'));
+      if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+        metadata = parsed as Record<string, unknown>;
+      }
+    } catch {
+      // Invalid package metadata is not proof of package identity.
+    }
+  }
+  state.packageMetadata.set(absolutePath, metadata);
+  return metadata;
+}
+
+function packageDeclaresAlias(metadata: Record<string, unknown> | null, alias: string): boolean {
+  if (metadata === null) return false;
+  for (const field of ['dependencies', 'devDependencies', 'optionalDependencies']) {
+    const group = metadata[field];
+    if (typeof group !== 'object' || group === null || Array.isArray(group)) continue;
+    const target = (group as Record<string, unknown>)[alias];
+    if (
+      typeof target === 'string' &&
+      (target === `npm:${GATEFORGE_PACK_SPECIFIER}` ||
+        (target.startsWith(`npm:${GATEFORGE_PACK_SPECIFIER}@`) &&
+          target.length > `npm:${GATEFORGE_PACK_SPECIFIER}@`.length))
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Whether a bare package name is proven to alias the Gateforge package. */
+function isGateforgePackageAlias(state: ScanState, file: string, alias: string): boolean {
+  if (!/^(?:@[a-z0-9._-]+\/)?[a-z0-9._-]+$/i.test(alias)) return false;
+
+  const rootPackage = readPackageMetadata(state, join(state.cwd, 'package.json'));
+  if (packageDeclaresAlias(rootPackage, alias)) return true;
+
+  let directory = join(state.cwd, posix.dirname(file));
+  let nearestPackagePath: string | null = null;
+  while (directory === state.cwd || directory.startsWith(`${state.cwd}/`)) {
+    const candidate = join(directory, 'package.json');
+    if (isFile(candidate)) {
+      nearestPackagePath = candidate;
+      break;
+    }
+    if (directory === state.cwd) break;
+    directory = posix.dirname(directory);
+  }
+  if (
+    nearestPackagePath !== null &&
+    nearestPackagePath !== join(state.cwd, 'package.json') &&
+    packageDeclaresAlias(readPackageMetadata(state, nearestPackagePath), alias)
+  ) {
+    return true;
+  }
+
+  directory = join(state.cwd, posix.dirname(file));
+  while (directory === state.cwd || directory.startsWith(`${state.cwd}/`)) {
+    const installed = readPackageMetadata(state, join(directory, 'node_modules', alias, 'package.json'));
+    if (installed?.name === GATEFORGE_PACK_SPECIFIER) return true;
+    if (directory === state.cwd) break;
+    directory = posix.dirname(directory);
+  }
+  return false;
+}
+
+/** Whether the specifier is the Gateforge package's runner module. */
+function isPackSpecifier(state: ScanState, file: string, specifier: string): boolean {
+  const suffix = '/fixture';
+  const packageName = specifier.endsWith(suffix) ? specifier.slice(0, -suffix.length) : specifier;
+  if (packageName === GATEFORGE_PACK_SPECIFIER) return true;
+  return isGateforgePackageAlias(state, file, packageName);
 }
 
 /** Chain segments that modify a test/describe call without changing identity. */
@@ -545,6 +619,8 @@ interface ScanState {
   maxImportDepth: number;
   /** Whether the file's runner provides test globals (see StaticScanOptions). */
   testGlobals: (file: string) => boolean;
+  /** Parsed package manifests and installed package identities, keyed by path. */
+  packageMetadata: Map<string, Record<string, unknown> | null>;
 }
 
 /**
@@ -658,7 +734,7 @@ function modelModuleScope(state: ScanState, cwd: string, model: FileModel, sourc
         for (const element of clause.namedBindings.elements) {
           const imported = element.propertyName?.text ?? element.name.text;
           const local = element.name.text;
-          if (TEST_BINDING_NAMES.has(imported) && isTestModuleSpecifier(specifier)) {
+          if (TEST_BINDING_NAMES.has(imported) && isTestModuleSpecifier(state, model.file, specifier)) {
             model.bindings.set(local, { kind: 'test' });
           } else {
             markExternal(local, imported);
@@ -669,7 +745,7 @@ function modelModuleScope(state: ScanState, cwd: string, model: FileModel, sourc
       // object (test-module when the specifier is the test module).
       if (clause?.namedBindings !== undefined && ts.isNamespaceImport(clause.namedBindings)) {
         const local = clause.namedBindings.name.text;
-        if (isTestModuleSpecifier(specifier)) {
+        if (isTestModuleSpecifier(state, model.file, specifier)) {
           model.bindings.set(local, { kind: 'testmodule' });
         } else {
           markExternal(local, '*');
@@ -688,7 +764,7 @@ function modelModuleScope(state: ScanState, cwd: string, model: FileModel, sourc
         if (
           node.exportClause !== undefined &&
           ts.isNamedExports(node.exportClause) &&
-          isPackSpecifier(specifier.text)
+          isPackSpecifier(state, model.file, specifier.text)
         ) {
           // Bare re-export of the pack's own surface (the sanctioned
           // local runner-module pattern, e.g. the consumer's
@@ -756,7 +832,7 @@ function modelModuleScope(state: ScanState, cwd: string, model: FileModel, sourc
           initializer.arguments.length > 0 &&
           initializer.arguments[0] !== undefined &&
           ts.isStringLiteral(initializer.arguments[0]) &&
-          isTestModuleSpecifier((initializer.arguments[0] as ts.StringLiteral).text)
+          isTestModuleSpecifier(state, model.file, (initializer.arguments[0] as ts.StringLiteral).text)
         ) {
           // `const base = require('@playwright/test')`: the module object
           // whose `.test` is the test function. Bare requires of any other
@@ -804,7 +880,7 @@ function modelModuleScope(state: ScanState, cwd: string, model: FileModel, sourc
             ? element.propertyName.text
             : element.name.text);
           const local = element.name.text;
-          if (TEST_BINDING_NAMES.has(imported) && isTestModuleSpecifier(specifier)) {
+          if (TEST_BINDING_NAMES.has(imported) && isTestModuleSpecifier(state, model.file, specifier)) {
             model.bindings.set(local, { kind: 'test' });
           } else if (specifier.startsWith('./') || specifier.startsWith('../')) {
             const target = resolveSpecifier(state, cwd, model.file, specifier);
@@ -884,8 +960,8 @@ function isPlaywrightSpecifier(specifier: string): boolean {
  * exported `test` is a `base.extend` over playwright's — see
  * {@link GATEFORGE_PACK_SPECIFIER}).
  */
-function isTestModuleSpecifier(specifier: string): boolean {
-  return isPlaywrightSpecifier(specifier) || isPackSpecifier(specifier);
+function isTestModuleSpecifier(state: ScanState, file: string, specifier: string): boolean {
+  return isPlaywrightSpecifier(specifier) || isPackSpecifier(state, file, specifier);
 }
 
 /**
@@ -1140,14 +1216,14 @@ function findHttpClientCall(node: ts.Node, source: ts.SourceFile, file: string):
 }
 
 /** Whether the file imports the gateforge evidence pack (fixture tests). */
-function findGateforgeFixtureImport(source: ts.SourceFile, file: string): Location | null {
+function findGateforgeFixtureImport(state: ScanState, source: ts.SourceFile, file: string): Location | null {
   let found: Location | null = null;
   const visit = (node: ts.Node): void => {
     if (found !== null) return;
     if (
       ts.isImportDeclaration(node) &&
       ts.isStringLiteral(node.moduleSpecifier) &&
-      isPackSpecifier(node.moduleSpecifier.text)
+      isPackSpecifier(state, file, node.moduleSpecifier.text)
     ) {
       found = locationOf(file, source, node);
       return;
@@ -1159,7 +1235,7 @@ function findGateforgeFixtureImport(source: ts.SourceFile, file: string): Locati
       node.expression.text === 'require'
     ) {
       const specifier = node.arguments[0];
-      if (specifier !== undefined && ts.isStringLiteral(specifier) && isPackSpecifier(specifier.text)) {
+      if (specifier !== undefined && ts.isStringLiteral(specifier) && isPackSpecifier(state, file, specifier.text)) {
         found = locationOf(file, source, node);
         return;
       }
@@ -1352,6 +1428,7 @@ export function scanTestFiles(options: StaticScanOptions): StaticScanResult {
     maxTraversedFiles: options.budget?.maxTraversedFiles ?? DEFAULT_MAX_TRAVERSED_FILES,
     maxImportDepth: options.budget?.maxImportDepth ?? DEFAULT_MAX_IMPORT_DEPTH,
     testGlobals: options.testGlobals ?? ((): boolean => false),
+    packageMetadata: new Map(),
   };
   const seededFiles = collectCandidateFiles(options.cwd, options.include, options.exclude, options.excludeFile);
   for (const file of seededFiles) state.seeded.add(file);
@@ -1362,7 +1439,7 @@ export function scanTestFiles(options: StaticScanOptions): StaticScanResult {
     const fileHttpClient = findHttpClientCall(model.source, model.source, file);
     const fileMock = findModuleMock(model.source, file);
     const fileRoute = findImportedRouteInterception(state, options.cwd, file);
-    const gateforgeImport = findGateforgeFixtureImport(model.source, file);
+    const gateforgeImport = findGateforgeFixtureImport(state, model.source, file);
     scanFileForTests(state, options.cwd, model, fileHttpClient, fileMock, fileRoute, gateforgeImport);
   }
 
@@ -1465,6 +1542,7 @@ export function namedPathGraph(cwd: string, roots: readonly string[], budget?: S
     maxTraversedFiles: budget?.maxTraversedFiles ?? DEFAULT_MAX_TRAVERSED_FILES,
     maxImportDepth: budget?.maxImportDepth ?? DEFAULT_MAX_IMPORT_DEPTH,
     testGlobals: (): boolean => false,
+    packageMetadata: new Map(),
   };
   const rootFiles = new Set(roots);
   const reached = new Set<string>();

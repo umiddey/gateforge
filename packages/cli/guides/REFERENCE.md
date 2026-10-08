@@ -1966,11 +1966,15 @@ For Playwright, static discovery follows bounded local ESM imports and
 CommonJS `require` wrappers back to the package root or its exported
 `/fixture` subpath. Proven bindings let the scanner retain test-code
 signals—such as browser fixtures—for kind inference before the static row
-is reconciled with the runner's listed identity. Unrelated external modules
-are not assumed to export Playwright's `test`. A runner-listed file is also
-scanned when its path matches a configured source glob with another
-recognized extension; files wholly outside that source scope remain
-runner-list-only, and configured exclusions still apply.
+is reconciled with the runner's listed identity. An npm alias is treated as
+the Gateforge package only when the root or nearest package manifest maps
+it to the exact package name, or the installed
+`node_modules/<alias>/package.json` names the Gateforge package. Without
+either proof, an external module is not assumed to export Playwright's
+`test`. A runner-listed file is also scanned when its path matches a
+configured source glob with another recognized extension; files wholly
+outside that source scope remain runner-list-only, and configured
+exclusions still apply.
 When the runner computes a test title from data, Gateforge joins the
 listed instance to the statically read call site only when its file and
 source line match. Static call-site facts then supply kind and tamper
