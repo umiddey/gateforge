@@ -1298,7 +1298,7 @@ describe('native playwright reconciliation', () => {
       `'${claimId}': Gateforge could not read the code of test 'playwright:chromium:e2e/opaque.spec.mjs:opaque journey'`,
     );
     expect(refusal?.detail).toContain('really is observed-e2e');
-    expect(refusal?.detail).toContain('unrelated-runner');
+    expect(refusal?.detail).toContain('unresolved test-wrapper import');
     expect(mappingGradingClaims(refused, [])).toEqual([]);
 
     mkdirSync(join(root, 'node_modules', '@gate-forge'), { recursive: true });
@@ -1323,6 +1323,30 @@ describe('native playwright reconciliation', () => {
     });
     expect(accepted.problems).toEqual([]);
     expect(mappingGradingClaims(accepted, [])).toHaveLength(1);
+  });
+  it('joins data-driven test instances to their dynamic-title call site', async () => {
+    const root = makePlaywrightProject({
+      'e2e/data-driven.spec.js': [
+        "import { test } from 'playwright/test';",
+        "const SPECS = [{ title: 'setup flow', target: '/setup' }, { title: 'posting flow', target: '/periods' }];",
+        'for (const spec of SPECS) {',
+        '  test(spec.title, async ({ page }) => {',
+        '    await page.goto(spec.target);',
+        '  });',
+        '}',
+        '',
+      ].join('\n'),
+    });
+    const { catalog } = await discoverTestCatalog({
+      cwd: root,
+      config: fixtureConfig(['e2e/**/*.spec.js']),
+    });
+    expect(
+      catalog.entries.map((entry) => [entry.title, entry.reconciliation, entry.inferredKind, entry.resolutionOrigin]),
+    ).toEqual([
+      ['setup flow', 'matched', 'browser-e2e', 'static'],
+      ['posting flow', 'matched', 'browser-e2e', 'static'],
+    ]);
   });
 
   it('discovers runner-only cases through the native list fallback (origin native-list)', async () => {
