@@ -2363,10 +2363,26 @@ function fixtureClasses(state: ScanState, file: string): StaticTestFacts['fixtur
       ts.forEachChild(node, visit);
     };
     visit(definition.node);
-    if (helperCall !== null) {
-      for (const model of state.models.values()) {
-        if (model.file !== definition.file && model.source.getText().includes('request.newContext()')) api = true;
-      }
+    if (
+      helperCall !== null &&
+      models.some((model) => {
+        let found = false;
+        const findFactory = (current: ts.Node): void => {
+          if (
+            ts.isCallExpression(current) &&
+            ts.isPropertyAccessExpression(current.expression) &&
+            current.expression.name.text === 'newContext' &&
+            current.expression.expression.getText().includes('request')
+          ) {
+            found = true;
+          }
+          if (!found) ts.forEachChild(current, findFactory);
+        };
+        findFactory(model.source);
+        return found;
+      })
+    ) {
+      api = true;
     }
     const dependencyKinds = definition.dependencies.map(classify);
     if (dependencyKinds.some((item) => item.kind === 'browser')) browser = true;
