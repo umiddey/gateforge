@@ -761,6 +761,146 @@ describe('static discovery', () => {
     }
   });
 
+  it('attributes an imported helper tamper to the tests that reach it (0.13.10 F3)', () => {
+    // A helper module with one risky export and one safe one: today the
+    // tamper is a FILE-wide fact, so every test of every file importing
+    // the module is flagged. The scan must attribute the risk to the
+    // tests whose body (or registration fixture) provably reaches it,
+    // and keep today's file-wide flag whenever reachability cannot be
+    // proven (fail closed).
+    const root = makeTempDir();
+    writeTree(root, {
+      'e2e/helpers/ui.js': [
+        'export async function riskyHelper(page) {',
+        "  await page.route('**/api/data*', (route) => route.fulfill({ status: 200, body: '{}' }));",
+        '}',
+        'export async function safeHelper(page) {',
+        "  await page.getByRole('button', { name: 'Save' }).click();",
+        '}',
+        '',
+      ].join('\n'),
+      'e2e/helpers/wrap.js': [
+        "import { riskyHelper } from './ui.js';",
+        'export async function wrapper(page) {',
+        '  await riskyHelper(page);',
+        '}',
+        '',
+      ].join('\n'),
+      'e2e/caller.spec.ts': [
+        "import { test } from 'playwright/test';",
+        "import { riskyHelper } from './helpers/ui.js';",
+        "test('caller uses the risky helper', async ({ page }) => {",
+        '  await riskyHelper(page);',
+        '});',
+        '',
+      ].join('\n'),
+      'e2e/safe-importer.spec.ts': [
+        "import { test } from 'playwright/test';",
+        "import { riskyHelper, safeHelper } from './helpers/ui.js';",
+        "test('safe importer never calls the risky helper', async ({ page }) => {",
+        '  await safeHelper(page);',
+        '});',
+        '',
+      ].join('\n'),
+      'e2e/value-pass.spec.ts': [
+        "import { test } from 'playwright/test';",
+        "import { riskyHelper } from './helpers/ui.js';",
+        "test('passes the risky helper as a value', async ({ page }) => {",
+        '  const handlers = [riskyHelper];',
+        "  await page.goto('/orders');",
+        '});',
+        '',
+      ].join('\n'),
+      'e2e/transitive.spec.ts': [
+        "import { test } from 'playwright/test';",
+        "import { wrapper } from './helpers/wrap.js';",
+        "test('transitive caller reaches the tamper', async ({ page }) => {",
+        '  await wrapper(page);',
+        '});',
+        '',
+      ].join('\n'),
+      'e2e/mixed.spec.ts': [
+        "import { test } from 'playwright/test';",
+        "import { riskyHelper, safeHelper } from './helpers/ui.js';",
+        "test('mixed caller flags', async ({ page }) => {",
+        '  await riskyHelper(page);',
+        '});',
+        "test('mixed safe does not flag', async ({ page }) => {",
+        '  await safeHelper(page);',
+        '});',
+        '',
+      ].join('\n'),
+      'e2e/direct.spec.ts': [
+        "import { test } from 'playwright/test';",
+        "test('direct route in the spec flags a', async ({ page }) => {",
+        "  await page.route('**/api/x*', (route) => route.fulfill({ status: 200, body: '' }));",
+        '});',
+        "test('direct route in the spec flags b', async ({ page }) => {",
+        "  await page.goto('/orders');",
+        '});',
+        '',
+      ].join('\n'),
+      'e2e/dynamic-namespace.spec.ts': [
+        "import { test } from 'playwright/test';",
+        "import * as ui from './helpers/ui.js';",
+        "test('dynamic namespace access flags', async ({ page }) => {",
+        "  const name = 'riskyHelper';",
+        '  await ui[name](page);',
+        '});',
+        '',
+      ].join('\n'),
+    });
+    const result = scanTestFiles({ cwd: root, include: ['e2e/**/*.ts'], exclude: [] });
+    const tamperSignal = (entry: StaticTestEntry): boolean =>
+      inferenceOf(entry).mockSignals.some((signal) => signal.detail.startsWith('PAGE_OBSERVATION_TAMPER_RISK:'));
+
+    // A test that calls the risky helper is flagged at the helper's line.
+    const caller = rowFor(result.entries, 'e2e/caller.spec.ts');
+    expect(caller.facts.fileRouteInterception).toMatchObject({ file: 'e2e/helpers/ui.js' });
+    expect(tamperSignal(caller)).toBe(true);
+
+    // A test that imports the module but calls only the safe helper is
+    // NOT flagged: the scan proves its body never reaches the tamper.
+    const safeImporter = rowFor(result.entries, 'e2e/safe-importer.spec.ts');
+    expect(safeImporter.facts.fileRouteInterception, 'safe importer stays unflagged').toBeNull();
+    expect(tamperSignal(safeImporter)).toBe(false);
+
+    // Passing the risky helper around as a value cannot prove whether it
+    // runs: today's file-wide flag stays (fail closed).
+    const valuePass = rowFor(result.entries, 'e2e/value-pass.spec.ts');
+    expect(valuePass.facts.fileRouteInterception).not.toBeNull();
+    expect(tamperSignal(valuePass)).toBe(true);
+
+    // The call graph crosses helper modules: a wrapper that calls the
+    // risky helper flags its callers at the underlying tamper's line.
+    const transitive = rowFor(result.entries, 'e2e/transitive.spec.ts');
+    expect(transitive.facts.fileRouteInterception).toMatchObject({ file: 'e2e/helpers/ui.js' });
+    expect(tamperSignal(transitive)).toBe(true);
+
+    // Two tests in one file: attribution is per test.
+    const mixed = result.entries.filter((entry) => entry.file === 'e2e/mixed.spec.ts');
+    expect(mixed).toHaveLength(2);
+    const mixedCaller = mixed.find((entry) => entry.title === 'mixed caller flags');
+    const mixedSafe = mixed.find((entry) => entry.title === 'mixed safe does not flag');
+    expect(mixedCaller?.facts.fileRouteInterception).toMatchObject({ file: 'e2e/helpers/ui.js' });
+    expect(mixedSafe?.facts.fileRouteInterception, 'mixed safe test stays unflagged').toBeNull();
+
+    // A tamper written directly in the spec keeps today's file-wide
+    // rule: every test of the file is flagged, at the spec's own line.
+    const direct = result.entries.filter((entry) => entry.file === 'e2e/direct.spec.ts');
+    expect(direct).toHaveLength(2);
+    for (const entry of direct) {
+      expect(entry.facts.fileRouteInterception).toMatchObject({ file: 'e2e/direct.spec.ts', line: 3 });
+      expect(tamperSignal(entry)).toBe(true);
+    }
+
+    // Dynamic namespace access cannot prove which export runs: the
+    // file-wide flag stays (fail closed).
+    const dynamic = rowFor(result.entries, 'e2e/dynamic-namespace.spec.ts');
+    expect(dynamic.facts.fileRouteInterception).not.toBeNull();
+    expect(tamperSignal(dynamic)).toBe(true);
+  });
+
   it("a mocked/mock/mocks FOLDER segment mocks its specs (0.9.2)", () => {
     const root = makeTempDir();
     writeTree(root, {
