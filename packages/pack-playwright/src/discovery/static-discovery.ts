@@ -36,15 +36,20 @@ import { pathInScope, type Location } from '@gate-forge/core';
 import { CLAIM_ANNOTATION_TYPE } from '../constants.js';
 import { gitIgnoredPaths } from './git-ignore.js';
 
-/** Default cap on files pulled in through import traversal. */
-export const DEFAULT_MAX_TRAVERSED_FILES = 200;
+/**
+ * Default cap on files pulled in through import traversal. A guard against
+ * runaway import graphs, not a proof rule: exceeding it still fails closed.
+ * Sized for real suites whose every listed spec is read (one measured app:
+ * 147 spec files pulled 266 helper files) at the same scan time.
+ */
+export const DEFAULT_MAX_TRAVERSED_FILES = 2000;
 
 /** Default bound on import-traversal depth (chain length). */
 export const DEFAULT_MAX_IMPORT_DEPTH = 16;
 
 /** Traversal-budget knobs for one scan. */
 export interface ScanBudget {
-  /** Max files pulled in through import traversal (default 200). */
+  /** Max files pulled in through import traversal (default 2000). */
   maxTraversedFiles?: number;
   /** Max import-chain depth when resolving an alias (default 16). */
   maxImportDepth?: number;

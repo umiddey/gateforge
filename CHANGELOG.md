@@ -52,6 +52,12 @@ let through only what is PROVEN harmless; anything unclear stays flagged.
   these false blocks). Files the runner lists NOTHING for keep failing
   closed, and a resolved literal title the runner does not list stays a
   blocking row.
+- **Discovery: the import-traversal budget is 2000 files (was 200).** Since
+  0.13.9 reads every file the runner lists, a real suite (147 spec files)
+  pulled 266 helper files, hit the old cap and marked the whole inventory
+  incomplete (`TEST_INVENTORY_INCOMPLETE`) though nothing was unreadable.
+  The cap only stops runaway import graphs; scan time was unchanged, and
+  exceeding the new cap still fails closed.
 - **`evaluate` is no longer a static tamper signal in chromium projects
   (F7).** In Chromium, requests started by evaluated test code are
   refused at runtime, so `evaluate` itself is no longer refused when
