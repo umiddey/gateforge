@@ -118,6 +118,14 @@ export interface NativeListResult {
    */
   testFileScope?: ProjectTestFileScope[];
   /**
+   * Project name → the RESOLVED `use.browserName` the runner will run
+   * that project with (devices already merged by the runner itself; see
+   * {@link projectGraphReporterEntry}). Absent when the document carried
+   * none or could not be read: absence means "the browser is
+   * undetermined", and every browser-dependent rule fails closed.
+   */
+  projectBrowsers?: Record<string, string>;
+  /**
    * The runner-resolved project NAMES, as the json reporter
    * rebuilt `config.projects[]` (an unnamed project — the
    * implicit one a config with no `projects` array gets, or a
@@ -666,6 +674,7 @@ export async function listNativePlaywrightTests(options: {
   // a graph would order projects wrongly, and one that honored half the
   // declared states would authenticate the wrong projects.
   let projectDependencies: Record<string, string[]> | undefined;
+  let projectBrowsers: Record<string, string> | undefined;
   let projectStorageStates: Record<string, string> | undefined;
   let testFileScope: ProjectTestFileScope[] | undefined;
   if (graphText !== null) {
@@ -676,6 +685,7 @@ export async function listNativePlaywrightTests(options: {
       const graph: unknown = parsed.projectDependencies;
       const states: unknown = parsed.projectStorageStates;
       const rawScopes: unknown = parsed.testFileScope;
+      const rawBrowsers: unknown = parsed.projectBrowsers;
       if (parsed.schemaVersion === 2 && isPlainRecord(graph)) {
         // Null-prototype: a project NAME is candidate data and `__proto__`
         // is a legal one, so the maps keyed by it must not inherit.
@@ -699,6 +709,13 @@ export async function listNativePlaywrightTests(options: {
               // silent omission.
               storageStates[name] = value;
             }
+          }
+        }
+        if (wellFormed && rawBrowsers !== undefined) {
+          if (!isStringRecord(rawBrowsers)) {
+            wellFormed = false;
+          } else {
+            projectBrowsers = { ...rawBrowsers };
           }
         }
         if (wellFormed) {
@@ -737,6 +754,7 @@ export async function listNativePlaywrightTests(options: {
     ...(projectDependencies !== undefined ? { projectDependencies } : {}),
     ...(projectStorageStates !== undefined ? { projectStorageStates } : {}),
     ...(testFileScope !== undefined ? { testFileScope } : {}),
+    ...(projectBrowsers !== undefined ? { projectBrowsers } : {}),
     ...(projectNames !== undefined ? { projectNames } : {}),
     ...(projectTimeouts !== undefined ? { projectTimeouts } : {}),
   };

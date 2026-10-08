@@ -120,6 +120,15 @@ export interface StaticTestFacts {
    */
   fileRouteInterception: Location | null;
   /**
+   * The same attribution, restricted to tamper calls that refuse
+   * REGARDLESS of browser — the evaluate family excluded (0.13.10 F7).
+   * A chromium project still refuses this class statically; for its rows
+   * the catalog reads THIS location instead of
+   * {@link fileRouteInterception}. Absent from hand-built facts and
+   * older scans: absence fails closed.
+   */
+  fileRouteInterceptionNonEvaluate?: Location | null;
+  /**
    * Import of the gateforge evidence pack (`@gate-forge/pack-playwright`)
    * anywhere in the file. Lets inference tell fixture tests (which take
    * the `evidence` param and never drive the browser themselves) apart
@@ -1669,16 +1678,33 @@ const TAMPER_API_CALLS: Record<string, true> = {
   setContent: true,
 };
 
+/** The evaluate family: at runtime the Chromium initiator rule already refuses every request evaluated test code starts (0.13.10 F7). */
+const EVALUATE_FAMILY_CALLS: Record<string, true> = {
+  $$eval: true,
+  $eval: true,
+  evaluate: true,
+  evaluateHandle: true,
+};
+
 /**
  * The location of one page-observation tamper API call, or null. A
  * storage-only init script ({@link isStorageOnlyInitScript}) is not a
  * tamper — the scan continues past it so a real tamper later in the
- * file is still found.
+ * file is still found. With `ignoreEvaluate` the evaluate family does
+ * not match either: the chromium-only blocking pass, which reads what a
+ * chromium project may still refuse statically.
  */
-function tamperApiLocation(source: ts.SourceFile, file: string, node: ts.CallExpression): Location | null {
+function tamperApiLocation(
+  source: ts.SourceFile,
+  file: string,
+  node: ts.CallExpression,
+  ignoreEvaluate: boolean,
+): Location | null {
   if (!ts.isPropertyAccessExpression(node.expression)) return null;
-  if (TAMPER_API_CALLS[node.expression.name.text] !== true) return null;
-  if (node.expression.name.text === 'addInitScript' && isStorageOnlyInitScript(node)) return null;
+  const name = node.expression.name.text;
+  if (TAMPER_API_CALLS[name] !== true) return null;
+  if (ignoreEvaluate && EVALUATE_FAMILY_CALLS[name] === true) return null;
+  if (name === 'addInitScript' && isStorageOnlyInitScript(node)) return null;
   return locationOf(file, source, node);
 }
 
@@ -1690,12 +1716,12 @@ function tamperApiLocation(source: ts.SourceFile, file: string, node: ts.CallExp
  * localStorage/sessionStorage and is therefore not a tamper; the scan
  * continues past it so a real tamper later in the file is still found.
  */
-function findRouteInterception(source: ts.SourceFile, file: string): Location | null {
+function findRouteInterception(source: ts.SourceFile, file: string, ignoreEvaluate: boolean): Location | null {
   let found: Location | null = null;
   const visit = (node: ts.Node): void => {
     if (found !== null) return;
     if (ts.isCallExpression(node)) {
-      const tamper = tamperApiLocation(source, file, node);
+      const tamper = tamperApiLocation(source, file, node, ignoreEvaluate);
       if (tamper !== null) {
         found = tamper;
         return;
@@ -1708,14 +1734,14 @@ function findRouteInterception(source: ts.SourceFile, file: string): Location | 
 }
 
 /** First tamper call in a spec or any helper imported by its module graph. */
-function findImportedRouteInterception(state: ScanState, cwd: string, root: string): Location | null {
+function findImportedRouteInterception(state: ScanState, cwd: string, root: string, ignoreEvaluate: boolean): Location | null {
   const visited = new Set<string>();
   const visit = (file: string, depth: number): Location | null => {
     if (visited.has(file) || depth > state.maxImportDepth) return null;
     visited.add(file);
     const model = state.models.get(file) ?? modelOf(state, cwd, file, true);
     if (model === null) return null;
-    const local = findRouteInterception(model.source, file);
+    const local = findRouteInterception(model.source, file, ignoreEvaluate);
     if (local !== null) return local;
     for (const binding of model.bindings.values()) {
       if (binding.kind !== 'import' || binding.target === undefined) continue;
@@ -1803,8 +1829,9 @@ function resolveLocalReferenceNode(name: string, from: ts.Node): ts.Node | undef
  * import executes, so every file importing this one reaches it. Memoized
  * per scan; a file that cannot be modeled adds none.
  */
-function topLevelTamperOf(state: ScanState, cwd: string, file: string): Location | null {
-  const cached = state.routeTopLevelByFile.get(file);
+function topLevelTamperOf(state: ScanState, cwd: string, file: string, ignoreEvaluate: boolean): Location | null {
+  const memoKey = `${file}::${ignoreEvaluate ? 'blocking' : 'any'}`;
+  const cached = state.routeTopLevelByFile.get(memoKey);
   if (cached !== undefined) return cached;
   const model = state.models.get(file) ?? modelOf(state, cwd, file, true);
   let found: Location | null = null;
@@ -1820,7 +1847,7 @@ function topLevelTamperOf(state: ScanState, cwd: string, file: string): Location
     const visit = (node: ts.Node): void => {
       if (found !== null) return;
       if (ts.isCallExpression(node)) {
-        const tamper = tamperApiLocation(model.source, file, node);
+        const tamper = tamperApiLocation(model.source, file, node, ignoreEvaluate);
         if (tamper !== null) {
           found = tamper;
           return;
@@ -1831,19 +1858,19 @@ function topLevelTamperOf(state: ScanState, cwd: string, file: string): Location
     };
     visit(model.source);
   }
-  state.routeTopLevelByFile.set(file, found);
+  state.routeTopLevelByFile.set(memoKey, found);
   return found;
 }
 
 /** First import-time (top-level) tamper across the file's import graph, or null. */
-function firstGraphTopLevelTamper(state: ScanState, cwd: string, root: string): Location | null {
+function firstGraphTopLevelTamper(state: ScanState, cwd: string, root: string, ignoreEvaluate: boolean): Location | null {
   const visited = new Set<string>();
   const visit = (file: string, depth: number): Location | null => {
     if (visited.has(file) || depth > state.maxImportDepth) return null;
     visited.add(file);
     const model = state.models.get(file) ?? modelOf(state, cwd, file, true);
     if (model === null) return null;
-    const topLevel = topLevelTamperOf(state, cwd, file);
+    const topLevel = topLevelTamperOf(state, cwd, file, ignoreEvaluate);
     if (topLevel !== null) return topLevel;
     for (const binding of model.bindings.values()) {
       if (binding.kind !== 'import' || binding.target === undefined) continue;
@@ -1863,10 +1890,11 @@ function localNameTamperReach(
   name: string,
   depth: number,
   active: Set<string>,
+  ignoreEvaluate: boolean,
 ): TamperReach {
   const declaration = routeDeclsOf(model).get(name);
   if (declaration !== undefined) {
-    return nodeTamperReach(state, cwd, model, declaration, depth + 1, active);
+    return nodeTamperReach(state, cwd, model, declaration, depth + 1, active, ignoreEvaluate);
   }
   const binding = model.bindings.get(name);
   if (binding === undefined) return UNKNOWN_REACH;
@@ -1874,12 +1902,14 @@ function localNameTamperReach(
     case 'import': {
       if (binding.target === undefined) return CLEAN_REACH;
       return binding.importedName === '*'
-        ? namespaceModuleReach(state, cwd, binding.target, depth + 1, active)
-        : exportedNameTamperReach(state, cwd, binding.target, binding.importedName ?? '', depth + 1, active);
+        ? namespaceModuleReach(state, cwd, binding.target, depth + 1, active, ignoreEvaluate)
+        : exportedNameTamperReach(state, cwd, binding.target, binding.importedName ?? '', depth + 1, active, ignoreEvaluate);
     }
     case 'alias': {
       const aliased = binding.target === undefined ? undefined : routeDeclsOf(model).get(binding.target);
-      return aliased === undefined ? CLEAN_REACH : nodeTamperReach(state, cwd, model, aliased, depth + 1, active);
+      return aliased === undefined
+        ? CLEAN_REACH
+        : nodeTamperReach(state, cwd, model, aliased, depth + 1, active, ignoreEvaluate);
     }
     case 'test':
     case 'testmodule':
@@ -1908,8 +1938,9 @@ function exportedNameTamperReach(
   name: string,
   depth: number,
   active: Set<string>,
+  ignoreEvaluate: boolean,
 ): TamperReach {
-  const key = `${file}::${name}`;
+  const key = `${ignoreEvaluate ? 'blocking' : 'any'}::${file}::${name}`;
   const cached = state.routeReachByExport.get(key);
   if (cached !== undefined) return cached;
   if (depth > state.maxImportDepth) return UNKNOWN_REACH;
@@ -1922,13 +1953,13 @@ function exportedNameTamperReach(
   } else {
     const exported = model.exports.get(name);
     if (exported === undefined) {
-      verdict = localNameTamperReach(state, cwd, model, name, depth, active);
+      verdict = localNameTamperReach(state, cwd, model, name, depth, active, ignoreEvaluate);
     } else if ('packTest' in exported) {
       verdict = CLEAN_REACH;
     } else if ('targetFile' in exported) {
-      verdict = exportedNameTamperReach(state, cwd, exported.targetFile, exported.importedName, depth + 1, active);
+      verdict = exportedNameTamperReach(state, cwd, exported.targetFile, exported.importedName, depth + 1, active, ignoreEvaluate);
     } else {
-      verdict = localNameTamperReach(state, cwd, model, exported.local, depth, active);
+      verdict = localNameTamperReach(state, cwd, model, exported.local, depth, active, ignoreEvaluate);
     }
   }
   active.delete(key);
@@ -1950,28 +1981,29 @@ function namespaceModuleReach(
   file: string,
   depth: number,
   active: Set<string>,
+  ignoreEvaluate: boolean,
 ): TamperReach {
-  const key = `${file}::<namespace>`;
+  const key = `${ignoreEvaluate ? 'blocking' : 'any'}::${file}::<namespace>`;
   const cached = state.routeReachByExport.get(key);
   if (cached !== undefined) return cached;
   if (depth > state.maxImportDepth) return UNKNOWN_REACH;
   if (active.has(key)) return CLEAN_REACH;
   active.add(key);
   const verdict = ((): TamperReach => {
-    const topLevel = topLevelTamperOf(state, cwd, file);
+    const topLevel = topLevelTamperOf(state, cwd, file, ignoreEvaluate);
     if (topLevel !== null) return { kind: 'tamper', location: topLevel };
     const model = state.models.get(file) ?? modelOf(state, cwd, file, true);
     if (model === null) return CLEAN_REACH;
     for (const exportedName of model.exports.keys()) {
-      const reach = exportedNameTamperReach(state, cwd, file, exportedName, depth + 1, active);
+      const reach = exportedNameTamperReach(state, cwd, file, exportedName, depth + 1, active, ignoreEvaluate);
       if (reach.kind !== 'clean') return reach;
     }
     for (const binding of model.bindings.values()) {
       if (binding.kind !== 'import' || binding.target === undefined) continue;
       const reach =
         binding.importedName === '*'
-          ? namespaceModuleReach(state, cwd, binding.target, depth + 1, active)
-          : exportedNameTamperReach(state, cwd, binding.target, binding.importedName ?? '', depth + 1, active);
+          ? namespaceModuleReach(state, cwd, binding.target, depth + 1, active, ignoreEvaluate)
+          : exportedNameTamperReach(state, cwd, binding.target, binding.importedName ?? '', depth + 1, active, ignoreEvaluate);
       if (reach.kind !== 'clean') return reach;
     }
     return CLEAN_REACH;
@@ -1990,6 +2022,7 @@ function identifierReach(
   depth: number,
   active: Set<string>,
   called: boolean,
+  ignoreEvaluate: boolean,
 ): TamperReach {
   const text = identifier.text;
   const key = `${model.file}::${text}`;
@@ -1997,7 +2030,7 @@ function identifierReach(
   const local = resolveLocalReferenceNode(text, identifier);
   if (local !== undefined) {
     active.add(key);
-    const reach = referenceVerdict(nodeTamperReach(state, cwd, model, local, depth + 1, active), called);
+    const reach = referenceVerdict(nodeTamperReach(state, cwd, model, local, depth + 1, active, ignoreEvaluate), called);
     active.delete(key);
     return reach;
   }
@@ -2006,8 +2039,8 @@ function identifierReach(
   if (binding.kind === 'import' && binding.target !== undefined) {
     const reach =
       binding.importedName === '*'
-        ? namespaceModuleReach(state, cwd, binding.target, depth + 1, active)
-        : exportedNameTamperReach(state, cwd, binding.target, binding.importedName ?? '', depth + 1, active);
+        ? namespaceModuleReach(state, cwd, binding.target, depth + 1, active, ignoreEvaluate)
+        : exportedNameTamperReach(state, cwd, binding.target, binding.importedName ?? '', depth + 1, active, ignoreEvaluate);
     return referenceVerdict(reach, called);
   }
   return CLEAN_REACH;
@@ -2027,6 +2060,7 @@ function nodeTamperReach(
   node: ts.Node,
   depth: number,
   active: Set<string>,
+  ignoreEvaluate: boolean,
 ): TamperReach {
   if (depth > state.maxImportDepth) return UNKNOWN_REACH;
   let verdict: TamperReach = CLEAN_REACH;
@@ -2037,17 +2071,17 @@ function nodeTamperReach(
   const visit = (current: ts.Node): void => {
     if (verdict.kind !== 'clean') return;
     if (ts.isIdentifier(current)) {
-      verdict = referenceVerdict(identifierReach(state, cwd, model, current, depth, active, false), false);
+      verdict = referenceVerdict(identifierReach(state, cwd, model, current, depth, active, false, ignoreEvaluate), false);
       return;
     }
     if (ts.isCallExpression(current)) {
-      const tamper = tamperApiLocation(model.source, model.file, current);
+      const tamper = tamperApiLocation(model.source, model.file, current, ignoreEvaluate);
       if (tamper !== null) {
         verdict = { kind: 'tamper', location: tamper };
         return;
       }
       if (ts.isIdentifier(current.expression)) {
-        verdict = referenceVerdict(identifierReach(state, cwd, model, current.expression, depth, active, true), true);
+        verdict = referenceVerdict(identifierReach(state, cwd, model, current.expression, depth, active, true, ignoreEvaluate), true);
       } else {
         visit(current.expression);
       }
@@ -2064,10 +2098,13 @@ function nodeTamperReach(
       if (ts.isIdentifier(base)) {
         const binding = model.bindings.get(base.text);
         if (binding !== undefined && binding.kind === 'import' && binding.target !== undefined && binding.importedName === '*') {
-          verdict = referenceVerdict(exportedNameTamperReach(state, cwd, binding.target, current.name.text, depth + 1, active), called);
+          verdict = referenceVerdict(
+            exportedNameTamperReach(state, cwd, binding.target, current.name.text, depth + 1, active, ignoreEvaluate),
+            called,
+          );
           return;
         }
-        verdict = referenceVerdict(identifierReach(state, cwd, model, base, depth, active, called), called);
+        verdict = referenceVerdict(identifierReach(state, cwd, model, base, depth, active, called, ignoreEvaluate), called);
         return;
       }
       visit(base);
@@ -2081,7 +2118,7 @@ function nodeTamperReach(
         if (binding !== undefined && binding.kind === 'import' && binding.target !== undefined && binding.importedName === '*') {
           if (ts.isStringLiteral(current.argumentExpression)) {
             verdict = referenceVerdict(
-              exportedNameTamperReach(state, cwd, binding.target, current.argumentExpression.text, depth + 1, active),
+              exportedNameTamperReach(state, cwd, binding.target, current.argumentExpression.text, depth + 1, active, ignoreEvaluate),
               called,
             );
             return;
@@ -2089,7 +2126,7 @@ function nodeTamperReach(
           verdict = UNKNOWN_REACH; // dynamic namespace access: cannot prove which export runs
           return;
         }
-        verdict = referenceVerdict(identifierReach(state, cwd, model, base, depth, active, false), false);
+        verdict = referenceVerdict(identifierReach(state, cwd, model, base, depth, active, false, ignoreEvaluate), false);
         if (verdict.kind !== 'clean') return;
         visit(current.argumentExpression);
         return;
@@ -2159,14 +2196,15 @@ function attributedRouteInterception(
   callback: ts.Expression | undefined,
   fileWideTamper: Location | null,
   fallback: Location | null,
+  ignoreEvaluate: boolean,
 ): Location | null {
   if (fileWideTamper !== null) return fileWideTamper;
   const active = new Set<string>();
-  const registration = localNameTamperReach(state, cwd, model, base, 0, active);
+  const registration = localNameTamperReach(state, cwd, model, base, 0, active, ignoreEvaluate);
   if (registration.kind === 'tamper') return registration.location;
   if (registration.kind === 'unknown') return fallback;
   if (callback === undefined) return fallback;
-  const body = nodeTamperReach(state, cwd, model, callback, 0, active);
+  const body = nodeTamperReach(state, cwd, model, callback, 0, active, ignoreEvaluate);
   if (body.kind === 'tamper') return body.location;
   if (body.kind === 'unknown') return fallback;
   return null;
@@ -2216,9 +2254,10 @@ export function scanTestFiles(options: StaticScanOptions): StaticScanResult {
     if (model === null) continue;
     const fileHttpClient = findHttpClientCall(model.source, model.source, file);
     const fileMock = findModuleMock(model.source, file);
-    const fileRoute = findImportedRouteInterception(state, options.cwd, file);
+    const fileRoute = findImportedRouteInterception(state, options.cwd, file, false);
+    const fileRouteBlocking = findImportedRouteInterception(state, options.cwd, file, true);
     const gateforgeImport = findGateforgeFixtureImport(state, model.source, file);
-    scanFileForTests(state, options.cwd, model, fileHttpClient, fileMock, fileRoute, gateforgeImport);
+    scanFileForTests(state, options.cwd, model, fileHttpClient, fileMock, fileRoute, fileRouteBlocking, gateforgeImport);
   }
 
   // The import graph of everything the scan modeled. Every module-scope
@@ -2395,6 +2434,7 @@ function scanFileForTests(
   fileHttpClient: Location | null,
   fileMock: Location | null,
   fileRoute: Location | null,
+  fileRouteBlocking: Location | null,
   gateforgeImport: Location | null,
 ): void {
   const { file, source } = model;
@@ -2405,12 +2445,22 @@ function scanFileForTests(
   // import time anywhere in its import graph — flags every test of the
   // file exactly as before. A tamper inside an imported HELPER is
   // attributed per test; when reachability cannot be proven, today's
-  // file-wide graph tamper (`fileRoute`) stays the flag.
-  const specDirectTamper = findRouteInterception(source, file);
-  const importTimeTamper = specDirectTamper === null ? firstGraphTopLevelTamper(state, cwd, file) : null;
+  // file-wide graph tamper (`fileRoute`) stays the flag. 0.13.10 F7:
+  // the blocking pass ignores the evaluate family — what a CHROMIUM
+  // project may still refuse statically.
+  const specDirectTamper = findRouteInterception(source, file, false);
+  const specDirectBlocking = findRouteInterception(source, file, true);
+  const importTimeTamper = specDirectTamper === null ? firstGraphTopLevelTamper(state, cwd, file, false) : null;
+  const importTimeBlocking = specDirectBlocking === null ? firstGraphTopLevelTamper(state, cwd, file, true) : null;
   const fileWideTamper: Location | null = specDirectTamper ?? importTimeTamper;
-  const routeFor = (base: string, callback: ts.Expression | undefined): Location | null =>
-    attributedRouteInterception(state, cwd, model, base, callback, fileWideTamper, fileRoute);
+  const fileWideBlocking: Location | null = specDirectBlocking ?? importTimeBlocking;
+  const routeFor = (
+    base: string,
+    callback: ts.Expression | undefined,
+  ): { any: Location | null; blocking: Location | null } => ({
+    any: attributedRouteInterception(state, cwd, model, base, callback, fileWideTamper, fileRoute, false),
+    blocking: attributedRouteInterception(state, cwd, model, base, callback, fileWideBlocking, fileRouteBlocking, true),
+  });
 
   const visit = (
     node: ts.Node,
@@ -2964,8 +3014,8 @@ function buildEntry(input: {
   location: Location;
   fileHttpClient: Location | null;
   fileMock: Location | null;
-  /** The tamper location attributed to THIS test (0.13.10 F3). */
-  route: Location | null;
+  /** The tamper location attributed to THIS test (0.13.10 F3), any family and blocking-family. */
+  route: { any: Location | null; blocking: Location | null };
   gateforgeImport: Location | null;
 }): StaticTestEntry {
   const { file, source, node, callback, titlePath, location } = input;
@@ -2996,7 +3046,8 @@ function buildEntry(input: {
       httpClientCall,
       fileHttpClientCall: input.fileHttpClient,
       fileMockImport: input.fileMock,
-      fileRouteInterception: input.route,
+      fileRouteInterception: input.route.any,
+      fileRouteInterceptionNonEvaluate: input.route.blocking,
       gateforgeFixtureImport: input.gateforgeImport,
     },
     ...(annotations.claims.length > 0 ? { annotationClaims: annotations.claims } : {}),

@@ -473,6 +473,12 @@ class CatalogBuilder {
    * playwright label they have always carried.
    */
   private readonly staticRowRunner: string;
+  /**
+   * Project name → the browser the runner resolved for it (0.13.10 F7).
+   * A project absent here has an UNDETERMINED browser: its rows keep
+   * every static tamper signal (fail closed).
+   */
+  private readonly projectBrowsers: Map<string, string>;
 
   constructor(
     private readonly cwd: string,
@@ -482,9 +488,25 @@ class CatalogBuilder {
     private readonly scopes: RunnerScopes,
   ) {
     this.staticRowRunner = runner === 'pytest' ? 'playwright' : runner;
+    this.projectBrowsers = new Map(Object.entries(native.projectBrowsers ?? {}));
     for (const entry of scan.entries) {
       this.staticByKey.set(reconciliationKey(entry.file, entry.titlePath), entry);
     }
+  }
+
+  /**
+   * The facts one catalog row reads (0.13.10 F7): in a project the runner
+   * resolved to CHROMIUM, an evaluate-family tamper is no static refusal
+   * — the runtime initiator rule refuses every request evaluated test
+   * code starts — so the row reads the blocking-family location instead.
+   * Every other project (non-chromium, undetermined, absent) reads the
+   * facts as scanned: fail closed.
+   */
+  private rowFacts(facts: StaticTestFacts | undefined, project: string | null): StaticTestFacts | undefined {
+    if (facts === undefined || project === null) return facts;
+    if (this.projectBrowsers.get(project) !== 'chromium') return facts;
+    if (facts.fileRouteInterceptionNonEvaluate === undefined) return facts;
+    return { ...facts, fileRouteInterception: facts.fileRouteInterceptionNonEvaluate };
   }
 
   /**
@@ -750,7 +772,7 @@ class CatalogBuilder {
     // catalog identity uses null for that (same as static-only rows) —
     // an empty-string project is a schema violation, never an identity.
     const project = instance.project === '' ? null : instance.project;
-    const callSiteFacts = staticEntry?.facts ?? locationGap?.facts;
+    const callSiteFacts = this.rowFacts(staticEntry?.facts ?? locationGap?.facts, project);
     const callSiteSignals = staticEntry?.signals ?? locationGap?.signals ?? [];
     const callSiteFile = staticEntry?.file ?? locationGap?.file ?? instance.file;
     const matched = callSiteFacts !== undefined;

@@ -58,8 +58,8 @@ type SelectionValue = string | RegExp;
 interface RunnerProject {
   name?: string;
   dependencies?: readonly string[];
-  /** The RESOLVED per-project `use`; only its `storageState` is read. */
-  use?: { storageState?: unknown };
+  /** The RESOLVED per-project `use`; only its `storageState` and `browserName` are read. */
+  use?: { storageState?: unknown; browserName?: unknown };
   /** The RESOLVED per-project test root (absolute). */
   testDir?: string;
   testMatch?: SelectionValue | readonly SelectionValue[];
@@ -100,6 +100,14 @@ export interface ProjectGraphDocument {
    * project narrows nothing", never "this project collects nothing".
    */
   testFileScope?: ProjectTestFileScope[];
+  /**
+   * Project name → the RESOLVED `use.browserName` the runner will run it
+   * with (devices already merged by the runner itself). Absent when no
+   * project resolves one, or the document predates the field: absence
+   * means "the browser is undetermined" and every downstream rule fails
+   * closed — never a guessed default.
+   */
+  projectBrowsers?: Record<string, string>;
 }
 
 /** One project's runner-resolved test-file selection. */
@@ -162,6 +170,7 @@ export class ProjectGraphReporter {
     // a legal one, so a map keyed by it must not inherit anything.
     const projectDependencies = Object.create(null) as Record<string, string[]>;
     const projectStorageStates = Object.create(null) as Record<string, string>;
+    const projectBrowsers = Object.create(null) as Record<string, string>;
     const testFileScope: ProjectTestFileScope[] = [];
     for (const project of config.projects ?? []) {
       // A config with no `projects` array (or a declared one without a
@@ -192,6 +201,13 @@ export class ProjectGraphReporter {
       if (typeof storageState === 'string') {
         projectStorageStates[name] = storageState;
       }
+      // The RESOLVED browser the runner will use for this project — its
+      // own answer, with devices already merged, never a parse of the
+      // consumer config. Only a plain non-empty string crosses.
+      const browserName = project.use?.browserName;
+      if (typeof browserName === 'string' && browserName.length > 0) {
+        projectBrowsers[name] = browserName;
+      }
       // The runner's own file selection. Only plain globs and RegExps
       // cross; a function-valued selector is consumer CODE, and a
       // project with a non-data value is left out so it narrows nothing
@@ -207,6 +223,7 @@ export class ProjectGraphReporter {
       schemaVersion: 2,
       projectDependencies,
       ...(Object.keys(projectStorageStates).length > 0 ? { projectStorageStates } : {}),
+      ...(Object.keys(projectBrowsers).length > 0 ? { projectBrowsers } : {}),
       ...(testFileScope.length > 0 ? { testFileScope } : {}),
     };
     writeFileSync(graphPath, `${JSON.stringify(document)}\n`, 'utf8');
