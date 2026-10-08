@@ -243,6 +243,16 @@ export const RuntimeConfigSchema = z
      * seconds here for the supervisor to honour them.
      */
     expectTimeoutSeconds: z.number().int().min(1).max(600).optional(),
+    /**
+     * Playwright trace mode handed to the synthesized trusted config as
+     * `use.trace`. The consumer config is never loaded, so an owner who
+     * turned traces on there must declare the mode here for a red
+     * supervised run to leave a trace.zip in last-failures. Absent, the
+     * generated config keeps Playwright's effective `off`.
+     */
+    trace: z
+      .enum(['off', 'on', 'retain-on-failure', 'on-first-retry', 'on-all-retries', 'retain-on-first-failure'])
+      .optional(),
   })
   .strict()
   .superRefine((runtime, ctx) => {

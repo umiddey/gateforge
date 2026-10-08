@@ -476,6 +476,7 @@ export async function testGatesCommand(io: Io, argv: readonly string[]): Promise
           parseRunTimeoutMin(stringFlag(options, 'run-timeout-min')) ?? runtimeRunTimeoutMs(io.cwd),
         stallTimeoutMs: runtimeStallTimeoutMs(io.cwd),
         expectTimeoutMs: runtimeExpectTimeoutMs(io.cwd),
+        trace: runtimeTrace(io.cwd),
         progress: progressFlag,
         scope,
         resultOnly,
@@ -629,6 +630,31 @@ function runtimeExpectTimeoutMs(cwd: string): number | undefined {
   try {
     const seconds = loadRuntimeConfigAt(cwd, loadConfigAt(cwd).runtime)?.expectTimeoutSeconds;
     return seconds === undefined ? undefined : seconds * 1_000;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The Playwright trace mode the OWNER declared in the staged runtime
+ * document, or undefined when the document declares none.
+ *
+ * `runtime.yml`'s `trace` is the owner's answer to "leave me a trace to
+ * diagnose a red supervised test from": the consumer config is never
+ * loaded, so this declaration is the only way a `use.trace` above `off`
+ * reaches the run's generated config and a `trace.zip` reaches
+ * `last-failures`. A document that cannot be read declares nothing, and
+ * `trace: 'off'` stands.
+ *
+ * Args:
+ *   cwd: absolute repository root.
+ *
+ * Returns:
+ *   string | undefined: the declared trace mode, or undefined for off.
+ */
+function runtimeTrace(cwd: string): 'off' | 'on' | 'retain-on-failure' | 'on-first-retry' | 'on-all-retries' | 'retain-on-first-failure' | undefined {
+  try {
+    return loadRuntimeConfigAt(cwd, loadConfigAt(cwd).runtime)?.trace;
   } catch {
     return undefined;
   }
@@ -1004,6 +1030,13 @@ export interface SupervisedOptions {
    * `expect` key is emitted and Playwright's own 5-second default stands.
    */
   expectTimeoutMs?: number;
+  /**
+   * Playwright trace mode, written as `use.trace` in the generated
+   * config the supervised run executes under. Undefined resolves from
+   * `runtime.yml trace`; when neither declares a value the generated
+   * config keeps `trace: 'off'` — the default is unchanged.
+   */
+  trace?: 'off' | 'on' | 'retain-on-failure' | 'on-first-retry' | 'on-all-retries' | 'retain-on-first-failure';
   /**
    * `--progress` target (additive): `stderr`, `file:<path>`, `off`, or
    * undefined for the `run.progress` config key and then the CI-aware
@@ -2504,6 +2537,10 @@ async function runSupervisedTestGatesInner(
   // value wins, the document is re-read for an in-process caller, and
   // neither declaring one means no `expect` key in the generated config.
   const expectTimeoutMs = options.expectTimeoutMs ?? runtimeExpectTimeoutMs(io.cwd);
+  // The trace mode: the same rule again — the caller's value wins, the
+  // document is re-read for an in-process caller, and neither declaring
+  // one keeps `trace: 'off'` in the generated config.
+  const trace = options.trace ?? runtimeTrace(io.cwd);
   // The reuse digest is the IDENTITY of the dependency bytes this run
   // executes against, and it must be the same value whoever computes it.
   // ONE resolver owns that value: the commit hook hands over the digest
@@ -4618,6 +4655,7 @@ async function runSupervisedTestGatesInner(
           ...(runTimeoutMs !== undefined ? { timeoutMs: runTimeoutMs } : {}),
           ...(stallTimeoutMs !== undefined ? { stallTimeoutMs } : {}),
           ...(expectTimeoutMs !== undefined ? { expectTimeoutMs } : {}),
+          ...(trace !== undefined ? { trace } : {}),
           activity: runActivity,
         },
       })

@@ -208,6 +208,12 @@ export interface TrustedConfigInput {
    * own 5-second default stands, exactly as before.
    */
   expectTimeoutMs?: number;
+  /**
+   * Playwright trace mode, written as the generated config's `use.trace`
+   * (runtime.yml `trace`). Undefined keeps `trace: 'off'` — the default
+   * is unchanged, exactly as before.
+   */
+  trace?: 'off' | 'on' | 'retain-on-failure' | 'on-first-retry' | 'on-all-retries' | 'retain-on-first-failure';
 }
 
 /** One named project and the repo-relative files the plan attributed to it. */
@@ -578,7 +584,11 @@ export function synthesizeTrustedConfig(input: TrustedConfigInput): {
     '  ],',
     `  use: ${JSON.stringify({
       headless: true,
-      trace: 'off',
+      // The owner-declared trace mode (runtime.yml `trace`): the
+      // consumer config is never loaded, so this is the only way a
+      // trace mode above `off` reaches the supervised run and a red
+      // test leaves a trace.zip in last-failures. Unset, `off` stands.
+      trace: input.trace ?? 'off',
       ...(input.appBaseUrl !== undefined ? { baseURL: input.appBaseUrl } : {}),
       ...(operatorState !== undefined ? { storageState: operatorState } : {}),
     })},`,

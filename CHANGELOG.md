@@ -31,6 +31,22 @@
   members are drawn from the planned set only, so quarantined tests are
   never re-added.
 
+- **pack-playwright: `runtime.yml trace` sets the supervised run's
+  Playwright trace mode.** The generated config a supervised Playwright
+  run executes under hardcoded `use.trace: 'off'`, and the consumer
+  config is never loaded by design, so an owner who turned traces on in
+  their own config never got a `trace.zip` — `<state>/last-failures/`
+  held error contexts and screenshots but nothing to replay the failure
+  from. The runtime document now declares `trace` with one of
+  Playwright's six modes (`off`, `on`, `retain-on-failure`,
+  `on-first-retry`, `on-all-retries`, `retain-on-first-failure`),
+  validated (an unknown mode is a typed schema violation), resolved
+  beside the stall and assertion bounds, and written into the generated
+  config's `use.trace` — following the 0.13.6 `expectTimeoutSeconds`
+  precedent. When the key is absent the generated config keeps
+  `trace: 'off'` byte-identically, and a declared run's `trace.zip`
+  survives into `last-failures` with the other failure artifacts.
+
 ## 0.13.7
 
 - **pack-fastapi: a once-called registry function now orders its

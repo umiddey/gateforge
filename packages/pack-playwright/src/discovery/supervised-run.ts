@@ -141,6 +141,12 @@ export interface SupervisedRunOptions {
    */
   expectTimeoutMs?: number;
   /**
+   * Playwright trace mode, written into the synthesized trusted config
+   * as `use.trace` (see {@link synthesizeTrustedConfig}). Undefined
+   * keeps `trace: 'off'` — the default is unchanged.
+   */
+  trace?: 'off' | 'on' | 'retain-on-failure' | 'on-first-retry' | 'on-all-retries' | 'retain-on-first-failure';
+  /**
    * The parent-side per-test completion sink (see {@link RunActivity}).
    * Omit it and the run still applies its stall bound, it simply never
    * sees a completion — so nothing reports progress and the bound
@@ -433,6 +439,7 @@ export async function executeSupervisedPlaywright(
     ...(options.testFiles !== undefined ? { testFiles: options.testFiles } : {}),
     ...(options.projects !== undefined ? { projects: options.projects } : {}),
     ...(options.expectTimeoutMs !== undefined ? { expectTimeoutMs: options.expectTimeoutMs } : {}),
+    ...(options.trace !== undefined ? { trace: options.trace } : {}),
     ...(freeze === null
       ? options.projectScopes === undefined
         ? {}

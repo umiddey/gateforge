@@ -350,6 +350,18 @@ their own config must repeat the value here — without it, Playwright's
 default applies to every assertion that does not set an explicit timeout.
 When the key is absent, nothing is emitted and Playwright's default stands.
 
+Traces get the same treatment: `runtime.yml trace` takes one of
+Playwright's trace modes (`off`, `on`, `retain-on-failure`,
+`on-first-retry`, `on-all-retries`, `retain-on-first-failure`) and is
+written as `use.trace` in the generated config a supervised Playwright
+run executes under. The consumer config is never loaded, so an owner who
+turned traces on in their own config must repeat the mode here — without
+it the generated config keeps `trace: 'off'`, and `<state>/last-failures/`
+never holds a `trace.zip` to diagnose a red supervised test from. When
+the key is absent the default is unchanged, and a declared run's
+`trace.zip` survives into `last-failures` with the other failure
+artifacts. An unknown mode is a typed schema violation naming `trace`.
+
 **Playwright only, and here is why.** A stall bound needs a stream of per-test
 completions; today only the Playwright pack reads one. The pytest, Vitest,
 Cypress and other supervisors keep their historical 30-minute whole-run
