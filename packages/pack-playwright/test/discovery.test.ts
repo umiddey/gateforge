@@ -177,6 +177,70 @@ describe('static discovery', () => {
       { file: 'e2e/unrelated.js', code: 'unresolved-test-alias', titlePath: ['not a runner test'] },
     ]);
   });
+  it('classifies custom fixtures by the Playwright building blocks they reach', () => {
+    const root = makeTempDir();
+    writeTree(root, {
+      'e2e/api.ts': [
+        'export class Api {',
+        '  static async login() { return await request.newContext(); }',
+        '}',
+        '',
+      ].join('\n'),
+      'e2e/fixtures.ts': [
+        "import { test as base } from 'playwright/test';",
+        "import { Api } from './api';",
+        'export const test = base.extend({',
+        '  apiAs: async ({}, use) => use((key) => Api.login(key)),',
+        '  browserAs: async ({ browser }, use) => use(async () => (await browser.newContext()).newPage()),',
+        '  ticket: async ({ apiAs }, use) => use(await apiAs()),',
+        '  chained: async ({ ticket }, use) => use(ticket),',
+        '  dynamic: async ({}, use) => use(await import(makePath())),',
+        '  page: async ({}, use) => use(await makePage()),',
+        '});',
+        '',
+      ].join('\n'),
+      'e2e/api.spec.ts': [
+        "import { test } from './fixtures';",
+        "test('api fixture', async ({ apiAs }) => {});",
+        '',
+      ].join('\n'),
+      'e2e/browser.spec.ts': [
+        "import { test } from './fixtures';",
+        "test('browser fixture', async ({ browserAs }) => {});",
+        '',
+      ].join('\n'),
+      'e2e/data.spec.ts': [
+        "import { test } from './fixtures';",
+        "test('data fixture', async ({ ticket }) => {});",
+        '',
+      ].join('\n'),
+      'e2e/chain.spec.ts': [
+        "import { test } from './fixtures';",
+        "test('fixture chain', async ({ chained }) => {});",
+        '',
+      ].join('\n'),
+      'e2e/unknown.spec.ts': [
+        "import { test } from './fixtures';",
+        "test('unfollowable fixture', async ({ dynamic }) => {});",
+        '',
+      ].join('\n'),
+      'e2e/shadow.spec.ts': [
+        "import { test } from './fixtures';",
+        "test('shadowed page', async ({ page }) => {});",
+        '',
+      ].join('\n'),
+    });
+    const result = scanTestFiles({ cwd: root, include: ['e2e/**/*.spec.ts'], exclude: [] });
+    const inferred = new Map(result.entries.map((entry) => [entry.title, inferenceOf(entry).inferredKind]));
+    expect(inferred).toEqual(new Map([
+      ['api fixture', 'api-e2e'],
+      ['browser fixture', 'browser-e2e'],
+      ['data fixture', 'api-e2e'],
+      ['fixture chain', 'api-e2e'],
+      ['unfollowable fixture', 'unknown'],
+      ['shadowed page', 'browser-e2e'],
+    ]));
+  });
   it('recognizes npm aliases only when package metadata proves the Gateforge package', () => {
     const alias = '@suite/gateforge-runner';
     const spec = [
