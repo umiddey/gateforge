@@ -1342,10 +1342,12 @@ describe('native playwright reconciliation', () => {
       config: fixtureConfig(['e2e/**/*.spec.js']),
     });
     expect(
-      catalog.entries.map((entry) => [entry.title, entry.reconciliation, entry.inferredKind, entry.resolutionOrigin]),
+      catalog.entries
+        .map((entry) => [entry.title, entry.reconciliation, entry.inferredKind, entry.resolutionOrigin])
+        .sort((left, right) => String(left[0]).localeCompare(String(right[0]))),
     ).toEqual([
-      ['setup flow', 'matched', 'browser-e2e', 'static'],
       ['posting flow', 'matched', 'browser-e2e', 'static'],
+      ['setup flow', 'matched', 'browser-e2e', 'static'],
     ]);
   });
 

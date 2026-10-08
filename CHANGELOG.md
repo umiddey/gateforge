@@ -11,6 +11,10 @@
 - **Mapping: unreadable tests cannot carry E2E claims.** A Playwright-listed
   test whose code static discovery did not read cannot be mapped as
   `browser-e2e`, `observed-e2e`, or `api-e2e` until the scan can inspect it.
+- **Discovery: join data-driven registrations by scanned call-site line.**
+  When Playwright's runtime title is computed, the scanner now carries the
+  call-site facts to every listed instance at that exact line; resolvable
+  titles continue to reconcile by title identity.
 
 - **Deliberate tightening: test-code API requests are never E2E evidence.**
   This reverses 0.13.2's crediting of Playwright API calls: requests made

@@ -160,6 +160,10 @@ export interface StaticUnresolved {
   titlePath: string[];
   /** Location of the unresolved call/import. */
   location: Location;
+  /** Call-site facts retained when the title is dynamic but the test binding is proven. */
+  facts?: StaticTestFacts;
+  /** Suppression signals from that call site and its lexical describe stack. */
+  signals?: StaticTestEntry['signals'];
 }
 
 /** One parser failure with its location. */
@@ -1689,12 +1693,29 @@ function scanFileForTests(
     if (effectiveResolution === 'test' && !isExtend && !lifecycle && !isDescribe && titleArgument !== undefined && !eachCall) {
       const title = titleOf(titleArgument);
       if (title === null) {
+        const callSite = buildEntry({
+          file,
+          source,
+          node,
+          callback,
+          titlePath: [UNRESOLVED_TITLE_PLACEHOLDER],
+          parameterized: false,
+          inheritedSignals: describeStack.flatMap((scope) => scope.signals),
+          suppression,
+          location,
+          fileHttpClient,
+          fileMock,
+          fileRoute,
+          gateforgeImport,
+        });
         state.result.unresolved.push({
           code: 'dynamic-title',
           detail: 'test title is computed and cannot be resolved statically',
           file,
           titlePath: [UNRESOLVED_TITLE_PLACEHOLDER],
           location,
+          facts: callSite.facts,
+          signals: callSite.signals,
         });
         return;
       }
@@ -1736,12 +1757,29 @@ function scanFileForTests(
         );
         const outerLocation = locationOf(file, source, outer);
         if (title === null) {
+          const callSite = buildEntry({
+            file,
+            source,
+            node: outer,
+            callback: outerCallback,
+            titlePath: [UNRESOLVED_TITLE_PLACEHOLDER],
+            parameterized: 'each',
+            inheritedSignals: describeStack.flatMap((scope) => scope.signals),
+            suppression,
+            location: outerLocation,
+            fileHttpClient,
+            fileMock,
+            fileRoute,
+            gateforgeImport,
+          });
           state.result.unresolved.push({
             code: 'dynamic-title',
             detail: 'parameterized test title is computed and cannot be resolved statically',
             file,
             titlePath: [UNRESOLVED_TITLE_PLACEHOLDER],
             location: outerLocation,
+            facts: callSite.facts,
+            signals: callSite.signals,
           });
           return;
         }

@@ -1971,6 +1971,12 @@ are not assumed to export Playwright's `test`. A runner-listed file is also
 scanned when its path matches a configured source glob with another
 recognized extension; files wholly outside that source scope remain
 runner-list-only, and configured exclusions still apply.
+When the runner computes a test title from data, Gateforge joins the
+listed instance to the statically read call site only when its file and
+source line match. Static call-site facts then supply kind and tamper
+signals for every instance registered at that line. Resolvable titles
+continue to require title-path identity; a different literal title is
+never joined by line alone.
 
 ### Provenance trust model (GF-23, audited 2026-08-31, three rounds)
 
