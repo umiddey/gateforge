@@ -1550,6 +1550,130 @@ describe('registration-order precedence over ambiguous attribution (0.14)', () =
   });
 });
 
+describe('slash-variant merged registration (two decorators, one handler)', () => {
+  // A FastAPI handler under TWO decorators — `@router.get("/x/resolve",
+  // include_in_schema=False)` over `@router.get("/x/resolve/")` —
+  // registers TWO raw routes at adjacent flattened positions, and the
+  // endpoint compiler folds both into ONE endpoint. That merged endpoint
+  // carries the RANGE of its raw routes' proven orders as
+  // `registration: {scope, order, orderMax}`. The serving route for a
+  // normalized observation is whichever raw variant the request URL
+  // hit — the resolver cannot see a dropped trailing slash — so the
+  // literal wins only when its LATEST order beats every competitor,
+  // the competitor wins only when it beats the literal's EARLIEST
+  // order, and any interleaving or tie stays ambiguous (fail closed).
+  const SCOPE = 'app.main:app';
+
+  const PARAM_OBLIGATION: Obligation = {
+    schemaVersion: 1,
+    id: 'tenant.accounts:http:request-observed',
+    resourceId: 'tenant.accounts',
+    contract: 'http:request-observed',
+    policyId: 'p',
+    lifecycle: { create: true, read: true, update: true, delete: true, deleteSemantics: 'hard' },
+  };
+
+  function exportObligation(): Obligation {
+    return {
+      ...PARAM_OBLIGATION,
+      id: 'tenant.accounts-export:http:request-observed',
+      resourceId: 'tenant.accounts-export',
+    };
+  }
+
+  function slashRegistered(
+    resourceId: string,
+    canonicalPath: string,
+    order: number,
+    orderMax?: number,
+  ): HttpRouteCandidate {
+    return {
+      resourceId,
+      method: 'GET',
+      canonicalPath,
+      registration:
+        orderMax === undefined
+          ? { scope: SCOPE, order }
+          : { scope: SCOPE, order, orderMax },
+    };
+  }
+
+  function outcomeFor(
+    obligation: Obligation,
+    inventory: readonly HttpRouteCandidate[],
+  ) {
+    return evaluateObligation(obligation, {
+      claims: [{ schemaVersion: 1, obligationId: obligation.id, testId: 'test-1' }],
+      records: [
+        anchorRecord(obligation.id, 'read'),
+        record(obligation.id, {
+          kind: 'http.request',
+          payload: { method: 'GET', url: '/accounts/export', status: 200 },
+        }),
+      ],
+      waivers: [],
+      classification: CLASSIFICATION,
+      httpRoutes: inventory,
+      now: '2026-01-01T00:00:00.000Z',
+    });
+  }
+
+  it('a two-decorator literal registered before the parameter resolves to the literal', () => {
+    const outcome = outcomeFor(exportObligation(), [
+      slashRegistered('tenant.accounts-export', '/accounts/export', 2, 3),
+      slashRegistered('tenant.accounts', '/accounts/{}', 7),
+    ]);
+    expect(outcome.verdict).toBe('satisfied');
+  });
+
+  it('a parameter ordered before the whole literal range serves: the literal grades invalid on it', () => {
+    const outcome = outcomeFor(exportObligation(), [
+      slashRegistered('tenant.accounts', '/accounts/{}', 1),
+      slashRegistered('tenant.accounts-export', '/accounts/export', 2, 3),
+    ]);
+    expect(outcome.verdict).toBe('invalid');
+    expect(outcome.reason).toContain('uniquely matches route GET /accounts/{} (tenant.accounts)');
+    expect(outcome.reason).toContain("requires endpoint 'tenant.accounts-export'");
+  });
+
+  it('a parameter order inside the literal range stays ambiguous (interleaved raw routes)', () => {
+    // Raw route 1 at order 5, raw route 2 at order 8, parameter at 6:
+    // a request whose URL carries the trailing slash is served by the
+    // parameter, one without by the literal — and the normalized
+    // observation cannot tell them apart. Attribution must fail closed.
+    const exportOutcome = outcomeFor(exportObligation(), [
+      slashRegistered('tenant.accounts-export', '/accounts/export', 5, 8),
+      slashRegistered('tenant.accounts', '/accounts/{}', 6),
+    ]);
+    expect(exportOutcome.verdict).toBe('invalid');
+    expect(exportOutcome.reason).toContain('ambiguous route attribution');
+    const paramOutcome = outcomeFor(PARAM_OBLIGATION, [
+      slashRegistered('tenant.accounts-export', '/accounts/export', 5, 8),
+      slashRegistered('tenant.accounts', '/accounts/{}', 6),
+    ]);
+    expect(paramOutcome.verdict).toBe('invalid');
+    expect(paramOutcome.reason).toContain('ambiguous route attribution');
+  });
+
+  it('a tie on the literal latest order stays ambiguous', () => {
+    const outcome = outcomeFor(exportObligation(), [
+      slashRegistered('tenant.accounts-export', '/accounts/export', 2, 3),
+      slashRegistered('tenant.accounts', '/accounts/{}', 3),
+    ]);
+    expect(outcome.verdict).toBe('invalid');
+    expect(outcome.reason).toContain('ambiguous route attribution');
+  });
+
+  it('a malformed orderMax keeps the whole overlap ambiguous', () => {
+    const outcome = outcomeFor(exportObligation(), [
+      slashRegistered('tenant.accounts-export', '/accounts/export', 2, 0),
+      slashRegistered('tenant.accounts', '/accounts/{}', 7),
+    ]);
+    expect(outcome.verdict).toBe('invalid');
+    expect(outcome.reason).toContain('ambiguous route attribution');
+  });
+});
+
 describe('F6 deterministic aggregation over repeated requests (plan §10)', () => {
   const transportObligation: Obligation = {
     schemaVersion: 1,

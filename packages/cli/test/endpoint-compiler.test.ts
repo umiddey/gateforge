@@ -1693,3 +1693,84 @@ describe('unmatched by-id candidates are named, never linked', () => {
     expect(candidateBlocks(compiled)).toEqual([]);
   });
 });
+
+describe('slash-variant registration merge (two decorators, one handler)', () => {
+  // A FastAPI handler under `@router.get("/x/resolve",
+  // include_in_schema=False)` + `@router.get("/x/resolve/")` emits TWO
+  // raw-path facts for ONE identity (both normalize to the same
+  // canonical path) at ADJACENT registration orders. The identity used
+  // to fold into an endpoint with NO registration (the proofs
+  // disagreed), so the literal-vs-parameter overlap stayed ambiguous
+  // forever. The merged endpoint now carries the raw routes' RANGE:
+  // `{scope, order: min, orderMax: max}` — sound, because the serving
+  // raw variant is whichever one the request URL hit, and the resolver
+  // (core) treats the range conservatively.
+  const SCOPE = 'app.main:app';
+
+  function slashFact(rawPath: string, order: number): HttpContractFact {
+    return routeFact('GET', '/preferences/resolve', {
+      rawPath,
+      framework: 'fastapi',
+      registration: { scope: SCOPE, order },
+    });
+  }
+
+  function registrationOfIdentity(
+    compiled: CompileResult,
+    identity: string,
+  ): unknown {
+    const resource = compiled.contribution.resources.find(
+      (candidate) => candidate.attributes['identity'] === identity,
+    );
+    return resource?.attributes['registration'];
+  }
+
+  it('a two-decorator identity carries the raw routes registration range', () => {
+    const compiled = compileEndpointContribution([
+      contribution([
+        slashFact('/preferences/resolve', 0),
+        slashFact('/preferences/resolve/', 1),
+        routeFact('GET', '/preferences/{preference_id}', {
+          registration: { scope: SCOPE, order: 2 },
+        }),
+      ]),
+    ]);
+    expect(registrationOfIdentity(compiled, 'GET /preferences/resolve')).toEqual({
+      scope: SCOPE,
+      order: 0,
+      orderMax: 1,
+    });
+    // A single-fact identity keeps the exact today shape (no range).
+    expect(registrationOfIdentity(compiled, 'GET /preferences/{preference_id}')).toEqual({
+      scope: SCOPE,
+      order: 2,
+    });
+  });
+
+  it('a fact without registration keeps the identity unregistered (fail closed)', () => {
+    const compiled = compileEndpointContribution([
+      contribution([
+        slashFact('/preferences/resolve', 0),
+        routeFact('GET', '/preferences/resolve', {
+          rawPath: '/preferences/resolve/',
+          framework: 'fastapi',
+        }),
+      ]),
+    ]);
+    expect(registrationOfIdentity(compiled, 'GET /preferences/resolve')).toBeUndefined();
+  });
+
+  it('two scopes behind one identity keep it unregistered (orders do not compare)', () => {
+    const compiled = compileEndpointContribution([
+      contribution([
+        slashFact('/preferences/resolve', 0),
+        routeFact('GET', '/preferences/resolve', {
+          rawPath: '/preferences/resolve/',
+          framework: 'fastapi',
+          registration: { scope: 'app.admin:admin', order: 1 },
+        }),
+      ]),
+    ]);
+    expect(registrationOfIdentity(compiled, 'GET /preferences/resolve')).toBeUndefined();
+  });
+});
