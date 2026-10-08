@@ -14,6 +14,11 @@
   helper. `fetch`/`axios` calls are detected in the test file; calls in
   imported product modules do not count as Playwright API evidence.
 
+- **Setup-project tests never carry claims.** Discovery marks rows in projects
+  the Playwright runner resolved as dependencies of other projects. A claim
+  mapped to such a row is refused with the dependent project names; when the
+  runner's dependency graph is unavailable, mapping behavior is unchanged.
+
 ## 0.13.9
 
 Theme: Gateforge exists to catch fake tests. This release closes three ways a

@@ -499,6 +499,12 @@ catalog, lists up to five of that file's real keys.
   strong code-signal inference. In particular, `api-e2e` is not E2E evidence
   for observed claims and cannot be reclassified as `observed-e2e`;
   `tests mark` refuses such contradictions with both source locations.
+- Playwright's resolved project graph also marks prerequisite-project rows
+  in the catalog. Such setup tests prepare state, so sidecar and native claims
+  on them are refused with `TEST_MAPPING_AMBIGUOUS` and a message naming the
+  setup project and its dependents. This uses only the graph returned by the
+  runner; if discovery cannot read that graph, existing mapping behavior
+  remains unchanged.
 
 - Static discovery follows custom Playwright fixtures to their building
   blocks. A fixture backed by `browser.newContext()` / `.newPage()` counts
