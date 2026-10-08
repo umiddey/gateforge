@@ -318,8 +318,8 @@ tests:
         // The run names each expansion on its output, and the report
         // records it.
         expect(
-          named.stdout,
-          `expansion line missing from stdout:\n${observed}`,
+          named.stderr,
+          `expansion line missing from the run output:\n${observed}`,
         ).toContain(`selection: added 2 tests of serial group '${GROUP}' (specs/journey.spec.js)`);
         expect(report.serialExpansions, observed).toEqual([
           { describe: GROUP, file: 'specs/journey.spec.js', added: 2, logicalKeys: [expect.any(String), expect.any(String)] },
@@ -408,7 +408,7 @@ tests:
             verdict: 'satisfied',
           });
         }
-        expect(changed.stdout, `expansion line printed for a whole-file slice:\n${observed}`).not.toContain(
+        expect(changed.stderr, `expansion line printed for a whole-file slice:\n${observed}`).not.toContain(
           'selection: added',
         );
         expect(report.serialExpansions, observed).toBeUndefined();
