@@ -646,7 +646,30 @@ read. A file that NO runner's selection claims keeps the configured runner
 and stays a blocking row (`reconciliation-static-only`, carrying a
 `no-runner-claims-file` weak signal that says so): ownership is never
 invented.
-`inventoryComplete` is judged over the CONFIGURED runner's unresolved rows.
+`inventoryComplete` is judged over the CONFIGURED runner's unresolved rows
+(rows carrying the 0.13.9 runner-authority note below are informational,
+never gaps).
+
+### The runner's list is the authority on what executes (0.13.9)
+
+Two reconciliation shapes read the runner's own enumeration as the
+authority:
+
+- **TypeScript extension substitution.** A relative import ending
+  `.js`/`.mjs`/`.cjs`/`.jsx` resolves to the TypeScript sibling of the
+  same stem whenever the literal file does not exist (`.js`→`.ts` then
+  `.tsx`, `.mjs`→`.mts`, `.cjs`→`.cts`, `.jsx`→`.tsx`) — TypeScript's
+  own ESM rule, and the one every runner loader applies. The literal
+  file wins whenever it exists.
+- **The informational runner-authority note.** A static-only row whose
+  title is computed (`dynamic-title`, or a `<unresolved-title>`
+  placeholder) in a file the runner listed at least one instance for,
+  whose call sites the runner listed NOTHING at, carries the note
+  `call site never registered by the runner: conditional or unreached`:
+  it stays catalog data, plans nothing, demands no session, and never
+  makes the inventory incomplete. Files the runner listed nothing for
+  keep failing closed, and a resolved literal title the runner does not
+  list stays a blocking row.
 
 ## Advisory pytest diagnostics
 

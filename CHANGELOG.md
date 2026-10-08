@@ -31,6 +31,27 @@ let through only what is PROVEN harmless; anything unclear stays flagged.
 - **Discovery: an existing `.json` import is a data module (F6).** No
   unresolved-import row, no parse, no test bindings; the spec around it
   is read. A `.json` specifier naming nothing stays a visible row.
+- **Discovery: a `.js`-style import resolves to its TypeScript sibling.**
+  A relative specifier ending `.js`, `.mjs`, `.cjs`, or `.jsx` names the
+  TypeScript sibling of the same stem whenever the literal file does not
+  exist (`.js`→`.ts` then `.tsx`, `.mjs`→`.mts`, `.cjs`→`.cts`,
+  `.jsx`→`.tsx`) — TypeScript's own ESM substitution, and the rule every
+  runner loader already applies. Specs importing a `.mts` helper through
+  a `.mjs` specifier no longer grow a blocking `unresolved-import` plus
+  a required `<unresolved-title>` row beside the instance the runner
+  itself enumerates (real-app run: 92 false RUN_INCOMPLETE of this
+  shape). The literal file always wins when it exists.
+- **Discovery: a static call site the runner provably never registers is
+  an informational note, not a required case.** The runner's list is the
+  authority on what executes: when a file has listed instances but a
+  computed-title call site (`dynamic-title`, or a `<unresolved-title>`
+  row) has none, the row stays catalog data carrying the note "call site
+  never registered by the runner: conditional or unreached" — it plans
+  nothing, demands no session, and never makes the inventory incomplete
+  (real-app run: conditional journey registrations produced dozens of
+  these false blocks). Files the runner lists NOTHING for keep failing
+  closed, and a resolved literal title the runner does not list stays a
+  blocking row.
 - **`evaluate` is no longer a static tamper signal in chromium projects
   (F7).** In Chromium, requests started by evaluated test code are
   refused at runtime, so `evaluate` itself is no longer refused when
