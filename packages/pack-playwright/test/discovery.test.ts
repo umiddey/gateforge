@@ -542,6 +542,8 @@ describe('static discovery', () => {
       "page.addInitScript((key) => window.sessionStorage.setItem(key, key), bootKey)",
       "page.addInitScript((count) => localStorage.setItem('runs', count), 3)",
       "page.addInitScript(() => localStorage.setItem(declaredKey, 'en'))",
+      "page.addInitScript(({ sessionUserRole }) => sessionStorage.setItem('u', JSON.stringify({ id: 'u-1', role: sessionUserRole })), { sessionUserRole: 'owner' })",
+      "page.addInitScript(({ sessionUserRole: role }) => localStorage.setItem('role', role), { sessionUserRole: 'owner' })",
     ];
     for (const call of safeCalls) {
       const root = makeTempDir();
