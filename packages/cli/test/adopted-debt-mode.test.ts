@@ -152,7 +152,7 @@ async function stageAdoptionCommit(
     '.gitlab-ci.yml': CI_WIRING,
     '.gateforge.yml': fixtureConfig(adoptedDebt),
     'package.json': manifest('1.0.0'),
-    ...evidenceSpecs(ADOPTED_NAMES),
+    ...evidenceSpecs(ADOPTED_NAMES, true),
     '.gateforge/test-map.yml': evidenceTestMap(ADOPTED_NAMES),
     'playwright.config.mjs': "export default { testDir: 'e2e', projects: [{ name: 'chromium' }] };\n",
   });
@@ -177,7 +177,7 @@ function writeNeutralLaterCommit(repo: TempRepo, extra: Record<string, string> =
       "export default { testDir: 'e2e', projects: [{ name: 'chromium' }] };\n// the headed wrapper\n",
     ...extra,
   });
-  for (const [file, body] of Object.entries(evidenceSpecs(ADOPTED_NAMES))) {
+  for (const [file, body] of Object.entries(evidenceSpecs(ADOPTED_NAMES, true))) {
     repo.writeFiles({ [file]: `${body}\n// reviewed\n` });
   }
   repo.stage();

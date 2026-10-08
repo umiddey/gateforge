@@ -315,7 +315,7 @@ function installObserveRepo(
   installFixture(repo);
   repo.writeFiles({
     ...(Object.fromEntries(
-      Object.entries(evidenceSpecs(NAMES)).map(([file, body]) => [
+      Object.entries(evidenceSpecs(NAMES, true)).map(([file, body]) => [
         file,
         file === RULE_FILE ? ruleSpec(specOverrides) : (specOverrides[file] ?? (body as string)),
       ]),
@@ -465,7 +465,9 @@ describe('§7.5 a real sealed run grades the rule from its own authorized record
     const app = await startEvidenceApp();
     try {
       await withTempRepo({}, async (repo) => {
-        installObserveRepo(repo, app.url, { [RULE_FILE]: '// __FAIL__ a race in this test\n' });
+        installObserveRepo(repo, app.url, {
+          [RULE_FILE]: `${ruleSpec()}// __FAIL__ a race in this test\n`,
+        });
         repo.commitFiles({}, 'base');
         const env = gateEnv(repo, app.url);
 
@@ -495,10 +497,12 @@ describe('§7.5 a real sealed run grades the rule from its own authorized record
     const app = await startEvidenceApp();
     try {
       await withTempRepo({}, async (repo) => {
+        const accountSpec = evidenceSpecs(['accounts'], true)['e2e/accounts.spec.mjs'];
+        if (accountSpec === undefined) throw new Error('missing generated account spec');
         installObserveRepo(
           repo,
           app.url,
-          { 'e2e/accounts.spec.mjs': '// __FAIL__ the account journey is red\n' },
+          { 'e2e/accounts.spec.mjs': `${accountSpec}// __FAIL__ the account journey is red\n` },
           { secondRuleTest: true },
         );
         repo.commitFiles({}, 'base');

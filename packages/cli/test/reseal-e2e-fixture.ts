@@ -16,10 +16,10 @@ import { environmentVerifierKeyId } from '../src/verifier-keys.js';
 
 export const VERIFIER_KEY = 'reseal-e2e-verifier-key';
 
-/** The two spec files, one test each, as the catalog and runner see them. */
+/** Two server-witnessed spec files; their bodies do not imply browser traffic. */
 export const SPECS: Record<string, string> = {
-  'e2e/accounts.spec.mjs': ["import { test } from 'playwright/test';", "test('reads an account', async () => {});", ''].join('\n'),
-  'e2e/orders.spec.mjs': ["import { test } from 'playwright/test';", "test('reads an order', async () => {});", ''].join('\n'),
+  'e2e/accounts.spec.mjs': ["import { test } from '@gate-forge/pack-playwright';", "test('reads an account', async () => {});", ''].join('\n'),
+  'e2e/orders.spec.mjs': ["import { test } from '@gate-forge/pack-playwright';", "test('reads an order', async () => {});", ''].join('\n'),
 };
 
 const TITLES: Record<string, string> = {
@@ -420,13 +420,18 @@ function evidenceSpecFile(name: string): string {
   return `e2e/${name}.spec.mjs`;
 }
 
-function evidenceSpecsOf(names: readonly string[]): Record<string, string> {
+function evidenceSpecsOf(names: readonly string[], serverWitnessed = false): Record<string, string> {
   return Object.fromEntries(
     evidenceSpecTable(names).map((row) => [
       evidenceSpecFile(row.name),
       [
-        "import { test } from 'playwright/test';",
-        `test('${row.title}', async () => {});`,
+        serverWitnessed
+          ? "import { test } from '@gate-forge/pack-playwright';"
+          : "import { test } from 'playwright/test';",
+        serverWitnessed
+          ? `test('${row.title}', async () => {});`
+          : `test('${row.title}', async ({ page }) => {`,
+        ...(serverWitnessed ? [] : ["  await page.goto('/');", "  await page.getByRole('button', { name: 'Open' }).click();", '});']),
         `// __EVIDENCE__ tenant.${row.name}`,
         '',
       ].join('\n'),
@@ -435,12 +440,15 @@ function evidenceSpecsOf(names: readonly string[]): Record<string, string> {
 }
 
 /** The evidence spec files; `__EVIDENCE__` drives the witness intent. */
-export function evidenceSpecs(names: readonly string[] = DEFAULT_EVIDENCE_NAMES): Record<string, string> {
-  return evidenceSpecsOf(names);
+export function evidenceSpecs(
+  names: readonly string[] = DEFAULT_EVIDENCE_NAMES,
+  serverWitnessed = false,
+): Record<string, string> {
+  return evidenceSpecsOf(names, serverWitnessed);
 }
 
-/** The evidence spec files of the standard two-spec repository. */
-export const EVIDENCE_SPECS: Record<string, string> = evidenceSpecsOf(DEFAULT_EVIDENCE_NAMES);
+/** The evidence spec files of the standard two-spec server-witnessed repository. */
+export const EVIDENCE_SPECS: Record<string, string> = evidenceSpecsOf(DEFAULT_EVIDENCE_NAMES, true);
 
 /** The sidecar identity (and so the claim's testId) of each evidence spec. */
 export function evidenceKeys(names: readonly string[] = DEFAULT_EVIDENCE_NAMES): Record<string, string> {
@@ -639,7 +647,7 @@ export function installEvidenceRepo(
 ): void {
   const table = evidenceSpecTable(names);
   repo.writeFiles({
-    ...evidenceSpecs(names),
+    ...evidenceSpecs(names, true),
     ...specOverrides,
     ...Object.fromEntries(table.map((row) => [`src/${row.name}.txt`, `${row.name} fixture.table\n`])),
     ...Object.fromEntries(table.map((row) => [`.gateforge/adapters/${row.name}.mjs`, evidenceAdapter(appUrl)])),
@@ -698,7 +706,7 @@ export async function installAndRunFailingEvidenceParent(
   installEvidenceRepo(
     repo,
     app.url,
-    { 'e2e/orders.spec.mjs': `${evidenceSpecs(names)['e2e/orders.spec.mjs'] as string}// __FAIL__ a race in this test\n` },
+    { 'e2e/orders.spec.mjs': `${evidenceSpecs(names, true)['e2e/orders.spec.mjs'] as string}// __FAIL__ a race in this test\n` },
     names,
   );
   repo.writeFiles({ '.gateforge.yml': `mode: changed\nenforcement:\n  reseal: true\n${configYml()}` });

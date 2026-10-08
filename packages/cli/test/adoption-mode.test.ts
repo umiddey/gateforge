@@ -194,7 +194,7 @@ async function stageAdoptionCommit(
     // policy input, a catalog test file or test infrastructure: none of
     // them is a product resource source, which is what makes the whole
     // change set product-behaviour-neutral.
-    ...evidenceSpecs(ADOPTED_NAMES),
+    ...evidenceSpecs(ADOPTED_NAMES, true),
     '.gateforge/test-map.yml': evidenceTestMap(ADOPTED_NAMES),
     'playwright.config.mjs': "export default { testDir: 'e2e', projects: [{ name: 'chromium' }] };\n",
     ...extra,
@@ -323,7 +323,7 @@ describe('F2 adoption mode: the first commit that wires the gate', () => {
           'playwright.config.mjs':
             "export default { testDir: 'e2e', projects: [{ name: 'chromium' }] };\n// the headed wrapper\n",
         });
-        for (const [file, body] of Object.entries(evidenceSpecs(ADOPTED_NAMES))) {
+        for (const [file, body] of Object.entries(evidenceSpecs(ADOPTED_NAMES, true))) {
           repo.writeFiles({ [file]: `${body}\n// reviewed\n` });
         }
         repo.stage();

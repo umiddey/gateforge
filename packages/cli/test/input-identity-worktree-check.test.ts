@@ -85,7 +85,7 @@ function installGated(repo: TempRepo, appUrl: string): void {
     'plugin.mjs': PLUGIN_SOURCE,
     'package.json': `${JSON.stringify({ name: 'fixture', private: true, devDependencies: { '@playwright/test': '1.0.0' } }, null, 2)}\n`,
     'playwright.config.mjs': "export default { testDir: 'e2e', projects: [{ name: 'chromium' }] };\n",
-    ...evidenceSpecs(NAMES),
+    ...evidenceSpecs(NAMES, true),
     '.gateforge/test-map.yml': evidenceTestMap(NAMES),
     ...Object.fromEntries(NAMES.map((name) => [`src/${name}.txt`, `${name} fixture.table\n`])),
     ...Object.fromEntries(NAMES.map((name) => [`.gateforge/adapters/${name}.mjs`, evidenceAdapter(appUrl)])),
