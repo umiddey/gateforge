@@ -96,6 +96,47 @@ function inferenceOf(entry: StaticTestEntry) {
 }
 
 describe('static discovery', () => {
+  it('resolves local CJS and ESM wrappers over the Gateforge fixture subpath', () => {
+    const root = makeTempDir();
+    writeTree(root, {
+      'e2e/wrapper.cjs': [
+        "const { test: base } = require('@gate-forge/pack-playwright/fixture');",
+        'exports.test = base.extend({});',
+        '',
+      ].join('\n'),
+      'e2e/wrapper.mjs': [
+        "import { test as base } from '@gate-forge/pack-playwright/fixture';",
+        'export const test = base.extend({});',
+        '',
+      ].join('\n'),
+      'e2e/cjs.spec.js': [
+        "const { test } = require('./wrapper.cjs');",
+        "test('CJS wrapper journey', async ({ page }) => {});",
+        '',
+      ].join('\n'),
+      'e2e/esm.spec.mjs': [
+        "import { test } from './wrapper.mjs';",
+        "test('ESM wrapper journey', async ({ page }) => {});",
+        '',
+      ].join('\n'),
+      'e2e/unrelated.js': [
+        "const { test } = require('./unrelated-wrapper.js');",
+        "test('not a runner test', () => {});",
+        '',
+      ].join('\n'),
+      'e2e/unrelated-wrapper.js': [
+        "const { test } = require('unrelated-test-library');",
+        'exports.test = test;',
+        '',
+      ].join('\n'),
+    });
+    const result = scanTestFiles({ cwd: root, include: ['e2e/**/*'], exclude: [] });
+    expect(result.entries.map((entry) => entry.title).sort()).toEqual([
+      'CJS wrapper journey',
+      'ESM wrapper journey',
+    ]);
+    expect(result.unresolved).toEqual([]);
+  });
   it('resolves test.extend chains through the import graph into full titlePaths', () => {
     const root = makeTempDir();
     writeTree(root, {
