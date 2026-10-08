@@ -5690,8 +5690,28 @@ async function runSupervisedTestGatesInner(
       changedInputs,
     },
   };
-  const evaluatedBase = evaluateRun(evaluationInput);
-
+  const rawEvaluatedBase = evaluateRun(evaluationInput);
+  const unreadableMappingByObligation = new Map(
+    mappingBlockers
+      .filter((entry) => entry.cause === 'TEST_KIND_UNKNOWN' && entry.name !== null)
+      .map((entry) => [entry.name as string, entry]),
+  );
+  const evaluatedBase =
+    unreadableMappingByObligation.size === 0
+      ? rawEvaluatedBase
+      : {
+          ...rawEvaluatedBase,
+          verdicts: rawEvaluatedBase.verdicts.map((verdict): ObligationVerdict => {
+            const problem = unreadableMappingByObligation.get(verdict.obligation.id);
+            if (problem === undefined || verdict.verdict !== 'missing') return verdict;
+            return {
+              ...verdict,
+              reason: problem.detail,
+              cause: 'TEST_KIND_UNKNOWN',
+              nextAction: problem.nextAction ?? CAUSE_NEXT_ACTIONS.TEST_KIND_UNKNOWN,
+            };
+          }),
+        };
   // Owner-declared business rules (plan 2026-10-05 D4/D5), graded from
   // THIS run's own sealed facts. A rule with no mapped test, or a mapped
   // test that did not run, did not pass, or does not carry the type's

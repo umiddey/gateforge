@@ -608,13 +608,10 @@ export function nativeInventoryBlocking(problem: MappingProblem | null): Blockin
 
 
 /**
- * Projects resolver problems into gate blocking entries (fail closed):
- * an ambiguous or stale declaration blocks with its plan §5.4 cause and
- * next action instead of being silently dropped. TEST_KIND_UNKNOWN is
- * NOT projected here — an unclassified relevant test is a suggestion
- * surface concern (plan phase 2 item 7: uncertainty blocks only the
- * affected gate through suggestions), while unsafe/out-of-date
- * declarations block outright.
+ * Projects resolver problems into gate blocking entries (fail closed).
+ * A listed E2E test whose code was unreadable blocks because its claims
+ * could not be checked; ambiguous and stale declarations also block.
+ * Other unknown-kind suggestions remain advisory.
  *
  * Args:
  *   problems: the resolver's typed problems.
@@ -624,7 +621,11 @@ export function nativeInventoryBlocking(problem: MappingProblem | null): Blockin
  */
 export function mappingBlocking(problems: ResolvedMappings['problems']): BlockingEntry[] {
   return problems
-    .filter((problem) => problem.cause !== 'TEST_KIND_UNKNOWN')
+    .filter(
+      (problem) =>
+        problem.cause !== 'TEST_KIND_UNKNOWN' ||
+        problem.detail.includes('Gateforge could not read the code of test'),
+    )
     .map((problem): BlockingEntry => {
       const location: Location | null = problem.locations[0] ?? null;
       return {

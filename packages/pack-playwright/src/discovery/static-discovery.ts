@@ -917,11 +917,47 @@ function modelModuleScope(state: ScanState, cwd: string, model: FileModel, sourc
         model.exports.set(name, { local: name });
       }
     }
-    // CJS exports: `module.exports = { test, seed: runSeed };` — export
-    // mappings so `require('./helpers')` destructuring resolves through
-    // the defining file (consumer-local harness pattern, E22).
+    // CJS exports: property assignments on `exports`/`module.exports` and
+    // object assignment via `module.exports = { test, seed: runSeed }`.
+    // These map exports back to bindings so local require chains resolve.
     if (ts.isExpressionStatement(node) && isModuleScope(node)) {
       const expr = node.expression;
+      if (
+        ts.isBinaryExpression(expr) &&
+        expr.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+        ts.isPropertyAccessExpression(expr.left)
+      ) {
+        const owner = expr.left.expression;
+        const exportName = expr.left.name.text;
+        const isExportsProperty =
+          (ts.isIdentifier(owner) && owner.text === 'exports') ||
+          (ts.isPropertyAccessExpression(owner) &&
+            owner.name.text === 'exports' &&
+            ts.isIdentifier(owner.expression) &&
+            owner.expression.text === 'module');
+        if (isExportsProperty) {
+          let target: string | null = ts.isIdentifier(expr.right) ? expr.right.text : null;
+          if (
+            target === null &&
+            ts.isCallExpression(expr.right) &&
+            ts.isPropertyAccessExpression(expr.right.expression) &&
+            expr.right.expression.name.text === 'extend'
+          ) {
+            const extended = expr.right.expression.expression;
+            if (ts.isIdentifier(extended)) {
+              target = extended.text;
+            } else if (
+              ts.isPropertyAccessExpression(extended) &&
+              (extended.name.text === 'test' || extended.name.text === 'it') &&
+              ts.isIdentifier(extended.expression)
+            ) {
+              target = extended.expression.text;
+            }
+          }
+          model.bindings.set(exportName, target === null ? { kind: 'unresolvable' } : { kind: 'alias', target });
+          model.exports.set(exportName, { local: exportName });
+        }
+      }
       if (
         ts.isBinaryExpression(expr) &&
         expr.operatorToken.kind === ts.SyntaxKind.EqualsToken &&

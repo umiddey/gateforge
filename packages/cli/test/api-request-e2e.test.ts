@@ -30,6 +30,7 @@ const TITLE_PAGE_REQUEST = 'page.request alone is not UI evidence';
 const TITLE_CONTEXT_REQUEST = 'context.request alone is not UI evidence';
 const TITLE_EVALUATE_FETCH = 'page evaluate fetch is not UI evidence';
 const TITLE_EVALUATE_APP = 'page evaluate app function is not UI evidence';
+const TITLE_EVALUATE_HIDDEN = 'computed page evaluate fetch is not UI evidence';
 const TITLE_APP_ASYNC = 'app async handler remains UI evidence';
 
 /** The endpoint the witness must observe (resource name is deterministic). */
@@ -54,6 +55,12 @@ const EVAL_STATUS = `tenant.${EVAL_RESOURCE}:http:response-status-ok`;
 const EVAL_APP_RESOURCE = endpointResourceName('GET', '/api/eval-app');
 const EVAL_APP_REQUEST = `tenant.${EVAL_APP_RESOURCE}:http:request-observed`;
 const EVAL_APP_STATUS = `tenant.${EVAL_APP_RESOURCE}:http:response-status-ok`;
+const EVAL_HIDDEN_RESOURCE = endpointResourceName('GET', '/api/eval-hidden');
+const EVAL_HIDDEN_REQUEST = `tenant.${EVAL_HIDDEN_RESOURCE}:http:request-observed`;
+const EVAL_HIDDEN_STATUS = `tenant.${EVAL_HIDDEN_RESOURCE}:http:response-status-ok`;
+const UNREADABLE_RESOURCE = endpointResourceName('GET', '/api/unreadable');
+const UNREADABLE_REQUEST = `tenant.${UNREADABLE_RESOURCE}:http:request-observed`;
+const UNREADABLE_STATUS = `tenant.${UNREADABLE_RESOURCE}:http:response-status-ok`;
 const ASYNC_RESOURCE = endpointResourceName('GET', '/api/app-async');
 const ASYNC_REQUEST = `tenant.${ASYNC_RESOURCE}:http:request-observed`;
 const ASYNC_STATUS = `tenant.${ASYNC_RESOURCE}:http:response-status-ok`;
@@ -123,9 +130,6 @@ test('${TITLE_CONTEXT_REQUEST}', async ({ page, context }) => {
 `;
 
 const EVALUATE_FETCH_SPEC = `const { test } = require('./support/test.cjs');
-// This wrapper shape is invisible to the static scan today; if the scan
-// learns to follow wrappers, this scenario may be refused statically first,
-// then assert not-satisfied with either reason.
 test('${TITLE_EVALUATE_FETCH}', async ({ page }) => {
   await page.goto('/');
   await page.evaluate(() => fetch('/api/eval-fetch'));
@@ -133,12 +137,17 @@ test('${TITLE_EVALUATE_FETCH}', async ({ page }) => {
 `;
 
 const EVALUATE_APP_SPEC = `const { test } = require('./support/test.cjs');
-// This wrapper shape is invisible to the static scan today; if the scan
-// learns to follow wrappers, this scenario may be refused statically first,
-// then assert not-satisfied with either reason.
 test('${TITLE_EVALUATE_APP}', async ({ page }) => {
   await page.goto('/');
   await page.evaluate(() => window.appAsync());
+});
+`;
+
+const EVALUATE_HIDDEN_SPEC = `const { test } = require('./support/test.cjs');
+test('${TITLE_EVALUATE_HIDDEN}', async ({ page }) => {
+  await page.goto('/');
+  const run = 'evaluate';
+  await page[run]("fetch('/api/eval-hidden')");
 });
 `;
 
@@ -198,7 +207,9 @@ export default {
     route('context_request_get', 'GET', '/api/context-request', 14);
     route('eval_get', 'GET', '/api/eval-fetch', 15);
     route('eval_app_get', 'GET', '/api/eval-app', 16);
-    route('async_get', 'GET', '/api/app-async', 17);
+    route('eval_hidden_get', 'GET', '/api/eval-hidden', 17);
+    route('unreadable_get', 'GET', '/api/unreadable', 18);
+    route('async_get', 'GET', '/api/app-async', 19);
     return { resources, unresolved: [], findings: [], classificationSignals };
   },
 };
@@ -238,6 +249,8 @@ async function startApiApp(): Promise<{
         path === '/api/context-request' ||
         path === '/api/eval-fetch' ||
         path === '/api/eval-app' ||
+        path === '/api/eval-hidden' ||
+        path === '/api/unreadable' ||
         path === '/api/app-async')
     ) {
       response.setHeader('content-type', 'application/json');
@@ -320,13 +333,16 @@ describe('witnessed API request channel through the actual CLI', () => {
           // This fixture claims transport contracts only: the strict
           // fixture's accounts adapter would be a stale reference, so the
           // config points at an EMPTY adapters directory instead.
-          '.gateforge.yml': `${GATEFORGE_YML.replace('adapters: .gateforge/adapters', 'adapters: .gateforge/adapters-api')}runtime: .gateforge/runtime.yml\n`,
+          '.gateforge.yml': `${GATEFORGE_YML.replace('adapters: .gateforge/adapters', 'adapters: .gateforge/adapters-api').replace('exclude: []', "exclude: ['specs/unreadable.spec.js']")}runtime: .gateforge/runtime.yml\n`,
           '.gateforge/adapters-api/.gitkeep': '',
           '.gateforge/runtime.yml': 'schemaVersion: 1\nenvAllowlist: [TEST_SERVICE_URL]\n',
           'specs/support/test.cjs': TEST_WRAPPER,
           'specs/eval-fetch.spec.cjs': EVALUATE_FETCH_SPEC,
           'specs/eval-app.spec.cjs': EVALUATE_APP_SPEC,
+          'specs/eval-hidden.spec.cjs': EVALUATE_HIDDEN_SPEC,
           'specs/app-async.spec.js': APP_ASYNC_SPEC,
+          'specs/unreadable.spec.js':
+            `import { test } from '@gate-forge/pack-playwright/fixture';\ntest('unreadable list-only claim', async ({ page }) => { await page.goto('/'); });\n`,
           '.gateforge/fixture-detector.mjs': API_DETECTOR,
           '.gateforge/policies.yml':
             'schemaVersion: 1\npolicies:\n  - id: items-observed\n    when:\n      kind: http.endpoint\n    require: [http:request-observed, http:response-status-ok]\n',
@@ -406,6 +422,24 @@ tests:
     kind: observed-e2e
     claims: ['${EVAL_APP_REQUEST}', '${EVAL_APP_STATUS}']
     reason: page.evaluate requests are not app UI actions.
+  - key: playwright:chromium:specs/eval-hidden.spec.cjs:${TITLE_EVALUATE_HIDDEN}
+    selector:
+      runner: playwright
+      project: chromium
+      file: specs/eval-hidden.spec.cjs
+      titlePath: ['${TITLE_EVALUATE_HIDDEN}']
+    kind: observed-e2e
+    claims: ['${EVAL_HIDDEN_REQUEST}', '${EVAL_HIDDEN_STATUS}']
+    reason: Computed page evaluation starts test-code traffic, not an app UI action.
+  - key: playwright:chromium:specs/unreadable.spec.js:unreadable list-only claim
+    selector:
+      runner: playwright
+      project: chromium
+      file: specs/unreadable.spec.js
+      titlePath: ['unreadable list-only claim']
+    kind: observed-e2e
+    claims: ['${UNREADABLE_REQUEST}', '${UNREADABLE_STATUS}']
+    reason: This excluded source fixture must not be trusted as scanned.
   - key: playwright:chromium:specs/app-async.spec.js:${TITLE_APP_ASYNC}
     selector:
       runner: playwright
@@ -434,17 +468,18 @@ tests:
           GATEFORGE_APPROVED_POLICY_DIGEST: trustedPolicyDigestForConfig(repo.root, loadConfigAt(repo.root)),
         };
         const run = await runCliProcess(repo.root, runEnv, ['test-gates', '--changed', '--format', 'json']);
-        const observed = `${run.stdout}\n${run.stderr}`;
         const report = JSON.parse(run.stdout) as {
           verdicts: Array<{ obligationId: string; verdict: string; reason?: string }>;
           execution: { selectedTests: { selected: number; passed: number; failed: number } };
+          blocking?: Array<{ cause?: string; detail?: string; name?: string }>;
         };
+        const observed = `${run.stdout}\n${run.stderr}`;
         const records = JSON.parse(readFileSync(repo.path('.gateforge/test-gates/records.json'), 'utf8')) as LedgerRecord[];
-        const evalFetchExchange = records
+        const evalHiddenExchange = records
           .filter((record) => record.kind === 'http.observed' && record.payload?.channel === 'observe')
           .flatMap((record) => record.payload?.exchanges ?? [])
-          .find((exchange) => exchange.url?.endsWith('/api/eval-fetch'));
-        expect(evalFetchExchange?.initiator, observed).toBe('test-code');
+          .find((exchange) => exchange.url?.endsWith('/api/eval-hidden'));
+        expect(evalHiddenExchange?.initiator, observed).toBe('test-code');
         const appAsyncExchange = records
           .filter((record) => record.kind === 'http.observed' && record.payload?.channel === 'observe')
           .flatMap((record) => record.payload?.exchanges ?? [])
@@ -478,10 +513,26 @@ tests:
           const verdict = report.verdicts.find((item) => item.obligationId === obligationId);
           expect(verdict?.reason ?? '', obligationId).toContain('the test called this endpoint directly from test code');
         }
-        const testInitiatedClaims = [
-          EVAL_REQUEST, EVAL_STATUS, EVAL_APP_REQUEST, EVAL_APP_STATUS,
-        ];
-        for (const obligationId of testInitiatedClaims) {
+        for (const obligationId of [EVAL_REQUEST, EVAL_STATUS, EVAL_APP_REQUEST, EVAL_APP_STATUS]) {
+          const verdict = report.verdicts.find((item) => item.obligationId === obligationId);
+          expect(verdict, observed).toMatchObject({ verdict: 'missing' });
+          const refusal = report.blocking?.find(
+            (entry) => entry.cause === 'TEST_MAPPING_AMBIGUOUS' && entry.name === obligationId,
+          );
+          expect(refusal?.detail ?? '', observed).toContain('PAGE_OBSERVATION_TAMPER_RISK');
+        }
+        const unreadableProblem = report.blocking?.find(
+          (entry) => entry.cause === 'TEST_KIND_UNKNOWN' && entry.name === UNREADABLE_REQUEST,
+        );
+        const unreadableDetail = "Gateforge could not read the code of test 'playwright:chromium:specs/unreadable.spec.js:unreadable list-only claim'";
+        expect(unreadableProblem?.detail ?? '', observed).toContain(unreadableDetail);
+        for (const obligationId of [UNREADABLE_REQUEST, UNREADABLE_STATUS]) {
+          const verdict = report.verdicts.find((item) => item.obligationId === obligationId);
+          expect(verdict, observed).toMatchObject({ verdict: 'missing' });
+          expect(verdict?.reason ?? '', observed).toContain(unreadableDetail);
+          expect(verdict?.reason ?? '', observed).not.toContain('no claim declares');
+        }
+        for (const obligationId of [EVAL_HIDDEN_REQUEST, EVAL_HIDDEN_STATUS]) {
           const verdict = report.verdicts.find((item) => item.obligationId === obligationId);
           expect(verdict, observed).toMatchObject({ verdict: 'missing' });
           expect(verdict?.reason ?? '', observed).toContain('the request was started by test code running in the page');
@@ -491,7 +542,7 @@ tests:
             .toMatchObject({ verdict: 'satisfied' });
         }
         expect(run.code, observed).toBe(1);
-        expect(report.execution.selectedTests).toMatchObject({ selected: 9, passed: 9, failed: 0 });
+        expect(report.execution.selectedTests).toMatchObject({ selected: 11, passed: 11, failed: 0 });
         expect(app.requestsByPath.get('/api/items')).toBe(2);
         expect(app.requestsByPath.get('/api/setup')).toBe(6);
         expect(app.requestsByPath.get('/api/seed')).toBe(1);
@@ -500,6 +551,7 @@ tests:
         expect(app.requestsByPath.get('/api/context-request')).toBe(1);
         expect(app.requestsByPath.get('/api/eval-fetch')).toBe(1);
         expect(app.requestsByPath.get('/api/eval-app')).toBe(1);
+        expect(app.requestsByPath.get('/api/eval-hidden')).toBe(1);
         expect(app.requestsByPath.get('/api/app-async')).toBe(1);
         expect(app.requestsByPath.get('/api/ui-items')).toBe(1);
         const recordedPaths = recordedExchangePaths(records);
@@ -509,6 +561,7 @@ tests:
         expect(recordedPaths.some((path) => path.endsWith('/api/ui-items'))).toBe(true);
         expect(recordedPaths.some((path) => path.endsWith('/api/eval-fetch'))).toBe(true);
         expect(recordedPaths.some((path) => path.endsWith('/api/eval-app'))).toBe(true);
+        expect(recordedPaths.some((path) => path.endsWith('/api/eval-hidden'))).toBe(true);
         expect(recordedPaths.some((path) => path.endsWith('/api/app-async'))).toBe(true);
         const outcomesDoc = JSON.parse(readFileSync(repo.path('.gateforge/test-gates/runner-outcomes.json'), 'utf8')) as {
           outcomes?: Array<{ testId?: string; titlePath?: string[] }>;
