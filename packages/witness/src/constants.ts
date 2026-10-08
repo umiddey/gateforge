@@ -213,6 +213,22 @@ export const SERVER_E2E_TEST_KIND = 'server-e2e';
  */
 export const OBSERVE_CHANNEL = 'observe';
 
+/**
+ * Payload discriminant the witness stamps on the ONE run-scoped record
+ * carrying the hook-scope exchanges the fixture reported (0.13.9). The
+ * verdict engine reads `channel: 'setup'` records purely for the
+ * missing-claim diagnosis — a setup record can never satisfy anything.
+ * Mirrors `SETUP_CHANNEL` in core's `pack-verifiers.ts` — keep the two
+ * in lockstep.
+ */
+export const SETUP_CHANNEL = 'setup';
+
+/**
+ * Upper bound on the distinct hook-scope exchanges one run keeps (the
+ * diagnosis needs the first few, never the whole hook traffic).
+ */
+export const SETUP_EXCHANGES_CAP = 8;
+
 /** The mapping kind that unlocks the Observe channel. */
 export const OBSERVED_E2E_TEST_KIND = 'observed-e2e';
 

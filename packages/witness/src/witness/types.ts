@@ -862,7 +862,7 @@ export interface EvidenceAdapter {
   /** Projects the raw body onto {entityId, fields} — stamped from the RESPONSE. */
   normalize: (body: unknown) => { entityId: unknown; fields: unknown };
   /** Removal semantics the adapter's resource uses. */
-  deletion: 'hard' | 'archive';
+  deletion?: 'hard' | 'archive';
   /** Fingerprint the adapter's target environment must present. */
   environmentFingerprint: string;
   /** Optional base override for THIS adapter's reads. */
@@ -1227,6 +1227,43 @@ export interface SessionPageOriginRequest {
  */
 export interface SessionPageOriginResponse {
   recorded: true;
+}
+
+/** One hook-scope exchange the fixture observed (setup traffic, never credited). */
+export interface SetupExchangeReport {
+  /** Uppercase HTTP method of the call. */
+  method: string;
+  /** The URL as the call resolved (absolute, or a bare path without a base). */
+  url: string;
+  /** The response status the app answered. */
+  status: number;
+}
+
+/**
+ * `POST /sessions/setup-exchanges` request (session-authenticated,
+ * 0.13.9): the fixture reports the app-origin calls a HOOK-created (or
+ * module-scope) API context made. That traffic never rides any session
+ * proxy, so the witness could never see it — the report is the only way
+ * a claim whose call went through such a context can name the cause.
+ *
+ * The report is RUN-SCOPED witness memory: it binds to no session's
+ * evidence, can never satisfy anything, and reaches the verdict engine
+ * only through the ONE witnessed `channel: 'setup'` record the observe
+ * finalize stamps.
+ */
+export interface SessionSetupExchangesRequest {
+  /** The session the report rides (its own credential; run-scoped storage). */
+  sessionId: string;
+  /** The session's witness-issued secret; authorizes this call alone. */
+  sessionToken: string;
+  /** The exchanges this call observed since the last one (may grow a set). */
+  exchanges: SetupExchangeReport[];
+}
+
+/** `POST /sessions/setup-exchanges` response: how many exchanges are kept. */
+export interface SessionSetupExchangesResponse {
+  recorded: true;
+  kept: number;
 }
 
 /**

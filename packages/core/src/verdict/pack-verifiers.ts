@@ -1087,11 +1087,47 @@ function gradeObservedTransport(input: ClaimEvidenceInput): ClaimOutcome | null 
  *   ClaimOutcome: satisfied only for a witnessed exchange matching the
  *   endpoint shape (plus 2xx for status-ok), on either channel.
  */
+const SETUP_CHANNEL = 'setup';
+
+/** Names a hook-scoped call without treating it as transport evidence. */
+function setupTrafficDiagnosis(input: ClaimEvidenceInput): string | null {
+  const candidates = (input.httpRoutes ?? []) as readonly HttpRouteCandidate[];
+  for (const entry of input.evidence) {
+    if (
+      entry.trust !== 'witnessed' ||
+      entry.record.kind !== HTTP_OBSERVED_KIND
+    ) continue;
+    const payload = payloadOf(entry.record);
+    if (payload?.['channel'] !== SETUP_CHANNEL || !Array.isArray(payload['exchanges'])) continue;
+    for (const raw of payload['exchanges']) {
+      if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) continue;
+      const method = raw['method'];
+      if (typeof method !== 'string' || typeof raw['url'] !== 'string') continue;
+      let requestUrl: string = raw['url'];
+      try {
+        if (/^https?:\/\//i.test(requestUrl)) requestUrl = new URL(requestUrl).pathname;
+      } catch {
+        continue;
+      }
+      const path = interpretObservedPath(requestUrl);
+      if (!path.ok) continue;
+      const attributed = resolveHttpRoute(method, path.path, candidates, input.obligation.resourceId);
+      if (attributed.status === 'match') {
+        return `'${input.obligation.id}': an API request context created in a hook (beforeAll/beforeEach) made this request; hook traffic is setup and never credited. Open the context in the test body`;
+      }
+    }
+  }
+  return null;
+}
 function gradeTransportObservation(input: ClaimEvidenceInput): ClaimOutcome {
+
   const anchored = gradeAnchoredTransport(input);
   if (anchored.status !== 'missing') return anchored;
   const observed = gradeObservedTransport(input);
-  if (observed === null) return anchored;
+  const setupDiagnosis = setupTrafficDiagnosis(input);
+  if (observed === null) {
+    return setupDiagnosis === null ? anchored : { status: 'missing', reason: setupDiagnosis, recordIds: [] };
+  }
   if (observed.status === 'satisfied') return observed;
   if (observed.status === 'invalid') return observed;
   return {

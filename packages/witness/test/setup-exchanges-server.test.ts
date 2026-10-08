@@ -35,7 +35,10 @@ let adaptersDir: string;
 
 /** The fixture app: exists only to satisfy the attestation surface. */
 const app: Server = createServer((_req, res) => {
-  res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+  res.writeHead(200, {
+    'content-type': 'application/json; charset=utf-8',
+    'x-gateforge-env-fingerprint': 'setup-exchanges-fixture-v1',
+  });
   res.end('{}');
 });
 let appBaseUrl: string;

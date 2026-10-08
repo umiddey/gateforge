@@ -168,6 +168,64 @@ export function wrapApiRequestContext(
     [Symbol.asyncDispose]: () => underlying.dispose(),
   };
 }
+/** A hook-scope call observed outside the session proxy (diagnostic only). */
+export interface SetupExchange {
+  method: string;
+  url: string;
+  status: number;
+}
+
+export interface WrapSetupRequestContextOptions {
+  baseURL?: string;
+  onExchange: (exchange: SetupExchange) => void;
+}
+
+/**
+ * Reports direct app-origin API calls made by setup-scoped contexts.
+ * Reporting is best-effort and cannot change the underlying response.
+ */
+export function wrapSetupRequestContext(
+  underlying: APIRequestContext,
+  options: WrapSetupRequestContextOptions,
+): APIRequestContext {
+  const invoke = async (
+    method: string,
+    target: string,
+    call: () => Promise<APIResponse>,
+  ): Promise<APIResponse> => {
+    const response = await call();
+    try {
+      const resolved = options.baseURL === undefined ? new URL(target) : new URL(target, options.baseURL);
+      const appOrigin = options.baseURL === undefined ? null : new URL(options.baseURL).origin;
+      if (
+        (resolved.protocol === 'http:' || resolved.protocol === 'https:') &&
+        (appOrigin === null ? isLoopbackHostname(resolved.hostname) : resolved.origin === appOrigin)
+      ) {
+        options.onExchange({ method, url: resolved.href, status: response.status() });
+      }
+    } catch {
+      // A URL that cannot be resolved is not useful for diagnosis.
+    }
+    return response;
+  };
+  const wrapped = {
+    fetch: (url: Parameters<APIRequestContext['fetch']>[0], verbOptions: ApiVerbOptions) =>
+      typeof url === 'string'
+        ? invoke('GET', url, () => underlying.fetch(url, verbOptions))
+        : underlying.fetch(url, verbOptions),
+    get: (url: string, verbOptions: ApiVerbOptions) => invoke('GET', url, () => underlying.get(url, verbOptions)),
+    post: (url: string, verbOptions: ApiVerbOptions) => invoke('POST', url, () => underlying.post(url, verbOptions)),
+    put: (url: string, verbOptions: ApiVerbOptions) => invoke('PUT', url, () => underlying.put(url, verbOptions)),
+    patch: (url: string, verbOptions: ApiVerbOptions) => invoke('PATCH', url, () => underlying.patch(url, verbOptions)),
+    delete: (url: string, verbOptions: ApiVerbOptions) => invoke('DELETE', url, () => underlying.delete(url, verbOptions)),
+    head: (url: string, verbOptions: ApiVerbOptions) => invoke('HEAD', url, () => underlying.head(url, verbOptions)),
+    dispose: (verbOptions: Parameters<APIRequestContext['dispose']>[0]) => underlying.dispose(verbOptions),
+    storageState: (verbOptions: Parameters<APIRequestContext['storageState']>[0]) => underlying.storageState(verbOptions),
+    [Symbol.asyncDispose]: () => underlying.dispose(),
+  };
+  return wrapped as APIRequestContext;
+}
+
 
 /**
  * Rehosts the owned APIRequestContext of a witnessed page's context

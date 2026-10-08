@@ -179,14 +179,16 @@ import {
   HTTP_OBSERVED_KIND,
   KNOWN_RECORD_KINDS,
   LOOPBACK_HOSTNAME,
-  OBSERVED_KIND,
   OBSERVED_EXCHANGES_CAP,
+  OBSERVED_KIND,
   PERSISTENCE_KIND,
   RUN_HEADER,
+  SETUP_CHANNEL,
+  SETUP_EXCHANGES_CAP,
   VERIFIER_HEADER,
 } from '../constants.js';
 import { PageObserverRegistrationError, registerPageObserver, sweepPageVisits } from './page-observer-registration.js';
-import { loadAdapters, makeAdapterContext } from './adapter-registry.js';
+import { AdapterRegistryError, loadAdapters, makeAdapterContext } from './adapter-registry.js';
 import {
   AttestationError,
   assertLoopback,
@@ -617,6 +619,22 @@ interface WitnessState {
    * path.
    */
   sessionPageOrigins: Map<string, SessionPageOriginReport>;
+  /**
+   * Hook-scope exchanges the fixture reported (0.13.9): the app-origin
+   * calls a hook-created or module-scope API context made. RUN-scoped —
+   * unlike the per-session origin diagnostics beside it — because a
+   * hook context outlives any one session window and the diagnosis is
+   * about the RUN's suite shape, not one test.
+   *
+   * Witness MEMORY only, deduplicated by `(method, url, status)`,
+   * bounded at SETUP_EXCHANGES_CAP. It reaches the verdict engine ONLY
+   * as the ONE witnessed `channel: 'setup'` record the observe finalize
+   * stamps (see `setupRecordIssued`); no claim can ever satisfy from
+   * it.
+   */
+  setupExchanges: Array<{ method: string; url: string; status: number }>;
+  /** Whether the run's setup record has already been stamped. */
+  setupRecordIssued: boolean;
   pageObservers: Map<string, { flush(): Promise<void>; close(): Promise<void> }>;
   pageObservationRecords: Map<string, string[]>;
   /**
@@ -1564,6 +1582,8 @@ export async function startWitness(options: WitnessOptions): Promise<WitnessHand
     workerSessions: new Map(),
     sessionIdentities: new Map(),
     sessionPageOrigins: new Map(),
+    setupExchanges: [],
+    setupRecordIssued: false,
     pageObservers: new Map(),
     // The engine browser is OPTIONAL here and required only by the
     // ENGINE-BROWSER proof channel: this package is runner-neutral and
@@ -2465,6 +2485,11 @@ async function handleRequest(
       await handleSessionPageOrigins(state, res, (await readBody(req)) as Record<string, unknown>);
       return;
     }
+    if (req.method === 'POST' && path === '/sessions/setup-exchanges') {
+      await handleSessionSetupExchanges(state, res, (await readBody(req)) as Record<string, unknown>);
+      return;
+    }
+
     if (req.method === 'POST' && path === '/sessions/page-observer') {
       const body = (await readBody(req)) as SessionPageObserverRequest;
       try {
@@ -4113,6 +4138,45 @@ async function handleSessionPageOrigins(
   sendJson(res, 200, { recorded: true as const });
 }
 
+/** Stores bounded, deduplicated hook-scope exchanges in run memory. */
+async function handleSessionSetupExchanges(
+  state: WitnessState,
+  res: ServerResponse,
+  body: Record<string, unknown>,
+): Promise<void> {
+  if (!isPlainObject(body)) throw new HttpError(400, 'setup exchange report body must be an object');
+  requireOpenSession(state, body);
+  const reported = body['exchanges'];
+  if (!Array.isArray(reported) || reported.length === 0) {
+    throw new HttpError(400, 'setup exchange report requires at least one exchange');
+  }
+  const exchanges = reported.map((item) => {
+    if (
+      !isPlainObject(item) ||
+      typeof item['method'] !== 'string' ||
+      !/^[A-Z]+$/.test(item['method']) ||
+      typeof item['url'] !== 'string' ||
+      item['url'].length === 0 ||
+      typeof item['status'] !== 'number' ||
+      !Number.isInteger(item['status']) ||
+      item['status'] < 100 ||
+      item['status'] > 599
+    ) {
+      throw new HttpError(400, 'each setup exchange must have an uppercase method, URL, and HTTP status');
+    }
+    return { method: item['method'], url: item['url'], status: item['status'] };
+  });
+  for (const exchange of exchanges) {
+    if (state.setupExchanges.some((prior) =>
+      prior.method === exchange.method && prior.url === exchange.url && prior.status === exchange.status
+    )) continue;
+    if (state.setupExchanges.length >= SETUP_EXCHANGES_CAP) break;
+    state.setupExchanges.push(exchange);
+  }
+  sendJson(res, 200, { recorded: true as const, kept: state.setupExchanges.length });
+}
+
+
 /**
  * One reported origin, parsed and reduced to its origin form. A value
  * that is not an absolute http(s) URL is refused rather than repaired:
@@ -5548,6 +5612,15 @@ async function handleObserveFinalize(
   // transport record carries. Persistence-vs-persistence consumption is
   // untouched: it still matches against the LIVE log, so one exchange
   // can never credit two persistence claims.
+  if (!state.setupRecordIssued && state.setupExchanges.length > 0 && session.claims.length > 0) {
+    const claimId = [...session.claims].sort(compareStrings)[0] as string;
+    issueRecord(state, claimId, HTTP_OBSERVED_KIND, session.testId, {
+      channel: SETUP_CHANNEL,
+      exchanges: state.setupExchanges.map((exchange) => ({ ...exchange })),
+    }, 'engine-observed');
+    state.setupRecordIssued = true;
+  }
+
   const transport = transportSnapshot(state, session);
   const claims = session.claims.filter((claim) => state.observeDeclarations?.has(claim));
   for (const claimId of claims) {

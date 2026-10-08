@@ -33,7 +33,7 @@ import {
   type EvidenceApi,
   type SurfaceDescriptor,
 } from './evidence.js';
-import { rehostContextRequest, sessionApiRouting, wrapApiRequestContext } from './api-request.js';
+import { rehostContextRequest, sessionApiRouting, wrapApiRequestContext, wrapSetupRequestContext } from './api-request.js';
 import { WitnessClient, type SessionPageObserverFlushRequest } from './witness-client.js';
 import type { SessionCredential } from '../witness/types.js';
 const browserDebuggingPorts = new WeakMap<Browser, number>();
@@ -382,6 +382,19 @@ const extended = browserRunner.extend<EvidenceFixtures>({
     if (session === null) {
       throw new Error(`No supervisor-issued witness session for ${testInfo.testId}.`);
     }
+    if (workerHookDepth > 0) {
+      await use(wrapSetupRequestContext(request, {
+        ...(projectBaseURL(testInfo) === undefined ? {} : { baseURL: projectBaseURL(testInfo) }),
+        onExchange: (exchange) => {
+          void witness.reportSessionSetupExchanges({
+            sessionId: session.sessionId,
+            sessionToken: session.sessionToken,
+            exchanges: [exchange],
+          }).catch(() => undefined);
+        },
+      }));
+      return;
+    }
     if (session.proxyUrl === null) {
       // No proxy channel exists for this session: nothing can be
       // witnessed, and unwrapped behavior is today's behavior.
@@ -510,14 +523,35 @@ export const request = {
     if (!process.env[ENV_WITNESS_URL]) return await playwrightRequest.newContext(options);
     const appBaseURL = process.env['GATEFORGE_APP_BASE_URL']?.trim();
     if (appBaseURL === undefined || appBaseURL === '') return await playwrightRequest.newContext(options);
-    const directContext = (testInfo?: TestInfo): Promise<APIRequestContext> => {
+    const directContext = async (testInfo?: TestInfo): Promise<APIRequestContext> => {
       // Direct (setup) traffic. The project's own base URL rides along
       // when the caller gave none, so a relative setup call behaves
       // exactly as the suite's config says it should.
       const fallbackBaseURL = options.baseURL ?? (testInfo === undefined ? undefined : projectBaseURL(testInfo));
-      return playwrightRequest.newContext(
+      const context = await playwrightRequest.newContext(
         fallbackBaseURL === undefined ? options : { ...options, baseURL: fallbackBaseURL },
       );
+      return wrapSetupRequestContext(context, {
+        ...(fallbackBaseURL === undefined ? {} : { baseURL: fallbackBaseURL }),
+        onExchange: (exchange) => {
+          let owner = testInfo;
+          if (owner === undefined) {
+            try {
+              owner = base.info();
+            } catch {
+              return;
+            }
+          }
+          void resolveSessionBounded(new WitnessClient(), owner.testId, owner.workerIndex, 0).then((session) => {
+            if (session === null) return;
+            void new WitnessClient().reportSessionSetupExchanges({
+              sessionId: session.sessionId,
+              sessionToken: session.sessionToken,
+              exchanges: [exchange],
+            }).catch(() => undefined);
+          }).catch(() => undefined);
+        },
+      });
     };
     let testInfo: TestInfo;
     try {
