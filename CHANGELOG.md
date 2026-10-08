@@ -1,5 +1,48 @@
 # Changelog
 
+## Unreleased
+
+Theme: stop refusing real UI tests. Measured on real suites, 169/169 of
+one app's tests and 636 rows of another carried a false
+`PAGE_OBSERVATION_TAMPER_RISK`, refusing every E2E claim they carried.
+Each fix below lets through only what is PROVEN harmless; anything
+unclear stays flagged.
+
+- **Discovery: parameterized and reference-form storage-only init
+  scripts are not tampers (F2).** A storage-only `addInitScript` may
+  take parameters (with exactly one argument per parameter — they are
+  serialized data inside the script) and may be passed as a reference
+  to a locally declared function, with a body of storage calls keyed
+  and valued by literals, parameters, declared constants, and inert
+  builtins (`JSON.stringify`, `String`, `Date.now()`,
+  `new Date().toISOString()`) under `if`/`try`/`catch` guards. Arity
+  mismatches, template forms, unresolved identifiers, network/DOM
+  statements, and `page.evaluate` of the same function stay tampers.
+- **Discovery: an imported helper's tamper risk is attributed to the
+  tests that reach it (F3).** A tamper written in the spec, or one that
+  executes at import time anywhere in the import graph, still flags
+  every test of the file. Otherwise the test's body — and the fixture
+  chain its registration name resolves through — is followed: a direct
+  call to a risky helper flags that test at the helper's tamper line,
+  through transitive imports and re-exports. Helpers passed around as
+  values, dynamic namespace access, and unprovable shapes keep today's
+  file-wide flag.
+- **Discovery: an existing `.json` import is a data module (F6).** No
+  unresolved-import row, no parse, no test bindings; the spec around it
+  is read. A `.json` specifier naming nothing stays a visible row.
+- **`evaluate` is no longer a static tamper signal in chromium projects
+  (F7).** In Chromium, requests started by evaluated test code are
+  refused at runtime, so `evaluate` itself is no longer refused when
+  reading the code: `page.evaluate`, `locator.evaluate`,
+  `evaluateHandle`, `$eval`/`$$eval` stop flagging a row whose project
+  the runner resolved to chromium. firefox/webkit rows keep the flag —
+  the runtime rule cannot see there — as does every project whose
+  browser is undetermined (fail closed). Every other tamper call
+  (route, fulfill, exposeFunction, setContent, CDP sessions, non-
+  storage-only init scripts) refuses exactly as before, and an
+  evaluate-only helper no longer hides a later route tamper in the same
+  file.
+
 ## 0.13.9
 
 Theme: Gateforge exists to catch fake tests. This release closes three ways a

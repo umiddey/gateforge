@@ -1279,7 +1279,28 @@ fixture (channel `observed`); after the tests, the referee sweeps only pages
 without a clean observed record (channel `swept`). A clean test visit always
 takes precedence over the sweep. Both channels use the same route, redirect,
 crash, error-marker, and API-response grader. Browser API tampering in tests
-is refused as `PAGE_OBSERVATION_TAMPER_RISK`.
+is refused as `PAGE_OBSERVATION_TAMPER_RISK`. Three things are not
+tampers. A storage-only init script — `addInitScript` whose body only
+reads and writes `localStorage`/`sessionStorage` (`setItem`, `getItem`,
+`removeItem`, `clear`), keyed and valued by literals, its own
+parameters (one `addInitScript` argument per parameter), declared
+constants, and inert builtins (`JSON.stringify`, `String`,
+`Date.now()`, `new Date().toISOString()`), under `if`/`try`/`catch`
+guards, passed directly or as a reference to a locally declared
+function — mutates nothing the witness cannot verify from its
+independent observer. And the risk follows the test, not the file: a
+tamper inside an imported helper flags only the tests whose body (or
+registration fixture) provably reaches it; a tamper written in the
+spec, one that executes at import time, and any shape whose
+reachability cannot be proven flag the whole file as before. Finally,
+in Chromium, requests started by evaluated test code are refused at
+runtime, so `evaluate` itself (`page.evaluate`, `locator.evaluate`,
+`evaluateHandle`, `$eval`/`$$eval`) is no longer refused when reading
+the code — in projects the runner resolved to chromium. firefox and
+webkit projects keep the static flag (the runtime rule cannot see
+there), as does every project whose browser is undetermined. Route
+interception, function exposure, content replacement, CDP sessions,
+and non-storage-only init scripts refuse on every browser.
 
 An API request counts as settled only when its response BODY finished
 (Playwright `requestfinished`), never at the response headers: a failed or
