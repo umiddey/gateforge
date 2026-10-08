@@ -499,6 +499,13 @@ catalog, lists up to five of that file's real keys.
   strong code-signal inference. In particular, `api-e2e` is not E2E evidence
   for observed claims and cannot be reclassified as `observed-e2e`;
   `tests mark` refuses such contradictions with both source locations.
+
+- Static discovery follows custom Playwright fixtures to their building
+  blocks. A fixture backed by `browser.newContext()` / `.newPage()` counts
+  as browser evidence; one backed by `request.newContext()` counts as API
+  evidence. Fixture chains are included in kind evidence and API-only
+  fixtures cannot be declared as E2E tests. A fixture the scanner cannot
+  follow remains `unknown`; classification does not change runtime proof.
 - A test that Playwright lists but static discovery did not read cannot
   carry an E2E claim: Gateforge blocks sidecar and native claims for that
   row until code is readable. This is distinct from a scanned test whose

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.13.10 (unreleased)
+
+- **Playwright kinds follow custom fixture definitions.** Fixture parameters
+  are classified from the browser and API building blocks their definitions
+  reach, including fixture-on-fixture chains. API-only fixture evidence is
+  included when an E2E mapping contradicts the inferred kind. Unfollowable
+  fixtures remain `unknown`; runtime proof rules are unchanged.
+
 ## 0.13.9
 
 Theme: Gateforge exists to catch fake tests. This release closes three ways a
