@@ -206,6 +206,14 @@ describe('static discovery', () => {
         '});',
         '',
       ].join('\n'),
+      'e2e/mixed-fixtures.ts': [
+        "import { test as base } from 'playwright/test';",
+        "import { Api } from './api';",
+        'export const test = base.extend({',
+        '  apiAs: async ({}, use) => use(await Api.login()),',
+        '});',
+        '',
+      ].join('\n'),
       'e2e/api.spec.ts': [
         "import { test } from './fixtures';",
         "test('api fixture', async ({ apiAs }) => {});",
@@ -241,6 +249,11 @@ describe('static discovery', () => {
         "test('shadowed page', async ({ page }) => {});",
         '',
       ].join('\n'),
+      'e2e/mixed.spec.ts': [
+        "import { test } from './mixed-fixtures';",
+        "test('browser plus API setup', async ({ page, apiAs }) => {});",
+        '',
+      ].join('\n'),
     });
     const result = scanTestFiles({ cwd: root, include: ['e2e/**/*.spec.ts'], exclude: [] });
     const inferred = new Map(result.entries.map((entry) => [entry.title, inferenceOf(entry).inferredKind]));
@@ -252,6 +265,7 @@ describe('static discovery', () => {
       ['unfollowable fixture', 'unknown'],
       ['shadowed page', 'api-e2e'],
       ['wrapped built-in page', 'browser-e2e'],
+      ['browser plus API setup', 'browser-e2e'],
     ]));
     const apiEntry = rowFor(result.entries, 'e2e/api.spec.ts');
     expect(inferenceOf(apiEntry).kindSignals[0]?.evidence).toContain(

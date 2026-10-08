@@ -111,6 +111,12 @@ const KIND_RULES: ReadonlyArray<{
         return fixture === undefined ? API_FIXTURE_PARAMS.includes(name) : fixture.kind === 'api';
       });
       if (apiParams.length === 0) return null;
+      const customApiParams = apiParams.filter((name) => custom?.[name]?.kind === 'api');
+      const hasBrowser = input.facts.signatureParams.some((name) => {
+        const fixture = custom?.[name];
+        return fixture === undefined ? BROWSER_FIXTURE_PARAMS.has(name) : fixture.kind === 'browser';
+      });
+      if (customApiParams.length > 0 && hasBrowser) return null;
       const chain = custom?.[apiParams[0] ?? '']?.chain;
       return {
         evidence: chain === undefined
