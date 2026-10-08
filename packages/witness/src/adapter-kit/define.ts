@@ -453,7 +453,7 @@ export function defineHttpAdapter(config: HttpAdapterConfig): EvidenceAdapter {
       ? { list: async (ctx: AdapterContext): Promise<unknown[]> => [...(await listEntities(ctx))] }
       : {}),
     normalize,
-    deletion: config.deletion,
+    ...(config.deletion === undefined ? {} : { deletion: config.deletion }),
     environmentFingerprint: config.environmentFingerprint,
     ...(config.fields !== undefined ? { fields: [...config.fields] } : {}),
     ...(config.volatileFields !== undefined

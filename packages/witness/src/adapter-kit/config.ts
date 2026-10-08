@@ -111,7 +111,7 @@ export interface HttpAdapterConfig {
   /** Key identifying the entity when the row has no `id` (default `id`). */
   entityIdKey?: string;
   /** How removal manifests for this resource. */
-  deletion: 'hard' | 'archive';
+  deletion?: 'hard' | 'archive';
   /** Target-environment marker the witness compares (GF-13). */
   environmentFingerprint: string;
   /**

@@ -49,7 +49,10 @@ import type { AdapterContext, EvidenceAdapter, SessionIdentity } from './types.j
  *   AdapterRegistryError: fail-closed load problems — unreadable dir,
  *     unimportable module, or a module missing any contract member.
  */
-export async function loadAdapters(dir: string): Promise<Map<string, EvidenceAdapter>> {
+export async function loadAdapters(
+  dir: string,
+  options: { deleteDisabledAdapters?: ReadonlySet<string> } = {},
+): Promise<Map<string, EvidenceAdapter>> {
   const registry = new Map<string, EvidenceAdapter>();
   let entries: string[];
   try {
@@ -74,7 +77,9 @@ export async function loadAdapters(dir: string): Promise<Map<string, EvidenceAda
       );
     }
     const module = await importAdapter(dir, entry, name);
-    const adapter = validateAdapter(module, name);
+    const adapter = validateAdapter(module, name, {
+      deleteDisabled: options.deleteDisabledAdapters?.has(name) ?? false,
+    });
     registry.set(name, adapter);
   }
   return Object.freeze(registry);
@@ -114,7 +119,11 @@ async function importAdapter(
  *   wrong. Optional `baseUrl`, `identity`, and `fields` refine read and
  *   create-proof capabilities without changing adapters that omit them.
  */
-export function validateAdapter(module: unknown, name: string): EvidenceAdapter {
+export function validateAdapter(
+  module: unknown,
+  name: string,
+  options: { deleteDisabled?: boolean } = {},
+): EvidenceAdapter {
   if (typeof module !== 'object' || module === null) {
     throw new AdapterRegistryError(
       `adapter '${name}' must default-export an object {read, normalize, deletion, environmentFingerprint}`,
@@ -124,7 +133,9 @@ export function validateAdapter(module: unknown, name: string): EvidenceAdapter 
   const problems: string[] = [];
   if (typeof adapter['read'] !== 'function') problems.push('read must be an async function (ctx, id)');
   if (typeof adapter['normalize'] !== 'function') problems.push('normalize must be a function (body) => {entityId, fields}');
-  if (adapter['deletion'] !== 'hard' && adapter['deletion'] !== 'archive') {
+  if (options.deleteDisabled === true) {
+    if (adapter['deletion'] !== undefined) problems.push('deletion must be omitted for a delete-disabled resource');
+  } else if (adapter['deletion'] !== 'hard' && adapter['deletion'] !== 'archive') {
     problems.push("deletion must be 'hard' or 'archive'");
   }
   if (typeof adapter['environmentFingerprint'] !== 'string') {
@@ -191,7 +202,7 @@ export function validateAdapter(module: unknown, name: string): EvidenceAdapter 
   return {
     read: adapter['read'] as EvidenceAdapter['read'],
     normalize: adapter['normalize'] as EvidenceAdapter['normalize'],
-    deletion: adapter['deletion'] as 'hard' | 'archive',
+    ...(adapter['deletion'] === undefined ? {} : { deletion: adapter['deletion'] as 'hard' | 'archive' }),
     environmentFingerprint: adapter['environmentFingerprint'] as string,
     ...(adapter['identity'] !== undefined ? { identity: 'natural-key' as const } : {}),
     baseUrl: adapter['baseUrl'] as string | undefined,

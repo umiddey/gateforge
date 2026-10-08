@@ -1567,6 +1567,12 @@ can DISABLE delete for one exact resource; declaring semantics is the
 other half of the answer, and it needs a pattern because one declaration
 usually covers a whole model tree.
 
+The witness applies this exact-resource lifecycle result to its bound
+adapter: when `delete` is disabled, the adapter omits `deletion`; a
+declared `hard` or `archive` value is rejected as contradictory. A
+resource whose delete remains enabled still requires adapter deletion
+semantics.
+
 `deleteRules` are the answer for a RESOURCE — their `match` names that
 resource's source file, so one declaration answers every DELETE route
 linked to it. They are not the answer for a DELETE ROUTE THAT LINKS NO
@@ -2018,6 +2024,12 @@ action changes a field outside that projection. `check` also reports
 model updateable fields missing from a statically readable projection.
 Adapters without this metadata keep their existing behavior.
 
+An adapter may omit `deletion` only when every resource bound to that
+adapter has delete disabled by its lifecycle classification. In that
+case it must not declare deletion semantics; enabled-delete resources
+still require `hard` or `archive`. The witness resolves this against the
+resource-to-adapter bindings at startup.
+
 Presence alone, contradicted observations, missing pre-observations, or
 absent deltas grade `invalid` — even when every provenance check passes.
 
@@ -2281,6 +2293,12 @@ hooks and module scope (setup stays uncredited). Every app-origin call is
 rehosted onto the session proxy — path, query, headers and body untouched;
 other origins pass through, and a same-host or loopback other origin is
 reported through the same unrouted-origin channel as the page.
+
+For API contexts created in a hook or at module scope, the fixture reports
+app-origin exchanges as run-scoped diagnostics. They never count as proof:
+when such a setup exchange matches a missing HTTP obligation, the reason
+names the setup context and directs the owner to create the context in the
+test body.
 
 Rebasing the shared base is not rewriting a journey: the journeys' own steps,
 assertions and fixtures stay as they are, and only the `test` object they

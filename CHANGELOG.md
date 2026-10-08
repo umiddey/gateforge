@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+- **pack-playwright and witness: diagnose uncredited hook-scope API
+  requests.** App-origin calls made through API contexts created in hooks
+  or at module scope are reported as bounded run-scoped diagnostics. They
+  never satisfy claims; a matching missing HTTP claim now names the setup
+  context and directs the owner to open the context in the test body.
+- **pack-fastapi: preserve registration order across slash variants.**
+  Merged route registrations retain their source order so ambiguous route
+  attribution follows the actual framework registration sequence.
+- **witness: probe composed collection adapters without `readPath`.**
+  The adapter-kit's list-collection probe now exercises the adapter's
+  first page even when it composes the read path internally.
+- **witness: allow omitted deletion semantics for delete-disabled
+  resources.** A bound adapter can omit `deletion` when the resource's
+  lifecycle classification disables delete; declaring deletion semantics
+  for such a resource remains an error.
+
 ## 0.13.8
 
 - **cli: a selected step of a serial journey selects the whole serial

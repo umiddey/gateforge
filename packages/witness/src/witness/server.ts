@@ -1472,9 +1472,29 @@ export async function startWitness(options: WitnessOptions): Promise<WitnessHand
       ? null
       : resolve(cwd, options.classificationsPath);
 
-  const adapters =
-    adaptersDir === null ? new Map<string, EvidenceAdapter>() : await loadAdapters(adaptersDir);
   const classifications = loadClassifications(classificationsPath);
+  const adapterDeleteStates = new Map<string, { disabled: boolean; enabled: boolean }>();
+  for (const classification of Object.values(classifications)) {
+    if (classification.evidenceAdapter === undefined) continue;
+    const state = adapterDeleteStates.get(classification.evidenceAdapter) ?? { disabled: false, enabled: false };
+    if (classification.lifecycle.delete) state.enabled = true;
+    else state.disabled = true;
+    adapterDeleteStates.set(classification.evidenceAdapter, state);
+  }
+  for (const [adapter, state] of adapterDeleteStates) {
+    if (state.disabled && state.enabled) {
+      throw new AdapterRegistryError(
+        `adapter '${adapter}' is shared by resources with conflicting delete lifecycle rules`,
+      );
+    }
+  }
+  const deleteDisabledAdapters = new Set(
+    [...adapterDeleteStates].filter(([, state]) => state.disabled).map(([adapter]) => adapter),
+  );
+  const adapters =
+    adaptersDir === null
+      ? new Map<string, EvidenceAdapter>()
+      : await loadAdapters(adaptersDir, { deleteDisabledAdapters });
 
   const targetBaseUrl = options.targetBaseUrl ?? null;
   // The mount prefix declares how the browser-facing deployment mounts

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { AdapterRegistryError, validateAdapter } from '../src/witness/adapter-registry.js';
+import { validateAdapter } from '../src/witness/adapter-registry.js';
 
 function adapter(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
