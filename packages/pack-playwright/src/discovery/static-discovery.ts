@@ -558,7 +558,7 @@ function calleeChain(expression: ts.Expression): { base: string; names: string[]
 
 /** How a local name binds to a (possibly imported) test function. */
 interface Binding {
-  kind: 'test' | 'alias' | 'import' | 'unresolvable' | 'plain' | 'testmodule' | 'import-broken' | 'external';
+  kind: 'test' | 'alias' | 'import' | 'unresolvable' | 'plain' | 'testmodule' | 'import-broken' | 'external' | 'data';
   /** alias: target local name; import: resolved target file. */
   target?: string;
   /** import: the imported name at the target. */
@@ -722,6 +722,11 @@ function modelModuleScope(state: ScanState, cwd: string, model: FileModel, sourc
           const target = resolveSpecifier(state, cwd, model.file, specifier);
           if (target !== null) {
             model.bindings.set(local, { kind: 'import', target, importedName: imported });
+            return;
+          }
+          const jsonData = jsonDataModuleTarget(cwd, model.file, specifier);
+          if (jsonData !== null) {
+            model.bindings.set(local, { kind: 'data' });
             return;
           }
           model.bindings.set(local, { kind: 'import-broken', importedName: imported });
@@ -892,6 +897,8 @@ function modelModuleScope(state: ScanState, cwd: string, model: FileModel, sourc
             const target = resolveSpecifier(state, cwd, model.file, specifier);
             if (target !== null) {
               model.bindings.set(local, { kind: 'import', target, importedName: imported });
+            } else if (jsonDataModuleTarget(cwd, model.file, specifier) !== null) {
+              model.bindings.set(local, { kind: 'data' });
             } else {
               // Same failed-binding marker as the ESM path above: the
               // name was meant as an alias, so later test-shaped calls
@@ -989,6 +996,19 @@ function modelModuleScope(state: ScanState, cwd: string, model: FileModel, sourc
     ts.forEachChild(node, visit);
   };
   visit(source);
+}
+
+/**
+ * Resolves a relative specifier that names an EXISTING .json document:
+ * a data module the scan never parses (fresh-clone snag 5b: parsing one
+ * flooded the catalog with parse errors). Null when the specifier does
+ * not end in .json or names no existing regular file — that shape stays
+ * a visible unresolved-import row.
+ */
+function jsonDataModuleTarget(cwd: string, fromFile: string, specifier: string): string | null {
+  if (!specifier.endsWith('.json')) return null;
+  const joined = posix.normalize(posix.join(posix.dirname(fromFile), specifier));
+  return isFile(join(cwd, joined)) ? joined : null;
 }
 
 /** Whether the specifier is playwright's own test module. */
@@ -1091,6 +1111,7 @@ function resolveTestAlias(state: ScanState, cwd: string, file: string, name: str
     if (binding.kind === 'test') return 'test';
     if (binding.kind === 'testmodule') return 'testmodule';
     if (binding.kind === 'plain') return 'not-a-test';
+    if (binding.kind === 'data') return 'not-a-test';
     if (binding.kind === 'import-broken') return 'unknown';
     if (binding.kind === 'external') return 'unknown';
     if (binding.kind === 'unresolvable') return 'wrapper-unresolvable';
@@ -1865,6 +1886,7 @@ function localNameTamperReach(
     case 'external':
     case 'plain':
     case 'import-broken':
+    case 'data':
       return CLEAN_REACH;
     case 'unresolvable':
       return UNKNOWN_REACH;
