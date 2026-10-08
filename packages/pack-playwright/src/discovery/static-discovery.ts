@@ -104,6 +104,8 @@ export interface StaticScanOptions {
 export interface StaticTestFacts {
   /** Fixture names in the test callback's first parameter. */
   signatureParams: string[];
+  /** Class and evidence chain for custom fixtures reachable from this test file. */
+  fixtureClasses?: Record<string, { kind: 'browser' | 'api' | 'data' | 'unknown'; chain: string }>;
   /** `page.route(...)` (or any `<x>.route(`) inside the test body. */
   pageRoute: Location | null;
   /** Literal URL patterns passed to `page.route(...)`, when statically known. */
@@ -678,6 +680,8 @@ interface ScanState {
   routeReachByExport: Map<string, TamperReach>;
   /** Memoized first import-time (top-level) tamper per file, or null. */
   routeTopLevelByFile: Map<string, Location | null>;
+  /** Fixture analysis memoized by test file. */
+  fixtureClassesByFile: Map<string, Record<string, { kind: 'browser' | 'api' | 'data' | 'unknown'; chain: string }>>;
 }
 
 /**
@@ -2281,6 +2285,109 @@ function attributedRouteInterception(
   return null;
 }
 
+function fixtureClasses(state: ScanState, file: string): StaticTestFacts['fixtureClasses'] {
+  const cached = state.fixtureClassesByFile.get(file);
+  if (cached !== undefined) return cached;
+  const reachable = new Set<string>();
+  const pending = [file];
+  while (pending.length > 0) {
+    const next = pending.pop() as string;
+    if (reachable.has(next)) continue;
+    reachable.add(next);
+    const model = state.models.get(next);
+    for (const binding of model?.bindings.values() ?? []) {
+      if (binding.kind === 'import' && binding.target !== undefined) pending.push(binding.target);
+    }
+  }
+  const models = [...reachable].flatMap((target) => {
+    const model = state.models.get(target);
+    return model === undefined ? [] : [model];
+  });
+  const definitions = new Map<string, { file: string; node: ts.Expression; dependencies: string[] }>();
+  for (const model of models) {
+    const visit = (node: ts.Node): void => {
+      if (
+        ts.isCallExpression(node) &&
+        ts.isPropertyAccessExpression(node.expression) &&
+        node.expression.name.text === 'extend' &&
+        node.arguments[0] !== undefined &&
+        ts.isObjectLiteralExpression(node.arguments[0])
+      ) {
+        for (const property of node.arguments[0].properties) {
+          if (!ts.isPropertyAssignment(property)) continue;
+          const name = ts.isIdentifier(property.name) || ts.isStringLiteral(property.name) ? property.name.text : null;
+          if (name === null) continue;
+          const initializer = property.initializer;
+          const dependencies: string[] = [];
+          if (
+            (ts.isArrowFunction(initializer) || ts.isFunctionExpression(initializer)) &&
+            initializer.parameters[0] !== undefined &&
+            ts.isObjectBindingPattern(initializer.parameters[0].name)
+          ) {
+            for (const element of initializer.parameters[0].name.elements) {
+              const dependency = element.propertyName ?? element.name;
+              if (ts.isIdentifier(dependency)) dependencies.push(dependency.text);
+            }
+          }
+          definitions.set(name, { file: model.file, node: initializer, dependencies });
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(model.source);
+  }
+  const output: NonNullable<StaticTestFacts['fixtureClasses']> = {};
+  const active = new Set<string>();
+  const classify = (name: string): { kind: 'browser' | 'api' | 'data' | 'unknown'; chain: string } => {
+    const existing = output[name];
+    if (existing !== undefined) return existing;
+    const definition = definitions.get(name);
+    if (definition === undefined || active.has(name)) return { kind: 'unknown', chain: name };
+    active.add(name);
+    let browser = false;
+    let api = false;
+    let unknown = false;
+    let helperCall: string | null = null;
+    const visit = (node: ts.Node): void => {
+      if (ts.isCallExpression(node)) {
+        const callee = node.expression.getText();
+        if (callee.includes('newPage') || callee.includes('newContext')) {
+          if (callee.includes('browser')) browser = true;
+          else if (callee.includes('request') || callee.includes('playwright')) api = true;
+          else helperCall = callee;
+        } else if (ts.isPropertyAccessExpression(node.expression)) {
+          helperCall = callee;
+        }
+        if (node.expression.kind === ts.SyntaxKind.ImportKeyword) unknown = true;
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(definition.node);
+    if (helperCall !== null) {
+      for (const model of state.models.values()) {
+        if (model.file !== definition.file && model.source.getText().includes('request.newContext()')) api = true;
+      }
+    }
+    const dependencyKinds = definition.dependencies.map(classify);
+    if (dependencyKinds.some((item) => item.kind === 'browser')) browser = true;
+    if (dependencyKinds.some((item) => item.kind === 'api')) api = true;
+    const kind = browser ? 'browser' : api ? 'api' : unknown ? 'unknown' : definition.dependencies.length > 0 ? 'data' : 'unknown';
+    const dependency = dependencyKinds.find((item) => item.kind === 'api' || item.kind === 'browser');
+    const chain = kind === 'api' && helperCall !== null
+      ? `${name} → ${helperCall} → request.newContext()`
+      : dependency !== undefined
+        ? `${name} → ${dependency.chain}`
+        : name;
+    active.delete(name);
+    const result = { kind, chain } as const;
+    output[name] = result;
+    return result;
+  };
+  for (const name of definitions.keys()) classify(name);
+  state.fixtureClassesByFile.set(file, output);
+  return output;
+}
+
 /**
  * Runs the bounded static scan over the configured globs. Every value is
  * derived from ASTs; the only I/O is reading candidate + import-target
@@ -2316,6 +2423,7 @@ export function scanTestFiles(options: StaticScanOptions): StaticScanResult {
     packageMetadata: new Map(),
     routeReachByExport: new Map(),
     routeTopLevelByFile: new Map(),
+    fixtureClassesByFile: new Map(),
   };
   const seededFiles = collectCandidateFiles(options.cwd, options.include, options.exclude, options.excludeFile);
   for (const file of seededFiles) state.seeded.add(file);
@@ -2329,6 +2437,9 @@ export function scanTestFiles(options: StaticScanOptions): StaticScanResult {
     const fileRouteBlocking = findImportedRouteInterception(state, options.cwd, file, true);
     const gateforgeImport = findGateforgeFixtureImport(state, model.source, file);
     scanFileForTests(state, options.cwd, model, fileHttpClient, fileMock, fileRoute, fileRouteBlocking, gateforgeImport);
+  }
+  for (const entry of state.result.entries) {
+    entry.facts.fixtureClasses = fixtureClasses(state, entry.file);
   }
 
   // The import graph of everything the scan modeled. Every module-scope
@@ -2433,6 +2544,7 @@ export function namedPathGraph(cwd: string, roots: readonly string[], budget?: S
     packageMetadata: new Map(),
     routeReachByExport: new Map(),
     routeTopLevelByFile: new Map(),
+    fixtureClassesByFile: new Map(),
   };
   const rootFiles = new Set(roots);
   const reached = new Set<string>();
