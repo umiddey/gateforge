@@ -2025,10 +2025,11 @@ model updateable fields missing from a statically readable projection.
 Adapters without this metadata keep their existing behavior.
 
 An adapter may omit `deletion` only when every resource bound to that
-adapter has delete disabled by its lifecycle classification. In that
-case it must not declare deletion semantics; enabled-delete resources
-still require `hard` or `archive`. The witness resolves this against the
-resource-to-adapter bindings at startup.
+adapter has delete disabled by its lifecycle classification. Declaring it
+there is still allowed (`hard` or `archive`); enabled-delete resources
+always require it. An adapter shared by resources with conflicting delete
+rules is refused. The witness resolves this against the resource-to-adapter
+bindings at startup.
 
 Presence alone, contradicted observations, missing pre-observations, or
 absent deltas grade `invalid` — even when every provenance check passes.

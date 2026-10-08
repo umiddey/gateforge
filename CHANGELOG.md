@@ -15,8 +15,8 @@
   first page even when it composes the read path internally.
 - **witness: allow omitted deletion semantics for delete-disabled
   resources.** A bound adapter can omit `deletion` when the resource's
-  lifecycle classification disables delete; declaring deletion semantics
-  for such a resource remains an error.
+  lifecycle classification disables delete; a declared `deletion` there
+  is still accepted (it must be `hard` or `archive`).
 
 ## 0.13.8
 

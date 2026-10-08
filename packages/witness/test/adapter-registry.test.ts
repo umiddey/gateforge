@@ -16,9 +16,15 @@ describe('adapter deletion semantics and disabled lifecycle', () => {
     expect(validated.deletion).toBeUndefined();
   });
 
-  it('rejects a declared deletion semantic for a delete-disabled resource', () => {
-    expect(() => validateAdapter(adapter({ deletion: 'hard' }), 'read-only', { deleteDisabled: true }))
-      .toThrow(/deletion.*delete-disabled/);
+  it('still accepts a declared deletion semantic for a delete-disabled resource', () => {
+    // Existing adapters (and shared factories) declare it; a patch release must not refuse them.
+    const validated = validateAdapter(adapter({ deletion: 'hard' }), 'read-only', { deleteDisabled: true });
+    expect(validated.deletion).toBe('hard');
+  });
+
+  it('rejects an invalid declared deletion semantic for a delete-disabled resource', () => {
+    expect(() => validateAdapter(adapter({ deletion: 'soft' }), 'read-only', { deleteDisabled: true }))
+      .toThrow(/deletion must be 'hard' or 'archive'/);
   });
 
   it('keeps deletion required when delete is enabled', () => {

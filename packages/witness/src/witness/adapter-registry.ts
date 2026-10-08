@@ -133,9 +133,12 @@ export function validateAdapter(
   const problems: string[] = [];
   if (typeof adapter['read'] !== 'function') problems.push('read must be an async function (ctx, id)');
   if (typeof adapter['normalize'] !== 'function') problems.push('normalize must be a function (body) => {entityId, fields}');
-  if (options.deleteDisabled === true) {
-    if (adapter['deletion'] !== undefined) problems.push('deletion must be omitted for a delete-disabled resource');
-  } else if (adapter['deletion'] !== 'hard' && adapter['deletion'] !== 'archive') {
+  // Delete-disabled resource: `deletion` is optional (nothing is ever
+  // deleted), but a declared value must still be a valid one — adapters
+  // that predate this rule, or share a factory with deletable resources,
+  // keep declaring it.
+  const deletionOptional = options.deleteDisabled === true && adapter['deletion'] === undefined;
+  if (!deletionOptional && adapter['deletion'] !== 'hard' && adapter['deletion'] !== 'archive') {
     problems.push("deletion must be 'hard' or 'archive'");
   }
   if (typeof adapter['environmentFingerprint'] !== 'string') {
