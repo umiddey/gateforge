@@ -195,7 +195,7 @@ describe('static discovery', () => {
         '  ticket: async ({ apiAs }, use) => use(await apiAs()),',
         '  chained: async ({ ticket }, use) => use(ticket),',
         '  dynamic: async ({}, use) => use(await import(makePath())),',
-        '  page: async ({}, use) => use(await makePage()),',
+        '  page: async ({}, use) => use(await request.newContext()),',
         '});',
         '',
       ].join('\n'),
@@ -238,8 +238,12 @@ describe('static discovery', () => {
       ['data fixture', 'api-e2e'],
       ['fixture chain', 'api-e2e'],
       ['unfollowable fixture', 'unknown'],
-      ['shadowed page', 'browser-e2e'],
+      ['shadowed page', 'api-e2e'],
     ]));
+    const apiEntry = rowFor(result.entries, 'e2e/api.spec.ts');
+    expect(inferenceOf(apiEntry).kindSignals[0]?.evidence).toContain(
+      'apiAs → Api.login → request.newContext()',
+    );
   });
   it('recognizes npm aliases only when package metadata proves the Gateforge package', () => {
     const alias = '@suite/gateforge-runner';

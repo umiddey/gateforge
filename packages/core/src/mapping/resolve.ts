@@ -489,14 +489,21 @@ export function resolveTestMappings(input: ResolveMappingsInput): ResolvedMappin
         !isKindRefinement(entry.kind, row.inferredKind)
       ) {
         for (const obligationId of claims) {
+          const apiFixtureChain =
+            row.inferredKind === 'api-e2e' && strong?.evidence.startsWith('test uses API fixture chain: ') === true
+              ? strong.evidence.slice('test uses API fixture chain: '.length)
+              : null;
           pushProblem({
             cause: 'TEST_MAPPING_AMBIGUOUS',
             obligationId,
             detail:
-              `sidecar entry '${entry.key}' declares kind '${entry.kind}' but inference resolved ` +
-              `'${row.inferredKind}' from strong code signals (${strong?.ruleId ?? 'unknown'} at ` +
-              `${strong?.location.file ?? row.file}:${String(strong?.location.line ?? row.sourceLocation.line)}) — ` +
-              'correct the declaration or the classification',
+              apiFixtureChain !== null
+                ? `sidecar entry '${entry.key}' declares kind '${entry.kind}' but the test uses only an API client ` +
+                  `(${apiFixtureChain}); it is not an E2E test`
+                : `sidecar entry '${entry.key}' declares kind '${entry.kind}' but inference resolved ` +
+                  `'${row.inferredKind}' from strong code signals (${strong?.ruleId ?? 'unknown'} at ` +
+                  `${strong?.location.file ?? row.file}:${String(strong?.location.line ?? row.sourceLocation.line)}) — ` +
+                  'correct the declaration or the classification',
             locations: [row.sourceLocation, ...(strong !== undefined ? [strong.location] : [])],
           });
         }

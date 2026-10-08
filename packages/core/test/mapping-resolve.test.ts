@@ -271,6 +271,31 @@ describe('resolveTestMappings — ambiguity (both locations)', () => {
     expect(ambiguous[0]?.detail).toContain("resolved 'browser-e2e'");
     expect(ambiguous[0]?.locations).toContainEqual({ file: 'e2e/accounts.spec.js', line: 7, col: 2 });
   });
+  it('explains API-only fixture chains when an E2E mapping contradicts them', () => {
+    const apiFixture = catalog([
+      row({
+        logicalKey: KEY,
+        inferredKind: 'api-e2e',
+        kindSignals: [
+          {
+            ruleId: 'api-request-fixture',
+            kind: 'api-e2e',
+            evidence: 'test uses API fixture chain: apiAs → Api.login → request.newContext()',
+            location: { file: 'e2e/accounts.spec.js', line: 7, col: 2 },
+          },
+        ],
+      }),
+    ]);
+    const resolution = resolveTestMappings(
+      resolveInput({ catalog: apiFixture, sidecar: sidecar([sidecarEntry({ kind: 'browser-e2e' })]) }),
+    );
+    const ambiguous = resolution.problems.filter((problem) => problem.cause === 'TEST_MAPPING_AMBIGUOUS');
+    expect(ambiguous).toHaveLength(1);
+    expect(ambiguous[0]?.detail).toContain(
+      'test uses only an API client (apiAs → Api.login → request.newContext()); it is not an E2E test',
+    );
+  });
+
 
   it('allows observed-e2e over an inferred browser-e2e (Observe refinement, not a contradiction)', () => {
     const browserDriven = catalog([

@@ -68,10 +68,17 @@ const KIND_RULES: ReadonlyArray<{
     ruleId: 'browser-fixture',
     kind: 'browser-e2e',
     applies: (input) => {
-      const browserParams = input.facts.signatureParams.filter((name) => BROWSER_FIXTURE_PARAMS.has(name));
+      const custom = input.facts.fixtureClasses;
+      const browserParams = input.facts.signatureParams.filter((name) => {
+        const fixture = custom?.[name];
+        return fixture === undefined ? BROWSER_FIXTURE_PARAMS.has(name) : fixture.kind === 'browser';
+      });
       if (browserParams.length === 0) return null;
+      const chain = custom?.[browserParams[0] ?? '']?.chain;
       return {
-        evidence: `test signature declares browser fixture(s): ${browserParams.join(', ')}`,
+        evidence: chain === undefined
+          ? `test signature declares browser fixture(s): ${browserParams.join(', ')}`
+          : `test uses browser fixture chain: ${chain}`,
       };
     },
   },
@@ -98,11 +105,18 @@ const KIND_RULES: ReadonlyArray<{
     ruleId: 'api-request-fixture',
     kind: 'api-e2e',
     applies: (input) => {
-      // Direct API requests are never E2E evidence, regardless of whether
-      // the test imports the Gateforge runner.
-      const apiParams = input.facts.signatureParams.filter((name) => API_FIXTURE_PARAMS.includes(name));
+      const custom = input.facts.fixtureClasses;
+      const apiParams = input.facts.signatureParams.filter((name) => {
+        const fixture = custom?.[name];
+        return fixture === undefined ? API_FIXTURE_PARAMS.includes(name) : fixture.kind === 'api';
+      });
       if (apiParams.length === 0) return null;
-      return { evidence: `test signature declares API fixture(s): ${apiParams.join(', ')}` };
+      const chain = custom?.[apiParams[0] ?? '']?.chain;
+      return {
+        evidence: chain === undefined
+          ? `test signature declares API fixture(s): ${apiParams.join(', ')}`
+          : `test uses API fixture chain: ${chain}`,
+      };
     },
   },
   {
