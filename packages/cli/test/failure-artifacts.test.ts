@@ -30,6 +30,20 @@ describe('keepFailureArtifacts', () => {
     );
   });
 
+  it('keeps the run trace with the failure artifacts (runtime.yml trace)', () => {
+    const { run, keep } = dirs();
+    const failed = join(run, 'playwright-artifacts', 'spec-a-chromium');
+    mkdirSync(failed, { recursive: true });
+    writeFileSync(join(failed, 'trace.zip'), 'zip-bytes');
+    writeFileSync(join(failed, 'error-context.md'), 'expected X to be Y');
+
+    const kept = keepFailureArtifacts(run, keep);
+    rmSync(run, { recursive: true, force: true });
+
+    expect(kept).toBe(join(keep, 'last-failures'));
+    expect(readFileSync(join(keep, 'last-failures', 'spec-a-chromium', 'trace.zip'), 'utf8')).toBe('zip-bytes');
+  });
+
   it("replaces the previous run's artifacts instead of mixing them", () => {
     const { run, keep } = dirs();
     mkdirSync(join(keep, 'last-failures', 'old-test'), { recursive: true });

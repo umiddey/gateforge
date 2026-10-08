@@ -540,5 +540,17 @@ describe('staged-runtime supervision', () => {
       );
       expect(load(root, 'runtime.yml')).toThrow(/expectTimeoutSeconds/);
     });
+
+    it('carries the owner-declared trace', () => {
+      const root = tempDir();
+      writeFileSync(join(root, 'runtime.yml'), ['schemaVersion: 1', 'trace: retain-on-failure'].join('\n'), 'utf8');
+      expect(loadRuntimeConfigAt(root, 'runtime.yml')?.trace).toBe('retain-on-failure');
+    });
+
+    it('an unknown trace value is a typed schema violation', () => {
+      const root = tempDir();
+      writeFileSync(join(root, 'runtime.yml'), ['schemaVersion: 1', 'trace: sometimes'].join('\n'), 'utf8');
+      expect(load(root, 'runtime.yml')).toThrow(/trace/);
+    });
   });
 });

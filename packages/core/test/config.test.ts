@@ -295,6 +295,15 @@ clock:
     }
   });
 
+  it('accepts an owner-declared trace and rejects values Playwright does not know', () => {
+    for (const trace of ['off', 'on', 'retain-on-failure', 'on-first-retry', 'on-all-retries', 'retain-on-first-failure']) {
+      expect(RuntimeConfigSchema.parse({ schemaVersion: 1, trace }).trace).toBe(trace);
+    }
+    for (const trace of ['always', 'sometimes', true, 1]) {
+      expect(RuntimeConfigSchema.safeParse({ schemaVersion: 1, trace }).success).toBe(false);
+    }
+  });
+
   it('rejects history retention above ninety days', () => {
     expect(() => parseConfig({ ...validConfig, history: { retentionDays: 91 } })).toThrow(GateforgeConfigError);
   });
