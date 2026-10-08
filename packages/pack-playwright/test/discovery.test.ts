@@ -948,6 +948,58 @@ describe('static discovery', () => {
     ).toBe(true);
   });
 
+  it('reads a spec importing its .mts helper through a .mjs specifier (0.13.9)', async () => {
+    // TypeScript ESM extension substitution: a RELATIVE import that
+    // literally ends `.js`/`.mjs`/`.cjs`/`.jsx` names its TypeScript
+    // sibling whenever the literal file does not exist (.js→.ts/.tsx,
+    // .mjs→.mts, .cjs→.cts, .jsx→.tsx). The runner's own loader applies
+    // the rule — it lists and executes the spec below — so the static
+    // scan must resolve the same way, or every such spec sprouts a
+    // blocking `<unresolved-title>` row the runner provably enumerates
+    // (0.13.9 consumer run: 92 false RUN_INCOMPLETE).
+    const root = makeTempDir('gateforge-ts-ext-');
+    mkdirSync(join(root, 'node_modules'), { recursive: true });
+    for (const name of ['playwright', 'playwright-core']) {
+      symlinkSync(join(ROOT, 'node_modules', name), join(root, 'node_modules', name), 'dir');
+    }
+    writeTree(root, {
+      'package.json': '{ "type": "module", "private": true }\n',
+      'playwright.config.js': [
+        "export default { testDir: 'e2e', projects: [",
+        "  { name: 'chromium', use: { browserName: 'chromium' } },",
+        '] };',
+        '',
+      ].join('\n'),
+      // The helper exists ONLY as .mts; the spec imports it as .mjs —
+      // exactly TypeScript's recommended ESM authoring shape.
+      'e2e/gateforge-helpers.mts': [
+        "import { test as base } from 'playwright/test';",
+        'export const test = base.extend({});',
+        '',
+      ].join('\n'),
+      'e2e/uc35-unified-messages.spec.mts': [
+        "import { test } from './gateforge-helpers.mjs';",
+        "test('unified messages journey', async ({ page }) => {",
+        "  await page.goto('/messages');",
+        '});',
+        '',
+      ].join('\n'),
+    });
+    const { catalog } = await discoverTestCatalog({ cwd: root, config: fixtureConfig(['e2e/**/*.spec.mts']) });
+    const specRows = catalog.entries.filter((entry) => entry.file === 'e2e/uc35-unified-messages.spec.mts');
+    expect(specRows, JSON.stringify(catalog.unresolved)).toHaveLength(1);
+    expect(specRows[0]?.discoveryStatus).toBe('discovered');
+    expect(specRows[0]?.titlePath).toEqual(['unified messages journey']);
+    expect(specRows[0]?.reconciliation).toBe('matched');
+    expect(
+      catalog.unresolved.some(
+        (gap) => gap.code === 'unresolved-import' && gap.detail.includes("'./gateforge-helpers.mjs'"),
+      ),
+      'a .mjs specifier whose .mts sibling exists resolves — never an unresolved-import row',
+    ).toBe(false);
+    expect(catalog.inventoryComplete).toBe(true);
+  }, 120_000);
+
   it('drops the evaluate tamper signal on chromium rows, keeps it elsewhere (0.13.10 F7)', async () => {
     // The runtime initiator rule already refuses every request evaluated
     // test code starts — but only where it runs: Chromium. In a project
