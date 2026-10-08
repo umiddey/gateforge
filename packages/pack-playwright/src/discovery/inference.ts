@@ -285,7 +285,16 @@ export function inferTestKind(input: InferenceFacts): InferenceResult {
     }
   }
 
-  const distinct = [...new Set(kindSignals.map((signal) => signal.kind))];
+  const browserEvidence = kindSignals.some((signal) => signal.kind === 'browser-e2e');
+  const httpClientSignal = kindSignals.some((signal) => signal.ruleId === 'http-client-call');
+  const suppressHttpKindConflict = browserEvidence && httpClientSignal;
+  const distinct = [
+    ...new Set(
+      kindSignals
+        .filter((signal) => !(suppressHttpKindConflict && signal.kind === 'api-e2e'))
+        .map((signal) => signal.kind),
+    ),
+  ];
   const inferredKind: TestKind = distinct.length === 1 ? (distinct[0] as TestKind) : 'unknown';
   if (distinct.length > 1) {
     rulesFired.push({
