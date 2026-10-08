@@ -1,33 +1,40 @@
 # Changelog
 
-## Unreleased
-- **Playwright discovery: follow fixture-subpath test wrappers.** Static
-  discovery now recognizes the package root and exported `/fixture`
-  subpath as Playwright test sources, including wrappers imported through
-  local CommonJS exports (`exports.X`, `module.exports.X`, or
-  `module.exports = { X }`) or ESM modules. It also scans concrete
-  Playwright-listed files when their path is covered by a configured
-  source glob under another recognized extension, allowing static rows
-  to join the runner inventory and retain code-based kind inference.
-- **Playwright discovery: prove npm aliases from package metadata.** A bare
-  package alias is treated as the Gateforge runner only when the root or
-  nearest package manifest maps it to the exact Gateforge package, or the
-  installed package metadata names that package. Unproven external imports
-  remain unresolved.
-- **Mapping: unreadable tests cannot carry E2E claims.** A Playwright-listed
-  test whose code static discovery did not read cannot be mapped as
-  `browser-e2e`, `observed-e2e`, or `api-e2e` until the scan can inspect it.
-- **Discovery: join data-driven registrations by scanned call-site line.**
-  When Playwright's runtime title is computed, the scanner now carries the
-  call-site facts to every listed instance at that exact line; resolvable
-  titles continue to reconcile by title identity.
+## 0.13.9
 
+Theme: Gateforge exists to catch fake tests. This release closes three ways a
+fake E2E test could pass: API calls from test code, requests started by test
+code inside the page, and tests whose code Gateforge never read.
+
+- **Discovery: every test file Playwright lists is read.** A listed test
+  outside the configured source globs used to be skipped by the code scan,
+  so its declared kind was accepted unchecked. Playwright's list now decides
+  which files are tests; owner exclusions still apply.
+- **Mapping: unreadable tests cannot carry E2E claims, and say so.** A
+  Playwright-listed test whose code the scan could not read cannot be mapped
+  as `browser-e2e`, `observed-e2e`, or `api-e2e`. The report's `blocking`
+  list and the claim's verdict name it: "Gateforge could not read the code
+  of test …" (cause `TEST_KIND_UNKNOWN`), instead of "no claim declares".
+- **Discovery: follow test wrappers over the Gateforge fixture.** The
+  package root and its exported `/fixture` subpath are recognized as
+  Playwright test sources, through local CommonJS (`exports.X`,
+  `module.exports.X`, `module.exports = { X }`) and ESM wrapper modules.
+- **Discovery: prove npm aliases from package metadata.** A bare package
+  alias counts as the Gateforge runner only when the root or nearest
+  package manifest maps it to the exact Gateforge package, or the installed
+  package metadata names that package. Unproven imports stay unresolved.
+- **Discovery: join data-driven tests by call-site line.** When a test's
+  title is computed at runtime, every listed instance at the scanned call
+  site's exact line inherits that call site's facts; resolvable titles
+  still join by title.
 - **Requests started by test code inside the page are not E2E evidence.**
   Chromium fixture requests are attributed through CDP's outermost script
   initiator; page-evaluated and injected-script requests cannot satisfy
   observed transport claims. Requests without script initiators and real
   app code remain eligible. Other browsers retain existing behavior and
-  report that test-code initiators cannot be distinguished.
+  report that test-code initiators cannot be distinguished. The fixture
+  waits for the browser's initiator event only (at most 50 ms), never a
+  fixed pause, so the app's request timing is unchanged.
 - **Deliberate tightening: test-code API requests are never E2E evidence.**
   This reverses 0.13.2's crediting of Playwright API calls: requests made
   by test code go directly to the app, never through the session proxy, and

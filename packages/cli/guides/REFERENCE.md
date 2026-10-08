@@ -1982,10 +1982,10 @@ the Gateforge package only when the root or nearest package manifest maps
 it to the exact package name, or the installed
 `node_modules/<alias>/package.json` names the Gateforge package. Without
 either proof, an external module is not assumed to export Playwright's
-`test`. A runner-listed file is also scanned when its path matches a
-configured source glob with another recognized extension; files wholly
-outside that source scope remain runner-list-only, and configured
-exclusions still apply.
+`test`. Every file the Playwright runner lists is scanned, even outside the
+configured source globs, because the runner will execute it; configured
+exclusions still apply. A listed test the scan could not read stays
+runner-list-only and cannot carry an E2E claim (`TEST_KIND_UNKNOWN`).
 When the runner computes a test title from data, Gateforge joins the
 listed instance to the statically read call site only when its file and
 source line match. Static call-site facts then supply kind and tamper
