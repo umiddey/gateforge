@@ -68,27 +68,29 @@ const test = base.extend({});
 let createdId = '';
 
 test.describe.serial('${GROUP}', () => {
-  test('${STEP_WRITE}', async ({ request }) => {
-    const response = await request.post('/api/records', { data: { name: 'journey-row' } });
+  test('${STEP_WRITE}', async ({ page }) => {
+    await page.goto('/');
+    const created = page.waitForResponse(
+      (response) => response.url().endsWith('/api/records') && response.request().method() === 'POST',
+    );
+    await page.getByRole('button', { name: 'Create record' }).click();
+    const response = await created;
     expect(response.status()).toBe(201);
     const body = await response.json();
     createdId = body.id;
+    await expect(page.getByTestId('created-id')).toHaveText(createdId);
   });
 
-  test('${STEP_LIST}', async ({ request }) => {
+  test('${STEP_LIST}', async ({ page }) => {
     expect(createdId, 'step 1 must have run first').not.toBe('');
-    const response = await request.get('/api/records');
-    expect(response.status()).toBe(200);
-    const body = await response.json();
-    expect(body.records.map((record) => record.id)).toContain(createdId);
+    await page.goto('/records');
+    await expect(page.getByTestId('record-list')).toContainText(createdId);
   });
 
-  test('${STEP_READ}', async ({ request }) => {
+  test('${STEP_READ}', async ({ page }) => {
     expect(createdId, 'step 1 must have run first').not.toBe('');
-    const response = await request.get('/api/records/' + createdId);
-    expect(response.status()).toBe(200);
-    const body = await response.json();
-    expect(body.record.name).toBe('journey-row');
+    await page.goto('/records/' + encodeURIComponent(createdId));
+    await expect(page.getByTestId('record-name')).toHaveText('journey-row');
   });
 });
 
@@ -160,6 +162,28 @@ async function startJourneyApp(): Promise<{
     requestsByPath.set(path, (requestsByPath.get(path) ?? 0) + 1);
     response.setHeader('content-type', 'application/json');
     response.setHeader('x-gateforge-env-fingerprint', FINGERPRINT);
+    const pageRecordMatch = /^\/records\/([^/]+)$/.exec(path);
+    if (request.method === 'GET' && path === '/') {
+      response.setHeader('content-type', 'text/html');
+      response.end(
+        '<button>Create record</button><span data-testid="created-id"></span><script>document.querySelector("button").onclick=async()=>{const r=await fetch("/api/records",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({name:"journey-row"})});const record=await r.json();document.querySelector("[data-testid=created-id]").textContent=record.id}</script>',
+      );
+      return;
+    }
+    if (request.method === 'GET' && path === '/records') {
+      response.setHeader('content-type', 'text/html');
+      response.end(
+        '<div data-testid="record-list"></div><script>fetch("/api/records").then(r=>r.json()).then(data=>{document.querySelector("[data-testid=record-list]").textContent=data.records.map(record=>record.id).join(",")})</script>',
+      );
+      return;
+    }
+    if (request.method === 'GET' && pageRecordMatch !== null) {
+      response.setHeader('content-type', 'text/html');
+      response.end(
+        '<div data-testid="record-name"></div><script>fetch("/api/records/"+encodeURIComponent(location.pathname.split("/").pop())).then(r=>r.json()).then(data=>{document.querySelector("[data-testid=record-name]").textContent=data.record.name})</script>',
+      );
+      return;
+    }
     const readMatch = /^\/api\/records\/([^/]+)$/.exec(path);
     if (request.method === 'POST' && path === '/api/records') {
       let body = '';
