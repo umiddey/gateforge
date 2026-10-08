@@ -1130,6 +1130,7 @@ function gradeTransportObservation(input: ClaimEvidenceInput): ClaimOutcome {
   }
   if (observed.status === 'satisfied') return observed;
   if (observed.status === 'invalid') return observed;
+  if (directDiagnosis !== null) return { status: 'missing', reason: directDiagnosis, recordIds: [] };
   return {
     status: 'missing',
     reason: [anchored.reason, observed.reason].sort(compareStrings)[0] as string,

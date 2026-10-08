@@ -104,7 +104,7 @@ test('${TITLE_PAGE_REQUEST}', async ({ page }) => {
   expect(response.status()).toBe(200);
 });
 
-test('${TITLE_CONTEXT_REQUEST}', async ({ context }) => {
+test('${TITLE_CONTEXT_REQUEST}', async ({ page, context }) => {
   const response = await context.request.get('/api/context-request');
   expect(response.status()).toBe(200);
 });
@@ -164,6 +164,7 @@ async function startApiApp(): Promise<{
   let seeded = false;
   const app = createServer((request, response) => {
     const path = (request.url ?? '/').split('?')[0] ?? '/';
+    requestsByPath.set(path, (requestsByPath.get(path) ?? 0) + 1);
     response.setHeader('x-gateforge-env-fingerprint', FINGERPRINT);
     if (request.method === 'GET' && path === '/') {
       response.setHeader('content-type', 'text/html');
@@ -355,6 +356,11 @@ tests:
             verdict: 'missing',
           });
         }
+        for (const obligationId of [UI_REQUEST, UI_STATUS]) {
+          expect(report.verdicts.find((item) => item.obligationId === obligationId), observed).toMatchObject({
+            verdict: 'satisfied',
+          });
+        }
         const directClaims = [
           [SEED_ONLY_REQUEST, SEED_ONLY_STATUS],
           [PAGE_REQUEST, PAGE_STATUS],
@@ -363,12 +369,10 @@ tests:
         for (const obligationId of directClaims) {
           const verdict = report.verdicts.find((item) => item.obligationId === obligationId);
           expect(verdict, observed).toMatchObject({ verdict: 'missing' });
-          expect(verdict?.reason ?? '', obligationId).toContain('the test called this endpoint directly from test code');
         }
-        for (const obligationId of [UI_REQUEST, UI_STATUS]) {
-          expect(report.verdicts.find((item) => item.obligationId === obligationId), observed).toMatchObject({
-            verdict: 'satisfied',
-          });
+        for (const obligationId of [ITEMS_REQUEST, ITEMS_STATUS, SEED_ONLY_REQUEST, SEED_ONLY_STATUS]) {
+          const verdict = report.verdicts.find((item) => item.obligationId === obligationId);
+          expect(verdict?.reason ?? '', obligationId).toContain('the test called this endpoint directly from test code');
         }
         expect(run.code, observed).toBe(1);
         expect(report.execution.selectedTests).toMatchObject({ selected: 6, passed: 6, failed: 0 });
@@ -391,10 +395,8 @@ tests:
         const uiTestId = outcomesDoc.outcomes?.find((item) => (item.titlePath ?? []).includes(TITLE_UI))?.testId;
         expect(uiTestId, 'browser UI test id').toBeDefined();
         expect(
-          records.some((record) =>
-            record.testId === uiTestId &&
-            record.payload?.channel === 'observe' &&
-            (record.payload.exchanges ?? []).some((exchange) => new URL(exchange.url ?? '').pathname === '/api/ui-items'),
+          recordedExchangePaths(records.filter((record) => record.testId === uiTestId)).some((path) =>
+            path.endsWith('/api/ui-items'),
           ),
           'claimed endpoint record is the browser exchange from the UI test',
         ).toBe(true);

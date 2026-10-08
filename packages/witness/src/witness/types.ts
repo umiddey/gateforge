@@ -516,6 +516,10 @@ export interface TestSession {
    * supervisor writes claims.json from what the witness registered.
    */
   claims: string[];
+  /** Session-owned direct API calls, retained only for non-crediting diagnosis. */
+  directExchanges: Array<{ method: string; url: string; status: number }>;
+  /** Claim ids for which this session has already stamped its diagnostic record. */
+  directRecordsIssued: Set<string>;
   /**
    * The registered expected-set identity this session was minted for
    * (enforcement-review fix 2a/2b); null when the run has no registered

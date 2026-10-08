@@ -234,13 +234,54 @@ export function createUnroutedOriginReporter(options: {
     },
   };
 }
+interface DirectExchangeReporter {
+  report(exchange: { method: string; url: string; status: number }): void;
+  settled(): Promise<void>;
+}
+
+const directExchangeReporters = new Map<string, DirectExchangeReporter>();
+
+function directExchangeReporterFor(testInfo: TestInfo): DirectExchangeReporter {
+  const existing = directExchangeReporters.get(testInfo.testId);
+  if (existing !== undefined) return existing;
+  const inFlight = new Set<Promise<unknown>>();
+  const witness = new WitnessClient();
+  const reporter: DirectExchangeReporter = {
+    report(exchange): void {
+      const sent = (async () => {
+        const session = await resolveSessionBounded(witness, testInfo.testId, testInfo.workerIndex, 5_000);
+        if (session === null) return;
+        await witness.reportSessionDirectExchanges({
+          sessionId: session.sessionId,
+          sessionToken: session.sessionToken,
+          exchanges: [exchange],
+        });
+      })().catch(() => undefined);
+      inFlight.add(sent);
+      void sent.then(() => inFlight.delete(sent));
+    },
+    async settled(): Promise<void> {
+      while (inFlight.size > 0) await Promise.all([...inFlight]);
+    },
+  };
+  directExchangeReporters.set(testInfo.testId, reporter);
+  return reporter;
+}
+
+async function settleDirectExchangeReports(testInfo: TestInfo): Promise<void> {
+  const reporter = directExchangeReporters.get(testInfo.testId);
+  if (reporter === undefined) return;
+  try {
+    await reporter.settled();
+  } finally {
+    directExchangeReporters.delete(testInfo.testId);
+  }
+}
 
 /** Fixture map this pack adds to every test. */
 export type EvidenceFixtures = {
-  /**
-   * Optional consumer-declared UI surface. Only tests that call
-   * `evidence.ui.*` need to declare it.
-   */
+  /** Pending diagnostic-only direct API reports, settled before test teardown. */
+  directApiReports: void;
   surface: SurfaceDescriptor | undefined;
   /** The trusted evidence primitive surface for the running test. */
   evidence: EvidenceApi;
@@ -285,6 +326,18 @@ const browserRunner =
  * was wired.
  */
 const extended = browserRunner.extend<EvidenceFixtures>({
+  directApiReports: [async ({}, use, testInfo) => {
+    if (!process.env[ENV_WITNESS_URL]) {
+      await use(undefined);
+      return;
+    }
+    directExchangeReporterFor(testInfo);
+    try {
+      await use(undefined);
+    } finally {
+      await settleDirectExchangeReports(testInfo);
+    }
+  }, { auto: true }],
   page: async ({ page, browser }, use, testInfo) => {
     if (!process.env[ENV_WITNESS_URL]) {
       await use(page);
@@ -339,19 +392,9 @@ const extended = browserRunner.extend<EvidenceFixtures>({
     if (session.proxyUrl !== null) {
       const sessionProxyUrl: string = session.proxyUrl;
       const reporter = createUnroutedOriginReporter({ witness, session, appBaseURL });
-      Object.defineProperty(page.context(), 'request', {
-        value: wrapDirectRequestContext(page.context().request, {
-          baseURL: projectBaseURL(testInfo),
-          onExchange: (exchange) => {
-            void witness.reportSessionDirectExchanges({
-              sessionId: session.sessionId,
-              sessionToken: session.sessionToken,
-              exchanges: [exchange],
-            }).catch(() => undefined);
-          },
-        }),
-        configurable: true,
-      });
+      await routePageThroughSessionProxy(page, appBaseURL, sessionProxyUrl, reporter.report);
+      // Do not wrap page/context.request: Playwright's Route.fetch uses
+      // the context request internally to forward browser traffic here.
       try {
         await use(page);
       } finally {
@@ -383,16 +426,15 @@ const extended = browserRunner.extend<EvidenceFixtures>({
     if (session === null) {
       throw new Error(`No supervisor-issued witness session for ${testInfo.testId}.`);
     }
-    await use(wrapDirectRequestContext(request, {
-      ...(projectBaseURL(testInfo) === undefined ? {} : { baseURL: projectBaseURL(testInfo) }),
-      onExchange: (exchange) => {
-        void witness.reportSessionDirectExchanges({
-          sessionId: session.sessionId,
-          sessionToken: session.sessionToken,
-          exchanges: [exchange],
-        }).catch(() => undefined);
-      },
-    }));
+    const directReporter = directExchangeReporterFor(testInfo);
+    try {
+      await use(wrapDirectRequestContext(request, {
+        ...(projectBaseURL(testInfo) === undefined ? {} : { baseURL: projectBaseURL(testInfo) }),
+        onExchange: (exchange) => directReporter.report(exchange),
+      }));
+    } finally {
+      await directReporter.settled();
+    }
   },
   surface: async ({}, use): Promise<void> => {
     await use(undefined);
@@ -479,23 +521,16 @@ export const test: typeof extended = withHookTracking(extended);
 export { expect }; // re-exported so tests never need `playwright/test`
 
 /**
- * The module-scope `request` of `@gate-forge/pack-playwright/fixture`:
- * `newContext(options)` returns the same witnessed wrapping the
- * `request` fixture carries, resolving the session LAZILY (on the first
- * call) from the currently running test. Where no test is running
- * (module scope), or inside a worker hook (`beforeAll`/`beforeEach`/
- * `afterEach`/`afterAll` — Playwright runs a file's `beforeAll` INSIDE
- * the first test's session window, so the session being open proves
- * nothing), the returned context talks to the app DIRECTLY — setup
- * traffic stays uncredited: it never reaches any session proxy, and
- * the witness refuses session-attributed evidence outside a bound
- * session. INSIDE a test body a session that never answers is a
- * failure, not a fallback: the context waits the fixtures' own
- * bound and then throws, so in-test traffic can never silently
- * bypass the witness.
+ * The module-scope `request` of `@gate-forge/pack-playwright/fixture`.
+ * `newContext(options)` creates a normal Playwright API context with the
+ * supplied options and never rehosts its calls onto the session proxy.
+ * App-origin calls made in a test body are reported as direct-API
+ * diagnostics only; they can never satisfy an E2E claim. Calls made at
+ * module scope have no owning test and are not reported.
  *
- * The underlying context is created with the options exactly as given;
- * only app-origin call URLs are rehosted per call.
+ * In worker hooks, calls go straight to the app and remain uncredited;
+ * the first test's session may already be open, but that does not make
+ * hook traffic test-body evidence.
  */
 export const request = {
   async newContext(options: Parameters<typeof playwrightRequest.newContext>[0] = {}): Promise<APIRequestContext> {
@@ -503,9 +538,9 @@ export const request = {
     const appBaseURL = process.env['GATEFORGE_APP_BASE_URL']?.trim();
     if (appBaseURL === undefined || appBaseURL === '') return await playwrightRequest.newContext(options);
     const directContext = async (testInfo?: TestInfo): Promise<APIRequestContext> => {
-      // Direct (setup) traffic. The project's own base URL rides along
-      // when the caller gave none, so a relative setup call behaves
-      // exactly as the suite's config says it should.
+      // Calls go to the app directly. The project's own base URL rides
+      // along when the caller gave none, so relative setup calls retain
+      // the suite's configured resolution.
       const fallbackBaseURL = options.baseURL ?? (testInfo === undefined ? undefined : projectBaseURL(testInfo));
       const context = await playwrightRequest.newContext(
         fallbackBaseURL === undefined ? options : { ...options, baseURL: fallbackBaseURL },
@@ -521,14 +556,7 @@ export const request = {
               return;
             }
           }
-          void resolveSessionBounded(new WitnessClient(), owner.testId, owner.workerIndex, 0).then((session) => {
-            if (session === null) return;
-            void new WitnessClient().reportSessionDirectExchanges({
-              sessionId: session.sessionId,
-              sessionToken: session.sessionToken,
-              exchanges: [exchange],
-            }).catch(() => undefined);
-          }).catch(() => undefined);
+          directExchangeReporterFor(owner).report(exchange);
         },
       });
     };

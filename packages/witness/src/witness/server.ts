@@ -619,17 +619,7 @@ interface WitnessState {
    * path.
    */
   sessionPageOrigins: Map<string, SessionPageOriginReport>;
-  /**
-   * Direct API exchanges the fixture reported. RUN-scoped so calls made
-   * through contexts shared across tests remain diagnostic only.
-   *
-   * Witness memory only, deduplicated by `(method, url, status)`, and
-   * bounded at DIRECT_EXCHANGES_CAP. Finalize stamps one witnessed
-   * `channel: 'direct'` record which can never satisfy a claim.
-   */
-  directExchanges: Array<{ method: string; url: string; status: number }>;
-  /** Whether the run's direct record has already been stamped. */
-  directRecordIssued: boolean;
+  /** Registered page observers used by the run's browser evidence channel. */
   pageObservers: Map<string, { flush(): Promise<void>; close(): Promise<void> }>;
   pageObservationRecords: Map<string, string[]>;
   /**
@@ -1597,8 +1587,6 @@ export async function startWitness(options: WitnessOptions): Promise<WitnessHand
     workerSessions: new Map(),
     sessionIdentities: new Map(),
     sessionPageOrigins: new Map(),
-    directExchanges: [],
-    directRecordIssued: false,
     pageObservers: new Map(),
     // The engine browser is OPTIONAL here and required only by the
     // ENGINE-BROWSER proof channel: this package is runner-neutral and
@@ -3892,6 +3880,8 @@ async function handleSessionOpen(
     proxyUrl: null,
     proxyServer: null,
     claims,
+    directExchanges: [],
+    directRecordsIssued: new Set(),
     // The registered expected-set identity this session was minted for
     // (enforcement-review fix 2b); null when no expected set is bound.
     registered:
@@ -4153,14 +4143,14 @@ async function handleSessionPageOrigins(
   sendJson(res, 200, { recorded: true as const });
 }
 
-/** Stores bounded, deduplicated direct API exchanges in run memory. */
+/** Stores bounded, deduplicated direct API exchanges on their session. */
 async function handleSessionDirectExchanges(
   state: WitnessState,
   res: ServerResponse,
   body: Record<string, unknown>,
 ): Promise<void> {
   if (!isPlainObject(body)) throw new HttpError(400, 'direct exchange report body must be an object');
-  requireOpenSession(state, body);
+  const session = requireOpenSession(state, body);
   const reported = body['exchanges'];
   if (!Array.isArray(reported) || reported.length === 0) {
     throw new HttpError(400, 'direct exchange report requires at least one exchange');
@@ -4182,13 +4172,13 @@ async function handleSessionDirectExchanges(
     return { method: item['method'], url: item['url'], status: item['status'] };
   });
   for (const exchange of exchanges) {
-    if (state.directExchanges.some((prior) =>
+    if (session.directExchanges.some((prior) =>
       prior.method === exchange.method && prior.url === exchange.url && prior.status === exchange.status
     )) continue;
-    if (state.directExchanges.length >= DIRECT_EXCHANGES_CAP) break;
-    state.directExchanges.push(exchange);
+    if (session.directExchanges.length >= DIRECT_EXCHANGES_CAP) break;
+    session.directExchanges.push(exchange);
   }
-  sendJson(res, 200, { recorded: true as const, kept: state.directExchanges.length });
+  sendJson(res, 200, { recorded: true as const, kept: session.directExchanges.length });
 }
 
 
@@ -5627,13 +5617,15 @@ async function handleObserveFinalize(
   // transport record carries. Persistence-vs-persistence consumption is
   // untouched: it still matches against the LIVE log, so one exchange
   // can never credit two persistence claims.
-  if (!state.directRecordIssued && state.directExchanges.length > 0 && session.claims.length > 0) {
-    const claimId = [...session.claims].sort(compareStrings)[0] as string;
-    issueRecord(state, claimId, HTTP_OBSERVED_KIND, session.testId, {
-      channel: DIRECT_CHANNEL,
-      exchanges: state.directExchanges.map((exchange) => ({ ...exchange })),
-    }, 'engine-observed');
-    state.directRecordIssued = true;
+  if (session.directExchanges.length > 0) {
+    for (const claimId of session.claims) {
+      if (session.directRecordsIssued.has(claimId)) continue;
+      issueRecord(state, claimId, HTTP_OBSERVED_KIND, session.testId, {
+        channel: DIRECT_CHANNEL,
+        exchanges: session.directExchanges.map((exchange) => ({ ...exchange })),
+      }, 'engine-observed');
+      session.directRecordsIssued.add(claimId);
+    }
   }
 
   const transport = transportSnapshot(state, session);

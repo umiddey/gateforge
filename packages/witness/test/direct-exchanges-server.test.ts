@@ -18,6 +18,7 @@ const RUN_TOKEN = 'setup-exchanges-run-token';
 const VERIFIER_KEY = 'setup-exchanges-verifier-key';
 const RESOURCE = 'tenant.widgets';
 const CLAIM = `${RESOURCE}:http:request-observed`;
+const CLAIM_STATUS = `${RESOURCE}:http:response-status-ok`;
 const TEST_ID = 'tests/widgets.spec.js#reads-a-widget';
 /** The loopback host this suite names (built, never copied from output). */
 const LOOPBACK = [127, 0, 0, 1].join('.');
@@ -67,16 +68,16 @@ async function getRecords(): Promise<Array<Record<string, unknown>>> {
   return body.records ?? [];
 }
 
-/** Opens one supervisor session carrying the transport claim. */
-async function openSession(): Promise<SessionCredential> {
-  const answer = await post('/sessions/open', { runId: RUN_ID, testId: TEST_ID, workerIndex: 0, claims: [CLAIM] }, true);
+/** Opens one supervisor session with its transport claims. */
+async function openSession(testId = TEST_ID, workerIndex = 0, claims = [CLAIM, CLAIM_STATUS]): Promise<SessionCredential> {
+  const answer = await post('/sessions/open', { runId: RUN_ID, testId, workerIndex, claims }, true);
   if (answer.status !== 200) throw new Error(`session open failed: ${JSON.stringify(answer.body)}`);
   return answer.body as unknown as SessionCredential;
 }
 
 /** Registers the observe declaration set (supervisor, before the run). */
 async function declareObserve(): Promise<void> {
-  const answer = await post('/runs/observe-declarations', { obligations: [CLAIM] }, true);
+  const answer = await post('/runs/observe-declarations', { obligations: [CLAIM, CLAIM_STATUS] }, true);
   if (answer.status !== 200) throw new Error(`observe declarations failed: ${JSON.stringify(answer.body)}`);
 }
 
@@ -125,7 +126,7 @@ afterEach(async () => {
 });
 
 describe('POST /sessions/direct-exchanges', () => {
-  it('records hook-scope exchanges and the finalize stamps one witnessed setup record', async () => {
+  it('records direct API exchanges and stamps them as diagnostic-only records', async () => {
     await declareObserve();
     const session = await openSession();
     const report = await reportDirectExchanges(session, [
@@ -146,19 +147,34 @@ describe('POST /sessions/direct-exchanges', () => {
     ]);
   });
 
-  it('issues the setup record once per run, never per finalize', async () => {
+  it('stamps each session direct exchanges for every claim exactly once', async () => {
     await declareObserve();
-    const session = await openSession();
-    await reportDirectExchanges(session, [
+    const first = await openSession();
+    const firstExchanges = [
       { method: 'GET', url: `${appBaseUrl}/api/widgets/77`, status: 200 },
-    ]);
-    await post('/observe/finalize', { sessionId: session.sessionId }, true);
-    // A second session finalizing the same run must not duplicate.
-    const second = await post('/sessions/open', { runId: RUN_ID, testId: `${TEST_ID}-second`, workerIndex: 1, claims: [CLAIM] }, true);
-    expect(second.status).toBe(200);
-    await post('/observe/finalize', { sessionId: (second.body as Record<string, unknown>)['sessionId'] }, true);
-    const records = await getRecords();
-    expect(records.filter((candidate) => directRecordOf([candidate]) !== null)).toHaveLength(1);
+    ];
+    await reportDirectExchanges(first, firstExchanges);
+    await post('/observe/finalize', { sessionId: first.sessionId }, true);
+
+    const secondTestId = `${TEST_ID}-second`;
+    const second = await openSession(secondTestId, 1);
+    const secondExchanges = [
+      { method: 'GET', url: `${appBaseUrl}/api/widgets/88`, status: 200 },
+    ];
+    await reportDirectExchanges(second, secondExchanges);
+    await post('/observe/finalize', { sessionId: second.sessionId }, true);
+    await post('/observe/finalize', { sessionId: second.sessionId }, true);
+
+    const directRecords = (await getRecords()).filter((candidate) => directRecordOf([candidate]) !== null);
+    expect(directRecords).toHaveLength(4);
+    expect(directRecords.filter((candidate) => candidate['testId'] === TEST_ID)).toHaveLength(2);
+    expect(directRecords.filter((candidate) => candidate['testId'] === secondTestId)).toHaveLength(2);
+    expect(directRecords.filter((candidate) => candidate['obligationId'] === CLAIM)).toHaveLength(2);
+    expect(directRecords.filter((candidate) => candidate['obligationId'] === CLAIM_STATUS)).toHaveLength(2);
+    for (const candidate of directRecords) {
+      const expected = candidate['testId'] === TEST_ID ? firstExchanges : secondExchanges;
+      expect((candidate['payload'] as Record<string, unknown>)['exchanges']).toEqual(expected);
+    }
   });
 
   it('keeps a bounded, deduplicated exchange set', async () => {
