@@ -111,6 +111,26 @@ describe('static discovery', () => {
         'module.exports = { test };',
         '',
       ].join('\n'),
+      'e2e/exports-wrapper.cjs': [
+        "const { test: base } = require('@gate-forge/pack-playwright/fixture');",
+        'exports.test = base.extend({});',
+        '',
+      ].join('\n'),
+      'e2e/module-property-wrapper.cjs': [
+        "const { test: base } = require('@gate-forge/pack-playwright/fixture');",
+        'module.exports.test = base.extend({});',
+        '',
+      ].join('\n'),
+      'e2e/exports.spec.js': [
+        "const { test } = require('./exports-wrapper.cjs');",
+        "test('exports property wrapper journey', async ({ page }) => {});",
+        '',
+      ].join('\n'),
+      'e2e/module-property.spec.js': [
+        "const { test } = require('./module-property-wrapper.cjs');",
+        "test('module exports property wrapper journey', async ({ page }) => {});",
+        '',
+      ].join('\n'),
       'e2e/wrapper.mjs': [
         "import { test as base } from '@gate-forge/pack-playwright/fixture';",
         'export const test = base.extend({});',
@@ -143,10 +163,15 @@ describe('static discovery', () => {
       ].join('\n'),
     });
     const result = scanTestFiles({ cwd: root, include: ['e2e/**/*'], exclude: [] });
-    expect(result.entries.map((entry) => entry.title).sort()).toEqual([
+    expect(
+      result.entries.map((entry) => entry.title).sort(),
+      JSON.stringify(result.unresolved),
+    ).toEqual([
       'CJS wrapper journey',
       'ESM wrapper journey',
       'direct MTS journey',
+      'exports property wrapper journey',
+      'module exports property wrapper journey',
     ]);
     expect(result.unresolved).toMatchObject([
       { file: 'e2e/unrelated.js', code: 'unresolved-test-alias', titlePath: ['not a runner test'] },
