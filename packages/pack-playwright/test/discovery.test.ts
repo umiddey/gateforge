@@ -901,6 +901,51 @@ describe('static discovery', () => {
     expect(tamperSignal(dynamic)).toBe(true);
   });
 
+  it('reads a spec importing an existing .json data module (0.13.10 F6)', () => {
+    // A JSON import is a data module: it carries no test bindings and
+    // must not surface as an unresolved-import row, but the spec's own
+    // tests must still be read. A specifier that names NO existing file
+    // stays a visible unresolved-import row (fail visible).
+    const root = makeTempDir();
+    writeTree(root, {
+      'e2e/data.json': '{\n  "label": "ok"\n}\n',
+      'e2e/labels.spec.ts': [
+        "import { test } from 'playwright/test';",
+        "import labels from './data.json';",
+        "import * as labelsNs from './data.json';",
+        "test('renders the data label', async ({ page }) => {",
+        '  await page.goto("/labels");',
+        '  void labels;',
+        '  void labelsNs;',
+        '});',
+        '',
+      ].join('\n'),
+      'e2e/missing.spec.ts': [
+        "import { test } from 'playwright/test';",
+        "import missing from './absent.json';",
+        "test('missing data import', async ({ page }) => {",
+        '  await page.goto("/labels");',
+        '  void missing;',
+        '});',
+        '',
+      ].join('\n'),
+    });
+    const result = scanTestFiles({ cwd: root, include: ['e2e/**/*.ts'], exclude: [] });
+    const readable = rowFor(result.entries, 'e2e/labels.spec.ts');
+    expect(readable.title).toBe('renders the data label');
+    expect(
+      result.unresolved.some((row) => row.code === 'unresolved-import' && row.detail.includes("'./data.json'")),
+      'an existing .json import is a data module, never an unresolved-import row',
+    ).toBe(false);
+    // A .json specifier that names nothing stays a visible row.
+    const missing = rowFor(result.entries, 'e2e/missing.spec.ts');
+    expect(missing.title).toBe('missing data import');
+    expect(
+      result.unresolved.some((row) => row.code === 'unresolved-import' && row.detail.includes("'./absent.json'")),
+      'a missing .json import stays fail-visible',
+    ).toBe(true);
+  });
+
   it("a mocked/mock/mocks FOLDER segment mocks its specs (0.9.2)", () => {
     const root = makeTempDir();
     writeTree(root, {
