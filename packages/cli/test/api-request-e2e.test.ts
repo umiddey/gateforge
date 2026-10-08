@@ -513,13 +513,16 @@ tests:
           const verdict = report.verdicts.find((item) => item.obligationId === obligationId);
           expect(verdict?.reason ?? '', obligationId).toContain('the test called this endpoint directly from test code');
         }
+        // Chromium: evaluate is no longer refused when reading the code; the
+        // runtime initiator rule refuses the requests it starts instead.
         for (const obligationId of [EVAL_REQUEST, EVAL_STATUS, EVAL_APP_REQUEST, EVAL_APP_STATUS]) {
           const verdict = report.verdicts.find((item) => item.obligationId === obligationId);
           expect(verdict, observed).toMatchObject({ verdict: 'missing' });
-          const refusal = report.blocking?.find(
+          expect(verdict?.reason ?? '', observed).toContain('the request was started by test code running in the page');
+          const staticRefusal = report.blocking?.find(
             (entry) => entry.cause === 'TEST_MAPPING_AMBIGUOUS' && entry.name === obligationId,
           );
-          expect(refusal?.detail ?? '', observed).toContain('PAGE_OBSERVATION_TAMPER_RISK');
+          expect(staticRefusal, observed).toBeUndefined();
         }
         const unreadableProblem = report.blocking?.find(
           (entry) => entry.cause === 'TEST_KIND_UNKNOWN' && entry.name === UNREADABLE_REQUEST,
