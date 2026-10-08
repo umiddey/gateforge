@@ -182,6 +182,58 @@ export function defineHttpAdapter(config: HttpAdapterConfig): EvidenceAdapter {
       ? pagedPath(config.listPath(undefined), paging, 1)
       : pagedPath(config.listPath, paging, 1);
   };
+
+  /**
+   * The ONE read a probe of a composed (`listCollection`) collection
+   * issues: the collection's first page, resolved through the same
+   * walker the witness uses — identical page-path computation for
+   * page and cursor paging — but never a full walk. The composition
+   * callback receives a reader whose FIRST call performs that single
+   * read; any later call returns an empty page without touching the
+   * network, so a callback that composes several collections still
+   * costs exactly one GET.
+   *
+   * Args:
+   *   ctx: the base URL to read (headers, when the app needs them).
+   *   compose: the adapter's own collection composition.
+   *
+   * Returns:
+   *   Promise<KitProbeResult>: the first page path, status, and headers.
+   * @throws Error when the composition never read at all (a callback
+   *   that ignores the reader proves nothing about the collection).
+   */
+  const probeComposedFirstPage = async (
+    ctx: KitProbeContext,
+    compose: (readAll: CollectionReader) => Promise<readonly unknown[]>,
+  ): Promise<KitProbeResult> => {
+    // The reads the composition performed, first one first. A holder
+    // array instead of a bare `let`: the assignment happens inside the
+    // reader callback, and control-flow analysis cannot see it.
+    const reads: Array<{ path: string; result: Promise<KitGetResult> }> = [];
+    const firstPageReader: CollectionReader = (pathFor, options) => {
+      if (reads.length > 0) return Promise.resolve([] as unknown[]);
+      const paging = options?.paging ?? config.paging ?? ({ kind: 'page' } as HttpAdapterPaging);
+      const page =
+        paging.kind === 'cursor'
+          ? typeof pathFor === 'function'
+            ? pathFor(undefined)
+            : pathFor
+          : pagedPath(typeof pathFor === 'function' ? pathFor(undefined) : pathFor, paging, 1);
+      const result = request(ctx, page);
+      reads.push({ path: page, result });
+      return result.then(() => [] as unknown[]);
+    };
+    await compose(firstPageReader);
+    const first = reads[0];
+    if (first === undefined) {
+      throw new Error(
+        `${config.resourceId}: composed collection issued no read to probe — listCollection must ` +
+          'resolve the member list through the reader it receives',
+      );
+    }
+    const result = await first.result;
+    return { path: first.path, status: result.status, headers: result.headers };
+  };
   /**
    * Walks one (possibly paged) collection to completion.
    *
@@ -349,6 +401,11 @@ export function defineHttpAdapter(config: HttpAdapterConfig): EvidenceAdapter {
    * login, cookie/bearer, one re-login on 401, GET-only — so a probe
    * sees exactly what a witnessed run would. Never writes.
    *
+   * A composed (`listCollection`) collection has no static path: the
+   * probe reads its first page through the walker instead
+   * ({@link probeComposedFirstPage}) and NEVER falls through to the
+   * by-id path, whose readPath this shape legitimately lacks.
+   *
    * Args:
    *   ctx: the base URL to read (headers, when the app needs them).
    *   id: the entity id to read when there is no collection read.
@@ -360,8 +417,20 @@ export function defineHttpAdapter(config: HttpAdapterConfig): EvidenceAdapter {
    *   redirect.
    */
   const probe = async (ctx: KitProbeContext, id?: string): Promise<KitProbeResult> => {
+    const compose = config.listCollection;
+    if (compose !== undefined) return await probeComposedFirstPage(ctx, compose);
     const listPath = firstListPath();
-    const path = listPath ?? pathForId(id ?? '0');
+    const path =
+      listPath ??
+      (() => {
+        if (!hasRead) {
+          throw new Error(
+            `${config.resourceId}: adapter declares no readable path to probe (neither ` +
+              'readPath nor a collection read)',
+          );
+        }
+        return pathForId(id ?? '0');
+      })();
     const result = await request(ctx, path);
     return { path, status: result.status, headers: result.headers };
   };

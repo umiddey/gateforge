@@ -868,6 +868,32 @@ export interface EvidenceAdapter {
   /** Optional base override for THIS adapter's reads. */
   baseUrl?: string;
   /**
+   * Read-only introspection the kit adapters carry for
+   * `gateforge adapters check --probe`: the exact path this adapter's
+   * first read of each kind hits (null when it composes one itself).
+   * Not part of the pin-#8 contract and never consulted by the
+   * witness; a hand-written adapter may omit it.
+   */
+  evidencePaths?: {
+    /** The by-id read path for one entity id, or null without a read path. */
+    read: (id: string) => string | null;
+    /** The first collection page path, or null for a composed collection. */
+    list: () => string | null;
+  };
+  /**
+   * Optional read-only probe hook: issues ONE GET through the
+   * adapter's own transport — its seat, its cookies, one re-login on
+   * 401 — so `gateforge adapters check --probe` reports what a
+   * witnessed run would see instead of what the adapter claims. A
+   * composed (listCollection) collection probes its first page through
+   * the walker. Not part of the pin-#8 contract and never called by
+   * the witness; a hand-written adapter may omit it.
+   */
+  probe?: (
+    ctx: { baseUrl: string; headers?: Record<string, string> },
+    id?: string,
+  ) => Promise<{ path: string; status: number; headers: Headers }>;
+  /**
    * Optional SERVER PROBE, executed witness-side only (see the interface
    * doc): observes the app database directly and reports the entity's
    * presence + observed column state.

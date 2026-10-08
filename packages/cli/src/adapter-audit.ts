@@ -405,18 +405,25 @@ export async function probeAdapter(
   const paths = kitPathsOf(module);
   if (paths !== null) {
     const target = paths.list() ?? paths.read(probeId ?? '0');
+    const probe = module['probe'];
     if (target === null) {
-      return {
-        name: report.name,
-        outcome: 'skipped',
-        path: '',
-        detail: 'adapter declares no probeable path (composed collection reads are probed by the run)',
-      };
+      // A composed (listCollection) collection has no static path to
+      // name — but a kit that carries the probe hook reads the
+      // collection's FIRST page through its own walker, so it probes
+      // fine. Only a kit without the hook is genuinely unprobeable.
+      if (typeof probe !== 'function') {
+        return {
+          name: report.name,
+          outcome: 'skipped',
+          path: '',
+          detail: 'adapter declares no probeable path (composed collection reads are probed by the run)',
+        };
+      }
+      return probeThroughKit(report, baseUrl, probe as KitProbe, probeId);
     }
     // A kit adapter reads through its own seat, so the probe must
     // too: an unauthenticated GET would report a 401 the adapter
     // never sees and blame credentials that are perfectly correct.
-    const probe = module['probe'];
     return typeof probe === 'function'
       ? probeThroughKit(report, baseUrl, probe as KitProbe, probeId)
       : probePath(report, baseUrl, target);

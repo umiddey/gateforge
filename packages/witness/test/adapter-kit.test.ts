@@ -416,7 +416,9 @@ describe('adapter kit: composed-collection probe', () => {
       listCollection: (readAll) => readAll('/composed/rows', { collectionKey: 'rows' }),
       collectionKey: 'rows',
     });
-    const result = await adapter.probe({ baseUrl: probeBase }, '0');
+    const probe = adapter.probe;
+    if (probe === undefined) throw new Error('the kit adapter exports no probe hook');
+    const result = await probe({ baseUrl: probeBase }, '0');
     expect(result.status).toBe(200);
     expect(result.path).toBe('/composed/rows?page=1&page_size=100');
     // One GET: the collection's first page, never a full walk.
@@ -442,7 +444,9 @@ describe('adapter kit: composed-collection probe', () => {
         ),
       collectionKey: 'rows',
     });
-    const result = await adapter.probe({ baseUrl: probeBase });
+    const probe = adapter.probe;
+    if (probe === undefined) throw new Error('the kit adapter exports no probe hook');
+    const result = await probe({ baseUrl: probeBase });
     expect(result.status).toBe(200);
     expect(result.path).toBe('/cursor/rows');
     expect(served).toEqual(['/cursor/rows']);
