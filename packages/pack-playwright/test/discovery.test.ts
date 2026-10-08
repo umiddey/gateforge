@@ -1961,6 +1961,30 @@ describe('native playwright reconciliation', () => {
     });
     return root;
   }
+  it('marks only runner-resolved dependency projects as setup catalog rows', async () => {
+    const root = makePlaywrightProject({
+      'e2e/auth.setup.js': "import { test } from 'playwright/test'; test('prepare session', async () => {});\n",
+      'e2e/accounts.spec.js': "import { test } from 'playwright/test'; test('reads account', async () => {});\n",
+    });
+    writeFileSync(
+      join(root, 'playwright.config.js'),
+      "export default { testDir: 'e2e', projects: [" +
+        "{ name: 'setup', testMatch: /.*\\.setup\\.js/ }, " +
+        "{ name: 'chromium', dependencies: ['setup'] }] };\n",
+    );
+    const discovered = await discoverTestCatalog({
+      cwd: root,
+      config: fixtureConfig(['e2e/**/*.js']),
+    });
+    expect(discovered.projectDependencies).toEqual({ setup: [], chromium: ['setup'] });
+    expect(discovered.catalog.entries.find((entry) => entry.project === 'setup')).toMatchObject({
+      title: 'prepare session',
+      setupProjectDependents: ['chromium'],
+    });
+    expect(discovered.catalog.entries.find((entry) => entry.project === 'chromium')).not.toHaveProperty(
+      'setupProjectDependents',
+    );
+  });
 
   it('enumerates unannotated and skipped tests with projects (official --list)', async () => {
     const root = makePlaywrightProject({

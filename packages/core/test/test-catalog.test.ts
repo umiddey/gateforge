@@ -57,6 +57,12 @@ describe('test catalog schema', () => {
     expect(parsed.entries).toHaveLength(1);
     expect(parsed.inventoryComplete).toBe(true);
   });
+  it('accepts runner-resolved setup dependents as catalog metadata', () => {
+    const parsed = TestCatalogSchema.parse(
+      catalog([entry({ logicalKey: 'setup-key', project: 'setup', setupProjectDependents: ['chromium'] })]),
+    );
+    expect(parsed.entries[0]?.setupProjectDependents).toEqual(['chromium']);
+  });
 
   it('rejects an unknown schemaVersion (gateforge never migrates)', () => {
     const result = TestCatalogSchema.safeParse({ ...catalog([]), schemaVersion: 2 });

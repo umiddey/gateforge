@@ -214,6 +214,8 @@ export const TestCatalogEntrySchema = z
      * config); recorded, not silent.
      */
     reconciliation: ReconciliationStatusSchema,
+    /** Projects that depend on this row's project, as resolved by the runner. */
+    setupProjectDependents: z.array(z.string().min(1)).min(1).optional(),
     /** The kind inference concluded (default `unknown`; §3.2). */
     inferredKind: TestKindSchema,
     /** Strong kind rules that fired with their code evidence. */

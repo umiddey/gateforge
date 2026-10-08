@@ -131,6 +131,33 @@ function declaredBindingsFor(resolution: ResolvedMappings, obligationId: string)
 }
 
 describe('resolveTestMappings — binding', () => {
+  it('refuses a sidecar claim on a runner-identified setup project', () => {
+    const setup = row({ logicalKey: KEY, project: 'setup', setupProjectDependents: ['chromium'] });
+    const resolution = resolveTestMappings(
+      resolveInput({
+        catalog: catalog([setup]),
+        sidecar: sidecar([sidecarEntry({ selector: { runner: 'playwright', project: 'setup', file: setup.file, titlePath: setup.titlePath }, kind: 'browser-e2e' })]),
+      }),
+    );
+    expect(bindingsFor(resolution, OBLIGATION)).toEqual([]);
+    expect(resolution.problems).toContainEqual(
+      expect.objectContaining({
+        cause: 'TEST_MAPPING_AMBIGUOUS',
+        detail:
+          "test 'playwright:chromium:e2e/accounts.spec.js:deletes an account' belongs to setup project 'setup' " +
+          "(a dependency of 'chromium'); setup tests prepare state and never carry claims — move the claim to a test that drives the product",
+      }),
+    );
+  });
+
+  it('keeps existing mapping behavior when no runner graph marked setup projects', () => {
+    const resolution = resolveTestMappings(
+      resolveInput({ sidecar: sidecar([sidecarEntry({ kind: 'browser-e2e' })]) }),
+    );
+    expect(resolution.problems).toEqual([]);
+    expect(bindingsFor(resolution, OBLIGATION)).toHaveLength(1);
+  });
+
   it('binds a sidecar entry to its catalog instances with origin sidecar', () => {
     const resolution = resolveTestMappings(resolveInput({ sidecar: sidecar([sidecarEntry({ kind: 'browser-e2e' })]) }));
     expect(resolution.problems).toEqual([]);
