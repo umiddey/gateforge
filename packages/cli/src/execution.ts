@@ -509,6 +509,12 @@ export function planExpectedSet(catalog: TestCatalog): PlannedRow[] {
   const rows: PlannedRow[] = [];
   for (const entry of catalog.entries) {
     if (entry.runner !== 'playwright') continue;
+    // 0.13.9 runner-authority note: a call site the runner's own
+    // enumeration proves unregistered (conditional or unreached) stays
+    // catalog data but plans nothing — demanding it would seal an
+    // expected case no session can ever open (RUN_INCOMPLETE on a case
+    // the runner provably never enumerates).
+    if (entry.informationalNote !== undefined) continue;
     const blockingAnnotations = [
       ...new Set(
         entry.suppressionSignals

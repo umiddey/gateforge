@@ -743,6 +743,12 @@ class CatalogBuilder {
               .join(', ')})`,
           };
         }
+        const note = this.runnerAuthorityNote(
+          gap.file,
+          unresolvedCallSites.map((candidate) => candidate.location),
+          true,
+        );
+        if (note !== undefined) row.informationalNote = note;
         rows.push(row);
         continue;
       }
@@ -754,9 +760,40 @@ class CatalogBuilder {
           detail: `${row.unresolvedReason.detail} (further call sites: ${extras.join(', ')})`,
         };
       }
+      const computedTitle =
+        gap.code === 'dynamic-title' || gap.titlePath[gap.titlePath.length - 1] === UNRESOLVED_TITLE_PLACEHOLDER;
+      const note = this.runnerAuthorityNote(gap.file, [gap.location], computedTitle);
+      if (note !== undefined) row.informationalNote = note;
       rows.push(row);
     }
     return rows;
+  }
+
+  /**
+   * The informational runner-authority note for a static-only shape, or
+   * undefined when the shape keeps today's blocking behaviour (0.13.9).
+   * The runner's list is the authority on what executes: when the list
+   * enumerated AT LEAST ONE instance for the shape's file but NONE at
+   * any of the shape's call-site lines, the call site is conditional or
+   * unreached — catalog data, never a required case. Files the list
+   * enumerated NOTHING for keep failing closed, and so does every shape
+   * whose title the static scan resolved to a literal (only computed
+   * titles — `dynamic-title` gaps and `<unresolved-title>` rows — are
+   * ever noted).
+   */
+  private runnerAuthorityNote(
+    file: string,
+    callSites: ReadonlyArray<{ line: number }>,
+    computedTitle: boolean,
+  ): string | undefined {
+    if (!computedTitle) return undefined;
+    if (this.native.status !== 'discovered') return undefined;
+    const listedLines = new Set(
+      this.native.instances.filter((instance) => instance.file === file).map((instance) => instance.location.line),
+    );
+    if (listedLines.size === 0) return undefined;
+    if (callSites.some((callSite) => listedLines.has(callSite.line))) return undefined;
+    return 'call site never registered by the runner: conditional or unreached';
   }
 
   /** One matched/native-list playwright instance row. */
@@ -1083,7 +1120,11 @@ class CatalogBuilder {
       !sorted.some(
         (row) =>
           (row.runner === 'playwright' || row.runner === this.runner) &&
-          row.discoveryStatus === 'unresolved',
+          row.discoveryStatus === 'unresolved' &&
+          // 0.13.9 runner-authority note: a call site the runner's own
+          // enumeration proves unregistered (conditional or unreached) is
+          // catalog data, never an inventory gap.
+          row.informationalNote === undefined,
       ) &&
       !diagnosticUnavailable;
 

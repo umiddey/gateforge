@@ -231,6 +231,16 @@ export const TestCatalogEntrySchema = z
       .object({ code: z.string().min(1), detail: z.string().min(1) })
       .strict()
       .optional(),
+    /**
+     * Informational runner-authority note (0.13.9): present ONLY when the
+     * runner's own enumeration proves this static call site never
+     * registers — its file has listed instances, but none at this call
+     * site's location (a conditional or unreached registration branch).
+     * The row stays catalog data (rows are never dropped), but it is
+     * never an expected test: nothing plans it, nothing demands a
+     * session for it, and it never makes the inventory incomplete.
+     */
+    informationalNote: z.string().min(1).optional(),
   })
   .strict()
   .superRefine((entry, ctx) => {

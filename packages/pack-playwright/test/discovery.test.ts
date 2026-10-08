@@ -1056,6 +1056,104 @@ describe('static discovery', () => {
     }
   }, 120_000);
 
+  it('notes a static call site the runner never registers instead of demanding it (0.13.9)', async () => {
+    // Conditional registrations (a journey helper registering per data
+    // row behind a wiring flag): the runner lists the instances of the
+    // branch that runs; the untaken branch's call site has a computed
+    // title and NO listed instance. The runner's list is the authority
+    // on what executes — such a row stays catalog data under an
+    // informational note and is never a required case.
+    const root = makeTempDir('gateforge-conditional-');
+    mkdirSync(join(root, 'node_modules'), { recursive: true });
+    for (const name of ['playwright', 'playwright-core']) {
+      symlinkSync(join(ROOT, 'node_modules', name), join(root, 'node_modules', name), 'dir');
+    }
+    writeTree(root, {
+      'package.json': '{ "type": "module", "private": true }\n',
+      'playwright.config.js': [
+        "export default { testDir: 'e2e', projects: [",
+        "  { name: 'chromium', use: { browserName: 'chromium' } },",
+        '] };',
+        '',
+      ].join('\n'),
+      'e2e/journeys.spec.ts': [
+        "import { test } from 'playwright/test';",
+        '',
+        'const journeys = [',
+        "  { title: 'wired journey', wired: true },",
+        "  { title: 'wired second journey', wired: true },",
+        '];',
+        '',
+        'function registerJourney(spec: { title: string; wired: boolean }): void {',
+        '  if (spec.wired) {',
+        '    test(spec.title, async ({ page }) => {',
+        "      await page.goto('/wired');",
+        '    });',
+        '  } else {',
+        '    test(spec.title, async ({ page }) => {',
+        "      await page.goto('/fallback');",
+        '    });',
+        '  }',
+        '}',
+        'for (const journey of journeys) registerJourney(journey);',
+        '',
+      ].join('\n'),
+    });
+    const { catalog } = await discoverTestCatalog({ cwd: root, config: fixtureConfig(['e2e/**/*.ts']) });
+    const listed = catalog.entries.filter((entry) => entry.discoveryStatus === 'discovered');
+    expect(listed.map((entry) => entry.title).sort()).toEqual(['wired journey', 'wired second journey']);
+    const unregistered = catalog.entries.filter((entry) => entry.discoveryStatus === 'unresolved');
+    expect(unregistered).toHaveLength(1);
+    expect(unregistered[0]?.unresolvedReason?.code).toBe('dynamic-title');
+    expect(unregistered[0]?.informationalNote).toBe('call site never registered by the runner: conditional or unreached');
+    // The row is never dropped: it stays visible catalog data.
+    expect(catalog.unresolved).toHaveLength(1);
+    expect(catalog.inventoryComplete).toBe(true);
+  }, 120_000);
+
+  it('keeps a computed-title row blocking in a file the runner lists nothing for (0.13.9)', async () => {
+    // The informational note never applies where the runner enumerated
+    // NOTHING for the file: its computed-title call site stays a
+    // blocking unresolved row (fail closed), and so does any row whose
+    // title the runner DOES list somewhere else in the file.
+    const root = makeTempDir('gateforge-unlisted-');
+    mkdirSync(join(root, 'node_modules'), { recursive: true });
+    for (const name of ['playwright', 'playwright-core']) {
+      symlinkSync(join(ROOT, 'node_modules', name), join(root, 'node_modules', name), 'dir');
+    }
+    writeTree(root, {
+      'package.json': '{ "type": "module", "private": true }\n',
+      'playwright.config.js': [
+        "export default { testDir: 'e2e', projects: [",
+        "  { name: 'chromium', use: { browserName: 'chromium' } },",
+        '] };',
+        '',
+      ].join('\n'),
+      'e2e/registered.spec.ts': [
+        "import { test } from 'playwright/test';",
+        "test('listed journey', async ({ page }) => {",
+        "  await page.goto('/listed');",
+        '});',
+        '',
+      ].join('\n'),
+      // No .spec segment: the runner's own selection never collects this
+      // file, but the configured scan roots still read it.
+      'e2e/orphan.helpers.ts': [
+        "import { test } from 'playwright/test';",
+        'const title = String(Math.random());',
+        'test(title, () => {});',
+        '',
+      ].join('\n'),
+    });
+    const { catalog } = await discoverTestCatalog({ cwd: root, config: fixtureConfig(['e2e/**/*.ts']) });
+    const orphan = catalog.entries.filter((entry) => entry.file === 'e2e/orphan.helpers.ts');
+    expect(orphan).toHaveLength(1);
+    expect(orphan[0]?.discoveryStatus).toBe('unresolved');
+    expect(orphan[0]?.unresolvedReason?.code).toBe('dynamic-title');
+    expect(orphan[0]?.informationalNote).toBeUndefined();
+    expect(catalog.inventoryComplete).toBe(false);
+  }, 120_000);
+
   it("a mocked/mock/mocks FOLDER segment mocks its specs (0.9.2)", () => {
     const root = makeTempDir();
     writeTree(root, {

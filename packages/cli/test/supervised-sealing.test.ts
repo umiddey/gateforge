@@ -161,6 +161,24 @@ describe('planExpectedSet (expected set fixed BEFORE the run)', () => {
     );
     expect(rows[0]?.input.unenumeratedReason).toBe('unresolved-call: removeAccount(page)');
   });
+
+  it('never plans a row carrying the informational runner note (0.13.9)', () => {
+    // The runner's own enumeration is the authority on what executes: a
+    // call site it provably never registers (conditional or unreached
+    // branch) stays catalog data but plans nothing — demanding it would
+    // seal an expected case no session can ever open (0.13.9 consumer
+    // run: 92 false RUN_INCOMPLETE).
+    const rows = planExpectedSet(
+      catalog([
+        row({
+          discoveryStatus: 'unresolved',
+          unresolvedReason: { code: 'dynamic-title', detail: 'test title is computed and cannot be resolved statically' },
+          informationalNote: 'call site never registered by the runner: conditional or unreached',
+        }),
+      ]),
+    );
+    expect(rows).toEqual([]);
+  });
 });
 
 describe('claimInjectionsFor (session-open obligation claims; Phase 3 gap closure)', () => {
