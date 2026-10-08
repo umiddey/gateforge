@@ -110,7 +110,7 @@ export interface StaticTestFacts {
   pageRoute: Location | null;
   /** Literal URL patterns passed to `page.route(...)`, when statically known. */
   pageRouteTargets?: string[];
-  /** fetch/axios call inside the test body. */
+  /** fetch/axios or Playwright API request call in this test or a called helper. */
   httpClientCall: Location | null;
   /** fetch/axios call anywhere in the file (app-boundary import hint). */
   fileHttpClientCall: Location | null;
@@ -1270,7 +1270,16 @@ function signatureParamsOf(callback: ts.Expression): string[] {
  * real browser journey.
  */
 export const BROWSER_FIXTURE_PARAMS = new Set(['page', 'browser', 'context', 'browserName', 'evidence']);
-const HTTP_CLIENT_CALLEES = new Set(['fetch', 'axios']);
+const HTTP_CLIENT_CALLEES: Record<string, true> = { fetch: true, axios: true };
+const PLAYWRIGHT_REQUEST_METHODS: Record<string, true> = {
+  delete: true,
+  fetch: true,
+  get: true,
+  head: true,
+  patch: true,
+  post: true,
+  put: true,
+};
 
 /** Whether the subtree contains `<x>.route(` — playwright interception. */
 function findPageRoute(node: ts.Node, source: ts.SourceFile, file: string): Location | null {
@@ -1325,16 +1334,32 @@ function pageRouteTargets(node: ts.Node): string[] {
   return [...targets].sort();
 }
 
-/** Whether the subtree calls fetch/axios (the app's HTTP boundary). */
-function findHttpClientCall(node: ts.Node, source: ts.SourceFile, file: string): Location | null {
+/** Whether the subtree calls fetch/axios or a Playwright APIRequestContext method. */
+function findHttpClientCall(
+  node: ts.Node,
+  source: ts.SourceFile,
+  file: string,
+  includePlaywrightRequests = true,
+): Location | null {
   let found: Location | null = null;
   const visit = (current: ts.Node): void => {
     if (found !== null) return;
     if (ts.isCallExpression(current)) {
       const chain = calleeChain(current.expression);
-      if (chain !== null && HTTP_CLIENT_CALLEES.has(chain.base)) {
-        found = locationOf(file, source, current);
-        return;
+      if (chain !== null) {
+        const method = chain.names[chain.names.length - 1];
+        const playwrightRequest =
+          includePlaywrightRequests &&
+          method !== undefined &&
+          PLAYWRIGHT_REQUEST_METHODS[method] === true &&
+          ((chain.base === 'request' && chain.names.length === 1) ||
+            ((chain.base === 'page' || chain.base === 'context') &&
+              chain.names.length === 2 &&
+              chain.names[0] === 'request'));
+        if (HTTP_CLIENT_CALLEES[chain.base] === true || playwrightRequest) {
+          found = locationOf(file, source, current);
+          return;
+        }
       }
     }
     ts.forEachChild(current, visit);
@@ -1966,10 +1991,11 @@ function localNameTamperReach(
   depth: number,
   active: Set<string>,
   ignoreEvaluate: boolean,
+  httpClient = false,
 ): TamperReach {
   const declaration = routeDeclsOf(model).get(name);
   if (declaration !== undefined) {
-    return nodeTamperReach(state, cwd, model, declaration, depth + 1, active, ignoreEvaluate);
+    return nodeTamperReach(state, cwd, model, declaration, depth + 1, active, ignoreEvaluate, httpClient);
   }
   const binding = model.bindings.get(name);
   if (binding === undefined) return UNKNOWN_REACH;
@@ -1977,14 +2003,14 @@ function localNameTamperReach(
     case 'import': {
       if (binding.target === undefined) return CLEAN_REACH;
       return binding.importedName === '*'
-        ? namespaceModuleReach(state, cwd, binding.target, depth + 1, active, ignoreEvaluate)
-        : exportedNameTamperReach(state, cwd, binding.target, binding.importedName ?? '', depth + 1, active, ignoreEvaluate);
+        ? namespaceModuleReach(state, cwd, binding.target, depth + 1, active, ignoreEvaluate, httpClient)
+        : exportedNameTamperReach(state, cwd, binding.target, binding.importedName ?? '', depth + 1, active, ignoreEvaluate, httpClient);
     }
     case 'alias': {
       const aliased = binding.target === undefined ? undefined : routeDeclsOf(model).get(binding.target);
       return aliased === undefined
         ? CLEAN_REACH
-        : nodeTamperReach(state, cwd, model, aliased, depth + 1, active, ignoreEvaluate);
+        : nodeTamperReach(state, cwd, model, aliased, depth + 1, active, ignoreEvaluate, httpClient);
     }
     case 'test':
     case 'testmodule':
@@ -2014,8 +2040,9 @@ function exportedNameTamperReach(
   depth: number,
   active: Set<string>,
   ignoreEvaluate: boolean,
+  httpClient = false,
 ): TamperReach {
-  const key = `${ignoreEvaluate ? 'blocking' : 'any'}::${file}::${name}`;
+  const key = `${httpClient ? 'http-client::' : ''}${ignoreEvaluate ? 'blocking' : 'any'}::${file}::${name}`;
   const cached = state.routeReachByExport.get(key);
   if (cached !== undefined) return cached;
   if (depth > state.maxImportDepth) return UNKNOWN_REACH;
@@ -2028,13 +2055,13 @@ function exportedNameTamperReach(
   } else {
     const exported = model.exports.get(name);
     if (exported === undefined) {
-      verdict = localNameTamperReach(state, cwd, model, name, depth, active, ignoreEvaluate);
+      verdict = localNameTamperReach(state, cwd, model, name, depth, active, ignoreEvaluate, httpClient);
     } else if ('packTest' in exported) {
       verdict = CLEAN_REACH;
     } else if ('targetFile' in exported) {
-      verdict = exportedNameTamperReach(state, cwd, exported.targetFile, exported.importedName, depth + 1, active, ignoreEvaluate);
+      verdict = exportedNameTamperReach(state, cwd, exported.targetFile, exported.importedName, depth + 1, active, ignoreEvaluate, httpClient);
     } else {
-      verdict = localNameTamperReach(state, cwd, model, exported.local, depth, active, ignoreEvaluate);
+      verdict = localNameTamperReach(state, cwd, model, exported.local, depth, active, ignoreEvaluate, httpClient);
     }
   }
   active.delete(key);
@@ -2057,28 +2084,31 @@ function namespaceModuleReach(
   depth: number,
   active: Set<string>,
   ignoreEvaluate: boolean,
+  httpClient = false,
 ): TamperReach {
-  const key = `${ignoreEvaluate ? 'blocking' : 'any'}::${file}::<namespace>`;
+  const key = `${httpClient ? 'http-client::' : ''}${ignoreEvaluate ? 'blocking' : 'any'}::${file}::<namespace>`;
   const cached = state.routeReachByExport.get(key);
   if (cached !== undefined) return cached;
   if (depth > state.maxImportDepth) return UNKNOWN_REACH;
   if (active.has(key)) return CLEAN_REACH;
   active.add(key);
   const verdict = ((): TamperReach => {
-    const topLevel = topLevelTamperOf(state, cwd, file, ignoreEvaluate);
-    if (topLevel !== null) return { kind: 'tamper', location: topLevel };
+    if (!httpClient) {
+      const topLevel = topLevelTamperOf(state, cwd, file, ignoreEvaluate);
+      if (topLevel !== null) return { kind: 'tamper', location: topLevel };
+    }
     const model = state.models.get(file) ?? modelOf(state, cwd, file, true);
     if (model === null) return CLEAN_REACH;
     for (const exportedName of model.exports.keys()) {
-      const reach = exportedNameTamperReach(state, cwd, file, exportedName, depth + 1, active, ignoreEvaluate);
+      const reach = exportedNameTamperReach(state, cwd, file, exportedName, depth + 1, active, ignoreEvaluate, httpClient);
       if (reach.kind !== 'clean') return reach;
     }
     for (const binding of model.bindings.values()) {
       if (binding.kind !== 'import' || binding.target === undefined) continue;
       const reach =
         binding.importedName === '*'
-          ? namespaceModuleReach(state, cwd, binding.target, depth + 1, active, ignoreEvaluate)
-          : exportedNameTamperReach(state, cwd, binding.target, binding.importedName ?? '', depth + 1, active, ignoreEvaluate);
+          ? namespaceModuleReach(state, cwd, binding.target, depth + 1, active, ignoreEvaluate, httpClient)
+          : exportedNameTamperReach(state, cwd, binding.target, binding.importedName ?? '', depth + 1, active, ignoreEvaluate, httpClient);
       if (reach.kind !== 'clean') return reach;
     }
     return CLEAN_REACH;
@@ -2098,6 +2128,7 @@ function identifierReach(
   active: Set<string>,
   called: boolean,
   ignoreEvaluate: boolean,
+  httpClient = false,
 ): TamperReach {
   const text = identifier.text;
   const key = `${model.file}::${text}`;
@@ -2105,7 +2136,7 @@ function identifierReach(
   const local = resolveLocalReferenceNode(text, identifier);
   if (local !== undefined) {
     active.add(key);
-    const reach = referenceVerdict(nodeTamperReach(state, cwd, model, local, depth + 1, active, ignoreEvaluate), called);
+    const reach = referenceVerdict(nodeTamperReach(state, cwd, model, local, depth + 1, active, ignoreEvaluate, httpClient), called);
     active.delete(key);
     return reach;
   }
@@ -2114,8 +2145,8 @@ function identifierReach(
   if (binding.kind === 'import' && binding.target !== undefined) {
     const reach =
       binding.importedName === '*'
-        ? namespaceModuleReach(state, cwd, binding.target, depth + 1, active, ignoreEvaluate)
-        : exportedNameTamperReach(state, cwd, binding.target, binding.importedName ?? '', depth + 1, active, ignoreEvaluate);
+        ? namespaceModuleReach(state, cwd, binding.target, depth + 1, active, ignoreEvaluate, httpClient)
+        : exportedNameTamperReach(state, cwd, binding.target, binding.importedName ?? '', depth + 1, active, ignoreEvaluate, httpClient);
     return referenceVerdict(reach, called);
   }
   return CLEAN_REACH;
@@ -2136,6 +2167,7 @@ function nodeTamperReach(
   depth: number,
   active: Set<string>,
   ignoreEvaluate: boolean,
+  httpClient = false,
 ): TamperReach {
   if (depth > state.maxImportDepth) return UNKNOWN_REACH;
   let verdict: TamperReach = CLEAN_REACH;
@@ -2146,17 +2178,19 @@ function nodeTamperReach(
   const visit = (current: ts.Node): void => {
     if (verdict.kind !== 'clean') return;
     if (ts.isIdentifier(current)) {
-      verdict = referenceVerdict(identifierReach(state, cwd, model, current, depth, active, false, ignoreEvaluate), false);
+      verdict = referenceVerdict(identifierReach(state, cwd, model, current, depth, active, false, ignoreEvaluate, httpClient), false);
       return;
     }
     if (ts.isCallExpression(current)) {
-      const tamper = tamperApiLocation(model.source, model.file, current, ignoreEvaluate);
+      const tamper = httpClient
+        ? findHttpClientCall(current, model.source, model.file)
+        : tamperApiLocation(model.source, model.file, current, ignoreEvaluate);
       if (tamper !== null) {
         verdict = { kind: 'tamper', location: tamper };
         return;
       }
       if (ts.isIdentifier(current.expression)) {
-        verdict = referenceVerdict(identifierReach(state, cwd, model, current.expression, depth, active, true, ignoreEvaluate), true);
+        verdict = referenceVerdict(identifierReach(state, cwd, model, current.expression, depth, active, true, ignoreEvaluate, httpClient), true);
       } else {
         visit(current.expression);
       }
@@ -2174,12 +2208,12 @@ function nodeTamperReach(
         const binding = model.bindings.get(base.text);
         if (binding !== undefined && binding.kind === 'import' && binding.target !== undefined && binding.importedName === '*') {
           verdict = referenceVerdict(
-            exportedNameTamperReach(state, cwd, binding.target, current.name.text, depth + 1, active, ignoreEvaluate),
+            exportedNameTamperReach(state, cwd, binding.target, current.name.text, depth + 1, active, ignoreEvaluate, httpClient),
             called,
           );
           return;
         }
-        verdict = referenceVerdict(identifierReach(state, cwd, model, base, depth, active, called, ignoreEvaluate), called);
+        verdict = referenceVerdict(identifierReach(state, cwd, model, base, depth, active, called, ignoreEvaluate, httpClient), called);
         return;
       }
       visit(base);
@@ -2193,7 +2227,7 @@ function nodeTamperReach(
         if (binding !== undefined && binding.kind === 'import' && binding.target !== undefined && binding.importedName === '*') {
           if (ts.isStringLiteral(current.argumentExpression)) {
             verdict = referenceVerdict(
-              exportedNameTamperReach(state, cwd, binding.target, current.argumentExpression.text, depth + 1, active, ignoreEvaluate),
+              exportedNameTamperReach(state, cwd, binding.target, current.argumentExpression.text, depth + 1, active, ignoreEvaluate, httpClient),
               called,
             );
             return;
@@ -2201,7 +2235,7 @@ function nodeTamperReach(
           verdict = UNKNOWN_REACH; // dynamic namespace access: cannot prove which export runs
           return;
         }
-        verdict = referenceVerdict(identifierReach(state, cwd, model, base, depth, active, false, ignoreEvaluate), false);
+        verdict = referenceVerdict(identifierReach(state, cwd, model, base, depth, active, false, ignoreEvaluate, httpClient), false);
         if (verdict.kind !== 'clean') return;
         visit(current.argumentExpression);
         return;
@@ -2283,6 +2317,23 @@ function attributedRouteInterception(
   if (body.kind === 'tamper') return body.location;
   if (body.kind === 'unknown') return fallback;
   return null;
+}
+function attributedHttpClientCall(
+  state: ScanState,
+  cwd: string,
+  model: FileModel,
+  base: string,
+  callback: ts.Expression | undefined,
+  fallback: Location | null,
+): Location | null {
+  const active = new Set<string>();
+  const registration = localNameTamperReach(state, cwd, model, base, 0, active, false, true);
+  if (registration.kind === 'tamper') return registration.location;
+  if (registration.kind === 'unknown') return fallback;
+  if (callback === undefined) return fallback;
+  const body = nodeTamperReach(state, cwd, model, callback, 0, active, false, true);
+  if (body.kind === 'tamper') return body.location;
+  return body.kind === 'unknown' ? fallback : null;
 }
 
 function fixtureClasses(state: ScanState, file: string): StaticTestFacts['fixtureClasses'] {
@@ -2458,7 +2509,7 @@ export function scanTestFiles(options: StaticScanOptions): StaticScanResult {
   for (const file of seededFiles) {
     const model = modelOf(state, options.cwd, file, false);
     if (model === null) continue;
-    const fileHttpClient = findHttpClientCall(model.source, model.source, file);
+    const fileHttpClient = findHttpClientCall(model.source, model.source, file, false);
     const fileMock = findModuleMock(model.source, file);
     const fileRoute = findImportedRouteInterception(state, options.cwd, file, false);
     const fileRouteBlocking = findImportedRouteInterception(state, options.cwd, file, true);
@@ -2651,6 +2702,8 @@ function scanFileForTests(
   // Once per file, not once per call site: the runner-globals predicate
   // matches globs, and a file has hundreds of call expressions.
   const runnerGlobals = state.testGlobals(file);
+  const importedHttpClient = namespaceModuleReach(state, cwd, file, 0, new Set<string>(), false, true);
+  const httpClientFallback = importedHttpClient.kind === 'tamper' ? importedHttpClient.location : fileHttpClient;
   // 0.13.10 F3: a tamper written in this spec — or one that executes at
   // import time anywhere in its import graph — flags every test of the
   // file exactly as before. A tamper inside an imported HELPER is
@@ -2667,9 +2720,10 @@ function scanFileForTests(
   const routeFor = (
     base: string,
     callback: ts.Expression | undefined,
-  ): { any: Location | null; blocking: Location | null } => ({
+  ): { any: Location | null; blocking: Location | null; httpClientCall: Location | null } => ({
     any: attributedRouteInterception(state, cwd, model, base, callback, fileWideTamper, fileRoute, false),
     blocking: attributedRouteInterception(state, cwd, model, base, callback, fileWideBlocking, fileRouteBlocking, true),
+    httpClientCall: attributedHttpClientCall(state, cwd, model, base, callback, httpClientFallback),
   });
 
   const visit = (
@@ -3225,7 +3279,7 @@ function buildEntry(input: {
   fileHttpClient: Location | null;
   fileMock: Location | null;
   /** The tamper location attributed to THIS test (0.13.10 F3), any family and blocking-family. */
-  route: { any: Location | null; blocking: Location | null };
+  route: { any: Location | null; blocking: Location | null; httpClientCall: Location | null };
   gateforgeImport: Location | null;
 }): StaticTestEntry {
   const { file, source, node, callback, titlePath, location } = input;
@@ -3236,11 +3290,10 @@ function buildEntry(input: {
     signals.push({ kind: kind as 'skip' | 'only' | 'fixme', detail: `test.${kind} modifier`, location });
   }
   let pageRoute: Location | null = null;
-  let httpClientCall: Location | null = null;
+  const httpClientCall: Location | null = input.route.httpClientCall;
   const interceptedTargets = callback === undefined ? [] : pageRouteTargets(callback);
   if (callback !== undefined) {
     pageRoute = findPageRoute(callback, source, file);
-    httpClientCall = findHttpClientCall(callback, source, file);
   }
   return {
     file,
