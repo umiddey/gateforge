@@ -1674,6 +1674,125 @@ describe('slash-variant merged registration (two decorators, one handler)', () =
   });
 });
 
+describe('hook-scope setup exchanges (0.13.9 diagnosis)', () => {
+  // A spec that creates its API context in `beforeAll` and calls
+  // endpoints from test bodies drives every call through a context that
+  // talks to the app DIRECTLY — the witness never credits setup traffic,
+  // so the claim is missing. When the RUN recorded hook-scope exchanges
+  // (the fixture reports them) and one of them attributes to the
+  // obligation's endpoint, the verdict must NAME that cause instead of
+  // the bare anchor refusal — and a genuinely absent call must keep the
+  // old reason byte-identical. A setup record can never SATISFY.
+  const HOOK_OBLIGATION: Obligation = {
+    schemaVersion: 1,
+    id: 'tenant.accounts:http:request-observed',
+    resourceId: 'tenant.accounts',
+    contract: 'http:request-observed',
+    policyId: 'p',
+    lifecycle: { create: true, read: true, update: true, delete: true, deleteSemantics: 'hard' },
+  };
+
+  function exportHookObligation(): Obligation {
+    return {
+      ...HOOK_OBLIGATION,
+      id: 'tenant.accounts-export:http:request-observed',
+      resourceId: 'tenant.accounts-export',
+    };
+  }
+
+  function setupRecord(obligationId: string, exchanges: ReadonlyArray<Record<string, unknown>>): Record<string, unknown> {
+    return record(obligationId, {
+      kind: 'http.observed',
+      payload: { channel: 'setup', exchanges: [...exchanges] },
+    });
+  }
+
+  function outcomeWithSetup(
+    obligation: Obligation,
+    extraRecords: readonly Record<string, unknown>[],
+  ) {
+    return evaluateObligation(obligation, {
+      claims: [{ schemaVersion: 1, obligationId: obligation.id, testId: 'test-1' }],
+      records: [
+        record(obligation.id, {
+          kind: 'http.request',
+          payload: { method: 'GET', url: '/accounts/nowhere', status: 404 },
+        }),
+        ...extraRecords,
+      ],
+      waivers: [],
+      classification: CLASSIFICATION,
+      httpRoutes: [
+        { resourceId: 'tenant.accounts', method: 'GET', canonicalPath: '/accounts/{}' },
+        { resourceId: 'tenant.accounts-export', method: 'GET', canonicalPath: '/accounts/export' },
+      ],
+      now: '2026-01-01T00:00:00.000Z',
+    });
+  }
+
+  const OLD_REASON = `'${HOOK_OBLIGATION.id}': no 'ui.action' anchor from the declaring test`;
+
+  it('a hook-scope exchange matching the endpoint names the hook context as the cause', () => {
+    const outcome = outcomeWithSetup(HOOK_OBLIGATION, [
+      setupRecord(HOOK_OBLIGATION.id, [
+        { method: 'GET', url: 'http://localhost:13001/accounts/77', status: 200 },
+      ]),
+    ]);
+    expect(outcome.verdict).toBe('missing');
+    expect(outcome.reason).toContain('context created in a hook (beforeAll/beforeEach)');
+    expect(outcome.reason).toContain('hook traffic is setup and never credited');
+    expect(outcome.reason).toContain('Open the context in the test body');
+  });
+
+  it('a genuinely absent call keeps the old reason byte-identical', () => {
+    const outcome = outcomeWithSetup(HOOK_OBLIGATION, [
+      setupRecord(HOOK_OBLIGATION.id, [
+        { method: 'GET', url: 'http://localhost:13001/accounts/77', status: 200 },
+      ]),
+    ]);
+    // The parameter endpoint: the hook traffic names /accounts/77,
+    // which attributes to tenant.accounts — the EXPORT obligation has
+    // no matching hook exchange, so its reason is today's verbatim.
+    const untouched = outcomeWithSetup(exportHookObligation(), [
+      setupRecord(HOOK_OBLIGATION.id, [
+        { method: 'GET', url: 'http://localhost:13001/accounts/77', status: 200 },
+      ]),
+    ]);
+    expect(untouched.verdict).toBe('missing');
+    expect(untouched.reason).toBe(
+      `'${exportHookObligation().id}': no 'ui.action' anchor from the declaring test`,
+    );
+  });
+
+  it('a setup record without any exchange keeps the old reason', () => {
+    const outcome = outcomeWithSetup(HOOK_OBLIGATION, [
+      setupRecord(HOOK_OBLIGATION.id, []),
+    ]);
+    expect(outcome.verdict).toBe('missing');
+    expect(outcome.reason).toBe(OLD_REASON);
+  });
+
+  it('a setup exchange never satisfies the claim', () => {
+    const outcome = outcomeWithSetup(HOOK_OBLIGATION, [
+      setupRecord(HOOK_OBLIGATION.id, [
+        { method: 'GET', url: 'http://localhost:13001/accounts/77', status: 200 },
+      ]),
+    ]);
+    expect(outcome.verdict).toBe('missing');
+    expect(outcome.verdict).not.toBe('satisfied');
+  });
+
+  it('a claimed-tier setup record diagnoses nothing', () => {
+    const forged = setupRecord(HOOK_OBLIGATION.id, [
+      { method: 'GET', url: 'http://localhost:13001/accounts/77', status: 200 },
+    ]);
+    forged['trust'] = 'claimed';
+    const outcome = outcomeWithSetup(HOOK_OBLIGATION, [forged]);
+    expect(outcome.verdict).toBe('missing');
+    expect(outcome.reason).toBe(OLD_REASON);
+  });
+});
+
 describe('F6 deterministic aggregation over repeated requests (plan §10)', () => {
   const transportObligation: Obligation = {
     schemaVersion: 1,
