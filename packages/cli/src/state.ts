@@ -56,19 +56,25 @@ export function resolveStateDir(cwd: string, override?: string): string {
 /**
  * The validated `registration` attribute of an `http.endpoint` resource,
  * or undefined when absent or malformed: the inventory stays fail-closed
- * (an unprovable route never carries a half-validated position).
+ * (an unprovable route never carries a half-validated position). A
+ * merged slash-variant identity carries `orderMax` (the raw routes'
+ * latest proven order); it must never sit below `order`.
  */
-function endpointRegistration(value: unknown): { scope: string; order: number } | undefined {
+function endpointRegistration(
+  value: unknown,
+): { scope: string; order: number; orderMax?: number } | undefined {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined;
   if (!('scope' in value) || !('order' in value)) return undefined;
-  const { scope, order } = value;
-  return typeof scope === 'string' &&
-    scope.length > 0 &&
-    typeof order === 'number' &&
-    Number.isInteger(order) &&
-    order >= 0
-    ? { scope, order }
-    : undefined;
+  const scope: unknown = value.scope;
+  const order: unknown = value.order;
+  const orderMax: unknown = 'orderMax' in value ? value.orderMax : undefined;
+  if (typeof scope !== 'string' || scope.length === 0) return undefined;
+  if (typeof order !== 'number' || !Number.isInteger(order) || order < 0) return undefined;
+  if (orderMax === undefined) return { scope, order };
+  if (typeof orderMax !== 'number' || !Number.isInteger(orderMax) || orderMax < order) {
+    return undefined;
+  }
+  return { scope, order, orderMax };
 }
 
 /**

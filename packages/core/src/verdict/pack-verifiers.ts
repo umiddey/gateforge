@@ -349,12 +349,23 @@ function candidateIdentityText(candidate: HttpRouteCandidate): string {
 }
 
 /**
- * The validated `registration` of one candidate, or null when the field
- * is absent or malformed (host-derived inventory — never trusted).
+ * One candidate's validated registration range. `orderMax` defaults to
+ * `order` for a single-order (unmerged) route.
  */
-function routeRegistration(
-  candidate: HttpRouteCandidate,
-): { scope: string; order: number } | null {
+interface ValidatedRegistration {
+  scope: string;
+  order: number;
+  orderMax: number;
+}
+
+/**
+ * The validated `registration` of one candidate, or null when the field
+ * is absent or malformed (host-derived inventory — never trusted). A
+ * merged (slash-variant) endpoint carries a RANGE
+ * `{scope, order, orderMax}`; a single-order endpoint carries
+ * `{scope, order}` and validates to `orderMax === order`.
+ */
+function routeRegistration(candidate: HttpRouteCandidate): ValidatedRegistration | null {
   const registration = candidate.registration;
   if (
     registration === undefined ||
@@ -366,12 +377,17 @@ function routeRegistration(
   ) {
     return null;
   }
-  return registration;
+  const orderMax = registration.orderMax ?? registration.order;
+  if (typeof orderMax !== 'number' || !Number.isInteger(orderMax) || orderMax < registration.order) {
+    return null;
+  }
+  return { scope: registration.scope, order: registration.order, orderMax };
 }
 
 /**
  * The registration-order winner over multiple matched candidates, or
- * null when precedence cannot be proven (0.14).
+ * null when precedence cannot be proven (0.14; 0.13.9 covers merged
+ * slash-variant endpoints).
  *
  * Starlette (and therefore FastAPI) matches routes in REGISTRATION
  * order: each router's routes copy at its `include_router` call,
@@ -379,20 +395,34 @@ function routeRegistration(
  * the first FULL match (path AND method) serves. When the detector
  * proved that order for the whole matched set, the smallest order IS
  * the serving route — the claim resolves against it instead of
- * blocking forever. Precedence applies ONLY when
+ * blocking forever.
+ *
+ * A merged endpoint (one handler under two decorators — e.g.
+ * `include_in_schema=False` literal over the trailing-slash variant)
+ * carries the RANGE of its raw routes' proven orders as
+ * `{scope, order, orderMax}`: which raw variant serves depends on the
+ * request URL's trailing slash, which the normalized observed path no
+ * longer carries. The winner is therefore certain only when the
+ * earliest-ordered candidate's LATEST order is lower than every other
+ * candidate's EARLIEST order — then every possible serving variant of
+ * that candidate beats every possible variant of the rest. Two
+ * candidates can never both qualify (each would have to lie wholly
+ * before the other), and a tie or an interleaved order (a competitor
+ * order inside the literal's range) keeps the whole overlap
+ * ambiguous — fail closed. Precedence applies ONLY when
  *
  * - every matched candidate carries a well-formed `registration` (a
  *   single missing or malformed proof keeps the whole overlap
  *   ambiguous),
  * - all proven scopes are the SAME app (two apps' flattened orders do
  *   not compare),
- * - the orders are DISTINCT (a tie is not an order),
- * - and the smallest-order candidate carries NO `typedPathParams`: a
- *   typed convertor (`{id:int}`, `{p:path}`) matches narrower than the
- *   canonical slot shape, so the convertor might reject the observed
- *   segment and let a later route serve — the "candidate ordered before
- *   the winner" of the framework's own match loop is exactly that
- *   smallest-order route, and precedence past it is not certain.
+ * - and the earliest-ordered candidate carries NO `typedPathParams`:
+ *   a typed convertor (`{id:int}`, `{p:path}`) matches narrower than
+ *   the canonical slot shape, so the convertor might reject the
+ *   observed segment and let a later route serve — the "candidate
+ *   ordered before the winner" of the framework's own match loop is
+ *   exactly that smallest-order route, and precedence past it is not
+ *   certain.
  *
  * A plain `{name}` parameter is the `str` convertor and matches any
  * single segment (the canonical shape's whole meaning), so a plain
@@ -403,29 +433,26 @@ function routeRegistration(
 function registrationOrderWinner(
   distinct: readonly HttpRouteCandidate[],
 ): HttpRouteCandidate | null {
-  let winner: HttpRouteCandidate | null = null;
-  let winnerOrder = Number.POSITIVE_INFINITY;
   const scopes = new Set<string>();
-  const orders = new Set<number>();
+  const entries: Array<{ candidate: HttpRouteCandidate; registration: ValidatedRegistration }> = [];
   for (const candidate of distinct) {
     const registration = routeRegistration(candidate);
     if (registration === null) return null;
     scopes.add(registration.scope);
-    orders.add(registration.order);
-    if (registration.order < winnerOrder) {
-      winner = candidate;
-      winnerOrder = registration.order;
-    }
+    entries.push({ candidate, registration });
   }
-  if (
-    winner === null ||
-    scopes.size !== 1 ||
-    orders.size !== distinct.length ||
-    winner.typedPathParams === true
-  ) {
-    return null;
-  }
-  return winner;
+  if (scopes.size !== 1) return null;
+  // Only the earliest-ordered candidate can possibly qualify: any
+  // other candidate would need a wholly-later range to still beat the
+  // earliest one. Sort by earliest order and check exactly that.
+  const ordered = [...entries].sort((a, b) => a.registration.order - b.registration.order);
+  const earliest = ordered[0];
+  if (earliest === undefined) return null;
+  const servesBeforeEveryOther = ordered.every(
+    (entry, index) => index === 0 || earliest.registration.orderMax < entry.registration.order,
+  );
+  if (!servesBeforeEveryOther || earliest.candidate.typedPathParams === true) return null;
+  return earliest.candidate;
 }
 
 /**

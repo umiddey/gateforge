@@ -520,19 +520,26 @@ function contractFactCandidate(resource: Resource): Record<string, unknown> {
 export interface RouteRegistration {
   scope: string;
   order: number;
+  /**
+   * The LATEST order the identity's raw routes prove (0.13.9): a
+   * slash-variant pair of decorators registers two raw routes at
+   * adjacent positions and folds into ONE endpoint, so the honest fact
+   * is the range `[order, orderMax]`. Absent on a single-fact (or
+   * single-provable-order) identity.
+   */
+  orderMax?: number;
 }
 
 function isRouteRegistration(value: unknown): value is RouteRegistration {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
   if (!('scope' in value) || !('order' in value)) return false;
-  const { scope, order } = value;
-  return (
-    typeof scope === 'string' &&
-    scope.length > 0 &&
-    typeof order === 'number' &&
-    Number.isInteger(order) &&
-    order >= 0
-  );
+  const scope: unknown = value.scope;
+  const order: unknown = value.order;
+  const orderMax: unknown = 'orderMax' in value ? value.orderMax : undefined;
+  if (typeof scope !== 'string' || scope.length === 0) return false;
+  if (typeof order !== 'number' || !Number.isInteger(order) || order < 0) return false;
+  if (orderMax === undefined) return true;
+  return typeof orderMax === 'number' && Number.isInteger(orderMax) && orderMax >= order;
 }
 
 /** Extracts and validates contract facts from every contribution. */
@@ -1064,21 +1071,41 @@ export function compileEndpointContribution(
     capabilities.sort(compareText);
     capabilityTrace.sort((a, b) => compareText(JSON.stringify(a), JSON.stringify(b)));
 
-    // Registration-order metadata (0.14): an identity joins several
-    // detector facts (same method+path, possibly several files). The
-    // compiled endpoint carries `registration` only when EVERY fact
-    // behind it proves the SAME (scope, order) — one dissenting or
-    // absent proof would guess which declaration serves. `typedPathParams`
-    // is set when ANY fact behind the identity carries a typed convertor:
-    // the canonical shape matches the whole slot, but a typed route may
+    // Registration-order metadata (0.14; 0.13.9 carries a range): an
+    // identity joins several detector facts (same method+path,
+    // possibly several files). The compiled endpoint carries
+    // `registration` only when EVERY fact behind it proves a position
+    // in the SAME scope. Identical proofs collapse to today's
+    // `{scope, order}`; differing proofs fold to the raw routes' RANGE
+    // `{scope, order: min, orderMax: max}` — a slash-variant pair of
+    // decorators (`include_in_schema=False` over the trailing-slash
+    // variant) registers two raw routes at adjacent positions, and
+    // which one serves depends on the request URL, so the range is the
+    // honest fact and the core resolver reads it conservatively. One
+    // dissenting or absent proof, or two scopes, keeps the identity
+    // unregistered (fail closed). `typedPathParams` is set when ANY
+    // fact behind the identity carries a typed convertor: the
+    // canonical shape matches the whole slot, but a typed route may
     // not, so attribution must treat the identity as positionally
     // uncertain (fail closed).
-    const registrationTexts = new Set(
-      endpointRoutes.map((route) => JSON.stringify(route.registration ?? null)),
+    const registrations: Array<RouteRegistration | undefined> = endpointRoutes.map(
+      (route) => route.registration,
     );
-    const firstRegistration = endpointRoutes[0]?.registration;
-    const registration: RouteRegistration | null =
-      firstRegistration !== undefined && registrationTexts.size === 1 ? firstRegistration : null;
+    const proved = registrations.filter((entry): entry is RouteRegistration => entry !== undefined);
+    const firstRegistration = proved[0];
+    let registration: RouteRegistration | null = null;
+    if (proved.length === registrations.length && firstRegistration !== undefined) {
+      const scopes = new Set(proved.map((entry) => entry.scope));
+      if (scopes.size === 1) {
+        const orders = proved.map((entry) => entry.order);
+        const min = Math.min(...orders);
+        const max = Math.max(...orders);
+        registration =
+          max > min
+            ? { scope: firstRegistration.scope, order: min, orderMax: max }
+            : { scope: firstRegistration.scope, order: min };
+      }
+    }
 
     const record: EndpointRecord = {
       method,

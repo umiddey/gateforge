@@ -45,9 +45,13 @@ export interface HttpRouteCandidate {
    * serving app's flattened registration sequence (FastAPI packs only —
    * Starlette matches routes in registration order). Present only when
    * the detector PROVED the position; absent leaves the route outside
-   * registration-order attribution (fail closed).
+   * registration-order attribution (fail closed). A merged endpoint —
+   * one handler under two decorators (a slash-variant pair) — carries
+   * the RANGE of its raw routes' proven orders as `orderMax` (the
+   * latest order): which raw variant serves depends on the request
+   * URL's trailing slash, so the resolver compares conservatively.
    */
-  registration?: { scope: string; order: number };
+  registration?: { scope: string; order: number; orderMax?: number };
   /**
    * The route's raw path carries a typed convertor (`{id:int}`,
    * `{p:path}`): it matches narrower than the canonical slot shape, so a
