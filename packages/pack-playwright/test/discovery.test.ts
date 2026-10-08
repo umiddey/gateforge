@@ -541,6 +541,7 @@ describe('static discovery', () => {
       "page.addInitScript((key) => { localStorage.setItem(key, 'true'); sessionStorage.removeItem(key); }, 'boot')",
       "page.addInitScript((key) => window.sessionStorage.setItem(key, key), bootKey)",
       "page.addInitScript((count) => localStorage.setItem('runs', count), 3)",
+      "page.addInitScript(() => localStorage.setItem(declaredKey, 'en'))",
     ];
     for (const call of safeCalls) {
       const root = makeTempDir();
@@ -548,6 +549,7 @@ describe('static discovery', () => {
         'e2e/page.spec.ts': [
           "import { test } from 'playwright/test';",
           "const bootKey = 'boot-done';",
+          "const declaredKey = 'lang';",
           "test('opens orders', async ({ page }) => {",
           `  ${call};`,
           "  await page.goto('/orders');",
@@ -576,7 +578,7 @@ describe('static discovery', () => {
       'page.addInitScript(() => { Object.defineProperty(window, "telemetry", { get: () => ({ enabled: true }) }); })',
       "page.addInitScript((key) => localStorage.setItem(key, 'true'), 'a', 'b')",
       "page.addInitScript((key, other) => localStorage.setItem(key, 'true'), 'a')",
-      "page.addInitScript((key) => localStorage.setItem(closureKey, 'true'), 'a')",
+      "page.addInitScript((key) => localStorage.setItem(unresolvedKey, 'true'), 'a')",
       "page.addInitScript(([key]) => localStorage.setItem(key, 'true'), 'a')",
     ];
     for (const call of unsafeCalls) {
@@ -584,7 +586,6 @@ describe('static discovery', () => {
       writeTree(root, {
         'e2e/page.spec.ts': [
           "import { test } from 'playwright/test';",
-          "const closureKey = 'boot-done';",
           "test('opens orders', async ({ page }) => {",
           `  ${call};`,
           "  await page.goto('/orders');",

@@ -1306,6 +1306,7 @@ function findModuleMock(source: ts.SourceFile, file: string): Location | null {
 /** The storage mutations a storage-only init script may make. */
 const SAFE_STORAGE_METHODS: Record<string, true> = {
   clear: true,
+  getItem: true,
   removeItem: true,
   setItem: true,
 };
@@ -1322,8 +1323,176 @@ function storageReceiverName(node: ts.Expression): string | null {
   return ts.isIdentifier(node) ? node.text : null;
 }
 
-/** One `localStorage.setItem('k', 'v')`-shaped storage call, literals only. */
-function isSafeStorageCall(expression: ts.Expression): boolean {
+/**
+ * Resolves a name to a variable initializer declared in a block (or
+ * module scope) enclosing `from`, walking outward — the lexical lookup
+ * a closure reference performs, innermost block winning. `let`/`var`
+ * count too: the grammar below admits only values that are inert data,
+ * so a reassigned binding can add no capability.
+ */
+function resolveLocalInitializer(name: string, from: ts.Node): ts.Expression | undefined {
+  let current: ts.Node | undefined = from.parent;
+  while (current !== undefined) {
+    if (ts.isBlock(current) || ts.isSourceFile(current)) {
+      for (const statement of current.statements) {
+        if (!ts.isVariableStatement(statement)) continue;
+        for (const declaration of statement.declarationList.declarations) {
+          if (ts.isIdentifier(declaration.name) && declaration.name.text === name) {
+            return declaration.initializer;
+          }
+        }
+      }
+    }
+    current = current.parent;
+  }
+  return undefined;
+}
+
+/**
+ * Resolves a name to a function declared in a block (or module scope)
+ * enclosing `from`: a function declaration, a variable whose
+ * initializer is the function itself, or — one bounded hop, cycle
+ * guarded — an alias to another such name. Null when the name is not a
+ * locally declared function: a reference form the scan cannot prove
+ * stays a tamper.
+ */
+function resolveLocalFunctionReference(
+  name: string,
+  from: ts.Node,
+  depth: number,
+  seen: ReadonlySet<string>,
+): ts.ArrowFunction | ts.FunctionExpression | ts.FunctionDeclaration | null {
+  if (depth > 4 || seen.has(name)) return null;
+  let current: ts.Node | undefined = from.parent;
+  while (current !== undefined) {
+    if (ts.isBlock(current) || ts.isSourceFile(current)) {
+      for (const statement of current.statements) {
+        if (ts.isFunctionDeclaration(statement) && statement.name !== undefined && statement.name.text === name && statement.body !== undefined) {
+          return statement;
+        }
+        if (!ts.isVariableStatement(statement)) continue;
+        for (const declaration of statement.declarationList.declarations) {
+          if (!ts.isIdentifier(declaration.name) || declaration.name.text !== name) continue;
+          const initializer = declaration.initializer;
+          if (initializer === undefined) return null;
+          if (ts.isArrowFunction(initializer) || ts.isFunctionExpression(initializer)) return initializer;
+          if (ts.isIdentifier(initializer)) {
+            const next = new Set(seen);
+            next.add(name);
+            return resolveLocalFunctionReference(initializer.text, declaration, depth + 1, next);
+          }
+          return null;
+        }
+      }
+    }
+    current = current.parent;
+  }
+  return null;
+}
+
+/** Whether `new` is a zero-argument `new Date()` — an inert timestamp read. */
+function isNewDateConstruction(expression: ts.NewExpression): boolean {
+  return (
+    ts.isIdentifier(expression.expression) &&
+    expression.expression.text === 'Date' &&
+    (expression.arguments === undefined || expression.arguments.length === 0)
+  );
+}
+
+/**
+ * A value a storage-only init script may compute for a storage
+ * key/value slot: literals (never template forms), the script's own
+ * parameters, lexically declared constants whose initializer is such a
+ * value, structured literals of them, and a whitelist of inert
+ * builtins (`JSON.stringify`, `String`, `Date.now()`, `new Date()` and
+ * its `toISOString()`). Every shape is data only — nothing here can
+ * reach the page, the network, or any other browser API. Anything else
+ * — a bare unresolved identifier, a template form, a computed member
+ * read — fails closed.
+ */
+function isStorageOnlyValue(expression: ts.Expression, params: ReadonlySet<string>, stack: ReadonlySet<string>): boolean {
+  if (
+    ts.isStringLiteral(expression) ||
+    ts.isNumericLiteral(expression) ||
+    expression.kind === ts.SyntaxKind.TrueKeyword ||
+    expression.kind === ts.SyntaxKind.FalseKeyword ||
+    expression.kind === ts.SyntaxKind.NullKeyword
+  ) {
+    return true;
+  }
+  if (ts.isIdentifier(expression)) {
+    if (expression.text === 'undefined') return true;
+    if (params.has(expression.text)) return true;
+    if (stack.has(expression.text)) return false;
+    const initializer = resolveLocalInitializer(expression.text, expression);
+    if (initializer === undefined) return false;
+    const next = new Set(stack);
+    next.add(expression.text);
+    return isStorageOnlyValue(initializer, params, next);
+  }
+  if (ts.isPropertyAccessExpression(expression)) {
+    return (
+      expression.name.text === 'toISOString' &&
+      ts.isNewExpression(expression.expression) &&
+      isNewDateConstruction(expression.expression)
+    );
+  }
+  if (ts.isCallExpression(expression)) {
+    const callee = expression.expression;
+    if (ts.isPropertyAccessExpression(callee)) {
+      const owner = callee.expression;
+      if (
+        callee.name.text === 'now' &&
+        ts.isIdentifier(owner) &&
+        owner.text === 'Date' &&
+        expression.arguments.length === 0
+      ) {
+        return true;
+      }
+      if (
+        callee.name.text === 'stringify' &&
+        ts.isIdentifier(owner) &&
+        owner.text === 'JSON' &&
+        expression.arguments.length === 1
+      ) {
+        const first = expression.arguments[0];
+        return first !== undefined && isStorageOnlyValue(first, params, stack);
+      }
+      if (
+        callee.name.text === 'toISOString' &&
+        expression.arguments.length === 0 &&
+        ts.isNewExpression(owner) &&
+        isNewDateConstruction(owner)
+      ) {
+        return true;
+      }
+      return false;
+    }
+    if (ts.isIdentifier(callee) && callee.text === 'String' && expression.arguments.length === 1) {
+      const first = expression.arguments[0];
+      return first !== undefined && isStorageOnlyValue(first, params, stack);
+    }
+    return false;
+  }
+  if (ts.isNewExpression(expression)) return isNewDateConstruction(expression);
+  if (ts.isObjectLiteralExpression(expression)) {
+    return expression.properties.every((property) => {
+      if (ts.isPropertyAssignment(property)) return isStorageOnlyValue(property.initializer, params, stack);
+      if (ts.isShorthandPropertyAssignment(property)) return isStorageOnlyValue(property.name, params, stack);
+      return false;
+    });
+  }
+  if (ts.isArrayLiteralExpression(expression)) {
+    return expression.elements.every((element) => ts.isExpression(element) && isStorageOnlyValue(element, params, stack));
+  }
+  return false;
+}
+
+/**
+ * One `localStorage.setItem('k', 'v')`-shaped storage call, keyed and
+ * valued by {@link isStorageOnlyValue} expressions.
+ */
+function isStorageOnlyCall(expression: ts.Expression, params: ReadonlySet<string>, stack: ReadonlySet<string>): boolean {
   if (!ts.isCallExpression(expression) || !ts.isPropertyAccessExpression(expression.expression)) return false;
   const method = expression.expression.name.text;
   if (SAFE_STORAGE_METHODS[method] !== true) return false;
@@ -1335,40 +1504,129 @@ function isSafeStorageCall(expression: ts.Expression): boolean {
     return (
       first !== undefined &&
       second !== undefined &&
-      ts.isStringLiteral(first) &&
-      ts.isStringLiteral(second)
+      isStorageOnlyValue(first, params, stack) &&
+      isStorageOnlyValue(second, params, stack)
     );
   }
-  if (method === 'removeItem') {
-    return expression.arguments.length === 1 && first !== undefined && ts.isStringLiteral(first);
+  if (method === 'removeItem' || method === 'getItem') {
+    return expression.arguments.length === 1 && first !== undefined && isStorageOnlyValue(first, params, stack);
   }
   return expression.arguments.length === 0;
 }
 
-/** An expression statement carrying exactly one safe storage call. */
-function isSafeStorageStatement(node: ts.Statement): boolean {
-  return ts.isExpressionStatement(node) && isSafeStorageCall(node.expression);
+/** A storage read or an inert value — one operand of a guarded condition. */
+function isStorageOnlyOperand(expression: ts.Expression, params: ReadonlySet<string>, stack: ReadonlySet<string>): boolean {
+  return isStorageOnlyValue(expression, params, stack) || isStorageOnlyCall(expression, params, stack);
+}
+
+/**
+ * The condition of a guarded storage-only statement: an equality
+ * comparison (or negation) over storage reads and inert values — the
+ * read-then-seed shape. Anything else fails closed.
+ */
+function isStorageOnlyCondition(expression: ts.Expression, params: ReadonlySet<string>, stack: ReadonlySet<string>): boolean {
+  if (ts.isBinaryExpression(expression)) {
+    const operator = expression.operatorToken.kind;
+    const comparable =
+      operator === ts.SyntaxKind.EqualsEqualsEqualsToken ||
+      operator === ts.SyntaxKind.ExclamationEqualsEqualsToken ||
+      operator === ts.SyntaxKind.EqualsEqualsToken ||
+      operator === ts.SyntaxKind.ExclamationEqualsToken;
+    return (
+      comparable &&
+      isStorageOnlyOperand(expression.left, params, stack) &&
+      isStorageOnlyOperand(expression.right, params, stack)
+    );
+  }
+  if (ts.isPrefixUnaryExpression(expression) && expression.operator === ts.SyntaxKind.ExclamationToken) {
+    return isStorageOnlyOperand(expression.operand, params, stack);
+  }
+  return isStorageOnlyOperand(expression, params, stack);
+}
+
+/** One statement of a storage-only init script body. */
+function isStorageOnlyStatement(node: ts.Statement, params: ReadonlySet<string>): boolean {
+  if (ts.isExpressionStatement(node)) return isStorageOnlyCall(node.expression, params, new Set<string>());
+  if (ts.isIfStatement(node)) {
+    return (
+      isStorageOnlyCondition(node.expression, params, new Set<string>()) &&
+      isStorageOnlyStatement(node.thenStatement, params) &&
+      (node.elseStatement === undefined || isStorageOnlyStatement(node.elseStatement, params))
+    );
+  }
+  if (ts.isTryStatement(node)) {
+    const tryClean = node.tryBlock.statements.every((statement) => isStorageOnlyStatement(statement, params));
+    const catchClean =
+      node.catchClause === undefined ||
+      node.catchClause.block.statements.every((statement) => isStorageOnlyStatement(statement, params));
+    const finallyClean =
+      node.finallyBlock === undefined ||
+      node.finallyBlock.statements.every((statement) => isStorageOnlyStatement(statement, params));
+    return tryClean && catchClean && finallyClean;
+  }
+  if (ts.isBlock(node)) return node.statements.every((statement) => isStorageOnlyStatement(statement, params));
+  return false;
+}
+
+/** Applies the storage-only body grammar to one resolved script function. */
+function isStorageOnlyScriptFunction(
+  script: ts.ArrowFunction | ts.FunctionExpression | ts.FunctionDeclaration,
+  call: ts.CallExpression,
+): boolean {
+  // The script may take parameters ONLY when the addInitScript call
+  // passes exactly one argument per parameter (0.13.10 F2); a
+  // parameterless script with extra arguments stays a tamper (0.13.9).
+  // Each parameter can then only ever be serialized data, so a body
+  // made solely of storage calls mutates nothing but storage.
+  if (call.arguments.length !== script.parameters.length + 1) return false;
+  const params = new Set<string>();
+  for (const parameter of script.parameters) {
+    if (!ts.isIdentifier(parameter.name)) return false;
+    params.add(parameter.name.text);
+  }
+  const body = script.body;
+  if (body === undefined) return false;
+  if (ts.isBlock(body)) {
+    return (
+      body.statements.length > 0 &&
+      body.statements.every((statement) => isStorageOnlyStatement(statement, params))
+    );
+  }
+  return isStorageOnlyCall(body, params, new Set<string>());
 }
 
 /**
  * True when one `addInitScript(...)` call is a STORAGE-ONLY init
- * script: exactly one argument that is a parameterless arrow/function
- * whose body is made solely of literal-keyed localStorage/sessionStorage
- * mutations (`setItem`/`removeItem`/`clear`, optional `window.`
- * receiver). It mutates nothing the witness cannot verify solely from
- * its independent observer, so it is not a tamper. Every other shape —
- * extra arguments, template or identifier values, any other statement,
- * a string/path script, an empty body — stays a tamper (fail closed).
+ * script: a single script argument — an arrow/function literal or a
+ * reference to a locally declared function — whose body is made solely
+ * of localStorage/sessionStorage mutations (`setItem`/`getItem`/
+ * `removeItem`/`clear`, optional `window.` receiver), with exactly one
+ * `addInitScript` argument per declared parameter. The body grammar
+ * admits storage calls keyed/valued by literals, the script's own
+ * parameters, lexically declared constants and inert builtins
+ * (`JSON.stringify`, `String`, `Date.now()`, `new Date()`
+ * `.toISOString()`), under the control flow that guards them (`if`
+ * over a storage read, `try`/`catch`). Such a script mutates nothing
+ * the witness cannot verify solely from its independent observer, so
+ * it is not a tamper and the scan continues past it. Every other shape
+ * — an arity mismatch, a template form, an unresolved identifier in a
+ * key/value slot, any other statement (network, DOM,
+ * `Object.defineProperty`), a string/path script, an empty body, a
+ * reference the scan cannot resolve to a local declaration — stays a
+ * tamper (fail closed). The same function handed to `page.evaluate`
+ * is unaffected: evaluate keeps its own rule.
  */
 function isStorageOnlyInitScript(call: ts.CallExpression): boolean {
-  if (call.arguments.length !== 1) return false;
   const script = call.arguments[0];
-  if (script === undefined || (!ts.isArrowFunction(script) && !ts.isFunctionExpression(script))) return false;
-  if (script.parameters.length !== 0) return false;
-  if (ts.isBlock(script.body)) {
-    return script.body.statements.length > 0 && script.body.statements.every(isSafeStorageStatement);
+  if (script === undefined) return false;
+  if (ts.isArrowFunction(script) || ts.isFunctionExpression(script)) {
+    return isStorageOnlyScriptFunction(script, call);
   }
-  return isSafeStorageCall(script.body);
+  if (ts.isIdentifier(script)) {
+    const resolved = resolveLocalFunctionReference(script.text, script, 0, new Set<string>());
+    return resolved !== null && isStorageOnlyScriptFunction(resolved, call);
+  }
+  return false;
 }
 
 /**
