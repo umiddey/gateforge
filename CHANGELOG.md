@@ -1,12 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.13.9
 
-Theme: stop refusing real UI tests. Measured on real suites, 169/169 of
-one app's tests and 636 rows of another carried a false
-`PAGE_OBSERVATION_TAMPER_RISK`, refusing every E2E claim they carried.
-Each fix below lets through only what is PROVEN harmless; anything
-unclear stays flagged.
+Theme: Gateforge exists to catch fake tests. This release closes three ways a
+fake E2E test could pass: API calls from test code, requests started by test
+code inside the page, and tests whose code Gateforge never read. Reading
+every test exposed false "page tampering" refusals of real UI tests (one
+app: 169/169 tests; another: every claimed test). The tamper rules below now
+let through only what is PROVEN harmless; anything unclear stays flagged.
 
 - **Discovery: parameterized and reference-form storage-only init
   scripts are not tampers (F2).** A storage-only `addInitScript` may
@@ -42,12 +43,6 @@ unclear stays flagged.
   storage-only init scripts) refuses exactly as before, and an
   evaluate-only helper no longer hides a later route tamper in the same
   file.
-
-## 0.13.9
-
-Theme: Gateforge exists to catch fake tests. This release closes three ways a
-fake E2E test could pass: API calls from test code, requests started by test
-code inside the page, and tests whose code Gateforge never read.
 
 - **Discovery: every test file Playwright lists is read.** A listed test
   outside the configured source globs used to be skipped by the code scan,
