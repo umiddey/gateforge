@@ -946,6 +946,62 @@ describe('static discovery', () => {
     ).toBe(true);
   });
 
+  it('drops the evaluate tamper signal on chromium rows, keeps it elsewhere (0.13.10 F7)', async () => {
+    // The runtime initiator rule already refuses every request evaluated
+    // test code starts — but only where it runs: Chromium. In a project
+    // the runner resolved to chromium, evaluate is no static refusal;
+    // firefox/webkit rows keep today's flag (the runtime rule cannot see
+    // there), and route interception refuses on every browser.
+    const root = makeTempDir('gateforge-evaluate-');
+    mkdirSync(join(root, 'node_modules'), { recursive: true });
+    for (const name of ['playwright', 'playwright-core']) {
+      symlinkSync(join(ROOT, 'node_modules', name), join(root, 'node_modules', name), 'dir');
+    }
+    writeTree(root, {
+      'package.json': '{ "type": "module", "private": true }\n',
+      'playwright.config.js': [
+        "export default { testDir: 'e2e', projects: [",
+        "  { name: 'chromium', use: { browserName: 'chromium' } },",
+        "  { name: 'firefox', use: { browserName: 'firefox' } },",
+        "  { name: 'webkit', use: { browserName: 'webkit' } },",
+        '] };',
+        '',
+      ].join('\n'),
+      'e2e/evaluate.spec.js': [
+        "import { test } from 'playwright/test';",
+        "test('reads evaluated text', async ({ page }) => {",
+        "  const label = await page.locator('h1').evaluate((el) => el.textContent);",
+        '  await page.evaluate(() => fetch("/api/session"));',
+        '  void label;',
+        '});',
+        '',
+      ].join('\n'),
+      'e2e/route.spec.js': [
+        "import { test } from 'playwright/test';",
+        "test('intercepts the inbox', async ({ page }) => {",
+        "  await page.route('**/api/inbox*', (route) => route.fulfill({ status: 200, body: '[]' }));",
+        '});',
+        '',
+      ].join('\n'),
+    });
+    const { catalog } = await discoverTestCatalog({ cwd: root, config: fixtureConfig(['e2e/**/*.spec.js']) });
+    const tamperDetails = (file: string, project: string): string[] =>
+      catalog.entries
+        .filter((entry) => entry.file === file && entry.project === project)
+        .flatMap((entry) => entry.suppressionSignals)
+        .filter((signal) => signal.detail.startsWith('PAGE_OBSERVATION_TAMPER_RISK'))
+        .map((signal) => signal.detail);
+    expect(tamperDetails('e2e/evaluate.spec.js', 'chromium')).toEqual([]);
+    expect(tamperDetails('e2e/evaluate.spec.js', 'firefox').length).toBeGreaterThan(0);
+    expect(tamperDetails('e2e/evaluate.spec.js', 'webkit').length).toBeGreaterThan(0);
+    for (const project of ['chromium', 'firefox', 'webkit']) {
+      expect(
+        tamperDetails('e2e/route.spec.js', project).length,
+        `route interception stays flagged for ${project}`,
+      ).toBeGreaterThan(0);
+    }
+  }, 120_000);
+
   it("a mocked/mock/mocks FOLDER segment mocks its specs (0.9.2)", () => {
     const root = makeTempDir();
     writeTree(root, {
