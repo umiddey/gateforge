@@ -474,6 +474,10 @@ tests:
           const verdict = report.verdicts.find((item) => item.obligationId === obligationId);
           expect(verdict, observed).toMatchObject({ verdict: 'missing' });
         }
+        for (const obligationId of [ITEMS_REQUEST, ITEMS_STATUS, SEED_ONLY_REQUEST, SEED_ONLY_STATUS]) {
+          const verdict = report.verdicts.find((item) => item.obligationId === obligationId);
+          expect(verdict?.reason ?? '', obligationId).toContain('the test called this endpoint directly from test code');
+        }
         const testInitiatedClaims = [
           EVAL_REQUEST, EVAL_STATUS, EVAL_APP_REQUEST, EVAL_APP_STATUS,
         ];
@@ -497,6 +501,7 @@ tests:
         expect(app.requestsByPath.get('/api/eval-fetch')).toBe(1);
         expect(app.requestsByPath.get('/api/eval-app')).toBe(1);
         expect(app.requestsByPath.get('/api/app-async')).toBe(1);
+        expect(app.requestsByPath.get('/api/ui-items')).toBe(1);
         const recordedPaths = recordedExchangePaths(records);
         for (const path of ['/api/items', '/api/seed-only', '/api/page-request', '/api/context-request']) {
           expect(recordedPaths.some((exchangePath) => exchangePath.endsWith(path))).toBe(false);
