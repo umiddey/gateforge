@@ -2177,8 +2177,8 @@ async function handleBrowserAction(
       state.observed.push({
         method: exchange.method,
         path: exchange.path,
+        fetchDest: exchange.fetchDest ?? null,
         status: exchange.status,
-        fetchDest: null,
         seq: (state.observedSeq += 1),
         bodySha256: createHash('sha256').update(exchange.body).digest('hex'),
         bodyBytes: exchange.body.length,

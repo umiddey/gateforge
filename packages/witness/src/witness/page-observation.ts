@@ -23,6 +23,7 @@ export interface ObservedPageVisit {
     method: string;
     url: string;
     status: number;
+    fetchDest?: string | null;
     remoteAddress: string | null;
     proxied: boolean;
   }>;

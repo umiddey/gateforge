@@ -38,6 +38,8 @@ import type { CDPSession, Page } from 'playwright';
 export interface TrackedApiExchange {
   /** CDP network request id (stable across the exchange's redirect hops). */
   readonly requestId: string;
+  /** Lowercased Sec-Fetch-Dest request header, or null when absent. */
+  fetchDest: string | null;
   /** Uppercase method of the exchange's current hop. */
   method: string;
   /** Full URL of the exchange's current hop. */
@@ -141,6 +143,7 @@ export async function trackPageApiSettlement(page: Page, host: ApiSettlementHost
       // record identity) stay with the exchange; only the current hop's
       // method/URL move forward. Every hop counts as an open so channel
       // correlation per method+URL sees exactly one open per hop.
+      existing.fetchDest = headerOf(params.request.headers, 'sec-fetch-dest')?.toLowerCase() ?? null;
       existing.method = params.request.method;
       existing.url = params.request.url;
       host.onExchangeOpen(existing);
@@ -148,6 +151,7 @@ export async function trackPageApiSettlement(page: Page, host: ApiSettlementHost
     }
     const record: ExchangeRecord = {
       requestId: params.requestId,
+      fetchDest: headerOf(params.request.headers, 'sec-fetch-dest')?.toLowerCase() ?? null,
       method: params.request.method,
       url: params.request.url,
       declaredLength: null,

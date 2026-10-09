@@ -116,12 +116,16 @@ async function openUnclaimedSession(testId = TEST_ID, workerIndex = 0): Promise<
 }
 
 /** Drives one proxied GET through the session's dedicated observation proxy. */
-async function proxiedGet(session: SessionCredential, path: string): Promise<number> {
+async function proxiedGet(session: SessionCredential, path: string, fetchDest?: string): Promise<number> {
   const { promise, resolve, reject } = withResolvers<number>();
-  get(`${session.proxyUrl as string}${path}`, (response) => {
-    response.resume();
-    response.on('end', () => resolve(response.statusCode ?? 0));
-  }).on('error', reject);
+  get(
+    `${session.proxyUrl as string}${path}`,
+    { ...(fetchDest === undefined ? {} : { headers: { 'sec-fetch-dest': fetchDest } }) },
+    (response) => {
+      response.resume();
+      response.on('end', () => resolve(response.statusCode ?? 0));
+    },
+  ).on('error', reject);
   return promise;
 }
 
@@ -208,8 +212,8 @@ describe('POST /sessions/close — one http.exchanges record per passed session'
 describe('the verdict-time httpLedger (WP2 step 3)', () => {
   it('reports an UNCLAIMED test call to /x as match and an unserved path as nomatch', async () => {
     const session = await openUnclaimedSession('tests/ledger#unclaimed-x');
-    expect(await proxiedGet(session, '/x')).toBe(200);
-    expect(await proxiedGet(session, '/nowhere')).toBe(200);
+    expect(await proxiedGet(session, '/x', 'empty')).toBe(200);
+    expect(await proxiedGet(session, '/nowhere', 'empty')).toBe(200);
     const close = await post('/sessions/close', { sessionId: session.sessionId, outcome: 'passed' });
     expect(close.status).toBe(200);
 
@@ -227,6 +231,7 @@ describe('the verdict-time httpLedger (WP2 step 3)', () => {
         method: 'GET',
         path: '/nowhere',
         status: 200,
+        kind: 'api',
         route: null,
         resolution: 'nomatch',
       },
@@ -235,6 +240,7 @@ describe('the verdict-time httpLedger (WP2 step 3)', () => {
         method: 'GET',
         path: '/x',
         status: 200,
+        kind: 'api',
         route: 'http.endpoint:GET /x',
         resolution: 'match',
       },

@@ -169,6 +169,7 @@ export async function driveEngineVisit(
         apiResponses.push({
           method: exchange.method,
           url: headers.url,
+          fetchDest: exchange.fetchDest,
           status: headers.status,
           remoteAddress: headers.remoteAddress,
           proxied: headers.remoteAddress !== null,
@@ -273,9 +274,10 @@ export interface EngineCapturedExchange {
   method: string;
   /** Canonical observed path (query/fragment stripped). */
   path: string;
+  /** Lowercased Sec-Fetch-Dest request header, or null when absent. */
+  fetchDest?: string | null;
   /** Response status the app answered. */
   status: number;
-  /** Response body bytes (bounded snapshot for hashing). */
   body: Buffer;
   /** Response media type (the raw header), or null when absent. */
   contentType: string | null;
@@ -588,6 +590,7 @@ async function captureExchanges(
         captured.push({
           method: response.request().method().toUpperCase(),
           path: canonicalExchangePath(url.pathname),
+          fetchDest: response.request().headers()['sec-fetch-dest']?.toLowerCase() ?? null,
           status: response.status(),
           body: (body ?? Buffer.alloc(0)).slice(0, 16384),
           contentType,

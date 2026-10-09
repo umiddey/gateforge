@@ -266,7 +266,7 @@ export interface PageSweepResult {
    * record (the caller deduplicates and caps it). A rejected session
    * that visited nothing contributes none.
    */
-  exchanges: Array<{ method: string; url: string; status: number }>;
+  exchanges: Array<{ method: string; url: string; status: number; fetchDest?: string | null }>;
 }
 
 export async function sweepPageVisits(input: {
@@ -288,7 +288,7 @@ export async function sweepPageVisits(input: {
 }): Promise<PageSweepResult> {
   const page = await input.browser.pageFor(input.sessionId, normalizePageStorageState(input.storageState));
   const visits: SweptPageVisit[] = [];
-  const exchanges: Array<{ method: string; url: string; status: number }> = [];
+  const exchanges: Array<{ method: string; url: string; status: number; fetchDest?: string | null }> = [];
   let observationSequence = 0;
   // A session the app rejects (e.g. a rotating refresh token the suite's
   // own storage-state file already consumed) bounces the FIRST visited
@@ -358,7 +358,7 @@ export async function sweepPageVisits(input: {
     input.issueRecord(`${verdict.pageId}:page:data-ok`, input.testId, payload);
     visits.push({ routeId: verdict.pageId, verdict, visited: true });
     for (const response of visit.apiResponses) {
-      exchanges.push({ method: response.method, url: response.url, status: response.status });
+      exchanges.push({ method: response.method, url: response.url, status: response.status, fetchDest: response.fetchDest ?? null });
     }
     input.onProgress?.(formatSweepProgress({
       index: index + 1,

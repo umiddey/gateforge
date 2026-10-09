@@ -583,6 +583,7 @@ export async function observePageBrowser(options: PageObserverOptions): Promise<
           method: response.request().method(),
           url,
           status: response.status(),
+          fetchDest: response.request().headers()['sec-fetch-dest']?.toLowerCase() ?? null,
           remoteAddress,
           proxied: options.isProxiedExchange(url, response.status()),
         });
