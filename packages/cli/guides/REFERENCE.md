@@ -1364,10 +1364,16 @@ not only the sessions that carry claims. When a session that PASSED
 closes (and when a page sweep completes), the witness issues ONE
 claim-free record of kind `http.exchanges` carrying the same transport
 snapshot the per-claim `http.observed` records carry: the deduplicated,
-capped exchange list (`method`, `url`, `status`, `fetchDest`), its
-watermark, and `truncated` when the cap cut the list. `fetchDest` is the
-lowercased `Sec-Fetch-Dest` request header, or `null` when the client
-did not send it. A session whose test did not pass drops its record, and
+capped exchange list (`method`, `url`, `status`, `fetchDest`, `resourceType`),
+its watermark, and `truncated` when the cap cut the list. `fetchDest` is
+the lowercased `Sec-Fetch-Dest` value when present; otherwise the
+Playwright fixture derives it from the request resource type (`fetch`/`xhr`
+become `empty`, `document` becomes `document`, and assets retain their
+destination class). The fixture's `x-gateforge-resource-type` header is a
+test-process observation, not proof: it can only hide a call from R2, never
+make a fake test pass, and proof rules do not use it. A disagreement records
+`resourceTypeConflict: true` while preserving browser `Sec-Fetch-Dest`.
+Missing both facts yields `null`. A session whose test did not pass drops its record, and
 a session that proxied nothing issues none. The kind can never satisfy an
 obligation — it is not selectable by any obligation, and it only reaches
 the report.
@@ -1397,7 +1403,10 @@ witnessed at least one such record:
 
 One row per witnessed exchange, sorted by test id, method, path, and
 status. `path` is the query-stripped observed path; `fetchDest` is the
-lowercased `Sec-Fetch-Dest` value (or `null`); `route` is the resource id
+effective lowercased destination (browser `Sec-Fetch-Dest` preferred,
+otherwise derived from Playwright's `resourceType`); `resourceType` retains
+that raw fixture value or is `null`; `resourceTypeConflict` is present when
+the two facts disagree. `route` is the resource id
 the ONE route matcher attributed it to, or `null`. `kind` is `api` only
 when `fetchDest` is exactly `empty`; `document` and `iframe` are `page`,
 other non-empty destinations (for example `script`, `style`, `image`, or

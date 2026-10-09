@@ -64,21 +64,19 @@ interface StubPage {
   /** How many route handlers the helper installed (a shared origin installs none). */
   readonly handlers: number;
   /** Drives the installed route handler once for `url`. */
-  drive(url: string): Promise<void>;
-  /** Every `route.continue()` call, in order; `url` is undefined for a bare continue. */
-  readonly continued: ReadonlyArray<{ url: string | undefined }>;
+  drive(url: string, resourceType?: string): Promise<void>;
+  /** Each continue call, including the forwarded URL and request headers. */
+  readonly continued: ReadonlyArray<{ url: string | undefined; headers: Record<string, string> | undefined }>;
 }
 
 /**
- * A Page stand-in recording what the route handler did. The routing helper
- * only calls `page.route` and then, per request, `route.request().url()`
- * plus `route.continue()` / `route.continue({url})` — so a stub pins the
- * rewrite, while the real browser path stays covered by the witness e2e
- * suite that drives this same function in a Chromium run.
+ * A Page stand-in recording what the route handler did. It models the
+ * request fields the routing helper consumes, pinning both the rewrite and
+ * the per-request resource-type header alongside preserved request headers.
  */
 function stubPage(): StubPage {
   const handlers: Array<(route: PlaywrightTest.Route) => Promise<void>> = [];
-  const continued: Array<{ url: string | undefined }> = [];
+  const continued: Array<{ url: string | undefined; headers: Record<string, string> | undefined }> = [];
   return {
     page: {
       route(_pattern: string, handler: (route: PlaywrightTest.Route) => Promise<void>): void {
@@ -89,13 +87,17 @@ function stubPage(): StubPage {
       return handlers.length;
     },
     continued,
-    async drive(url: string): Promise<void> {
+    async drive(url: string, resourceType = 'document'): Promise<void> {
       const handler = handlers[0];
       if (handler === undefined) throw new Error('no route handler was installed');
       await handler({
-        request: () => ({ url: () => url }),
-        continue: async (options?: { url: string }) => {
-          continued.push({ url: options?.url });
+        request: () => ({
+          url: () => url,
+          resourceType: () => resourceType,
+          headers: () => ({ 'x-existing': 'kept' }),
+        }),
+        continue: async (options?: { url?: string; headers?: Record<string, string> }) => {
+          continued.push({ url: options?.url, headers: options?.headers });
         },
       } as unknown as PlaywrightTest.Route);
     },
@@ -134,12 +136,15 @@ describe('CommonJS suites can build on the fixture (plan 0.9.2 E1)', () => {
   it('the required routing helper rewrites app traffic onto the session proxy', async () => {
     const stub = stubPage();
     await BASE.routePageThroughSessionProxy(stub.page, APP_ORIGIN, SESSION_ORIGIN);
-    await stub.drive(`${APP_ORIGIN}/dashboard?tab=1`);
-    await stub.drive('https://cdn.example.test/asset.js');
+    await stub.drive(`${APP_ORIGIN}/dashboard?tab=1`, 'document');
+    await stub.drive('https://cdn.example.test/asset.js', 'script');
     expect(stub.handlers).toBe(1);
     expect(stub.continued).toEqual([
-      { url: `${SESSION_ORIGIN}/dashboard?tab=1` },
-      { url: undefined },
+      {
+        url: `${SESSION_ORIGIN}/dashboard?tab=1`,
+        headers: { 'x-existing': 'kept', 'x-gateforge-resource-type': 'document' },
+      },
+      { url: undefined, headers: undefined },
     ]);
   });
 

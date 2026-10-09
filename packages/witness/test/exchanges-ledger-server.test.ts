@@ -17,7 +17,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { chromium } from 'playwright';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { buildHttpLedger, type HttpRouteCandidate } from '@gate-forge/core';
+import { buildHttpLedger, evaluateHttpCoverage, HTTP_CALL_UNMATCHED, type HttpRouteCandidate } from '@gate-forge/core';
 import { HTTP_EXCHANGES_KIND, RUN_HEADER, VERIFIER_HEADER } from '../src/constants.js';
 import { startWitness, type WitnessHandle } from '../src/witness/server.js';
 import type { SessionCredential } from '../src/witness/types.js';
@@ -47,8 +47,11 @@ function withResolvers<T>(): {
   return { promise, resolve, reject };
 }
 
-/** The fixture app the session proxy forwards to; serves everything with 200. */
+/** The fixture app the session proxy forwards requests to. */
+/** Request headers received by the upstream, for the forwarding-boundary assertion. */
+const upstreamRequestHeaders: Array<Record<string, string | string[] | undefined>> = [];
 const app: Server = createServer((req, res) => {
+  upstreamRequestHeaders.push(req.headers);
   if (req.url === '/') {
     res.writeHead(200, { 'content-type': 'text/html' });
     res.end('<script src="/script.js"></script>');
@@ -59,7 +62,7 @@ const app: Server = createServer((req, res) => {
     res.end("fetch('/api/data')");
     return;
   }
-  res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
+  res.writeHead(req.url === '/api/x' ? 404 : 200, { 'content-type': 'text/plain; charset=utf-8' });
   res.end('exchanges-ledger-app');
 });
 let appBaseUrl: string;
@@ -78,6 +81,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  upstreamRequestHeaders.length = 0;
   adaptersDir = mkdtempSync(join(tmpdir(), 'gateforge-exchanges-ledger-'));
   witness = await startWitness({
     runId: RUN_ID,
@@ -116,11 +120,19 @@ async function openUnclaimedSession(testId = TEST_ID, workerIndex = 0): Promise<
 }
 
 /** Drives one proxied GET through the session's dedicated observation proxy. */
-async function proxiedGet(session: SessionCredential, path: string, fetchDest?: string): Promise<number> {
+async function proxiedGet(
+  session: SessionCredential,
+  path: string,
+  fetchDest?: string,
+  resourceType?: string,
+): Promise<number> {
   const { promise, resolve, reject } = withResolvers<number>();
+  const headers: Record<string, string> = {};
+  if (fetchDest !== undefined) headers['sec-fetch-dest'] = fetchDest;
+  if (resourceType !== undefined) headers['x-gateforge-resource-type'] = resourceType;
   get(
     `${session.proxyUrl as string}${path}`,
-    { ...(fetchDest === undefined ? {} : { headers: { 'sec-fetch-dest': fetchDest } }) },
+    { ...(Object.keys(headers).length === 0 ? {} : { headers }) },
     (response) => {
       response.resume();
       response.on('end', () => resolve(response.statusCode ?? 0));
@@ -154,7 +166,7 @@ describe('POST /sessions/close — one http.exchanges record per passed session'
     const payload = record['payload'] as Record<string, unknown>;
     expect(payload['channel']).toBe('observe');
     expect(payload['sessionId']).toBe(session.sessionId);
-    expect(payload['exchanges']).toEqual([{ method: 'GET', url: '/x', status: 200, fetchDest: null }]);
+    expect(payload['exchanges']).toEqual([{ method: 'GET', url: '/x', status: 200, fetchDest: null, resourceType: null }]);
     expect(payload['truncated']).toBeUndefined();
   });
   it('carries browser document, script, and fetch destinations into http.exchanges', async () => {
@@ -168,13 +180,82 @@ describe('POST /sessions/close — one http.exchanges record per passed session'
       const records = await exchangeRecords();
       const payload = (records[0] as Record<string, unknown>)['payload'] as Record<string, unknown>;
       expect(payload['exchanges']).toEqual([
-        { method: 'GET', url: '/', status: 200, fetchDest: 'document' },
-        { method: 'GET', url: '/script.js', status: 200, fetchDest: 'script' },
-        { method: 'GET', url: '/api/data', status: 200, fetchDest: 'empty' },
+        { method: 'GET', url: '/', status: 200, fetchDest: 'document', resourceType: null },
+        { method: 'GET', url: '/script.js', status: 200, fetchDest: 'script', resourceType: null },
+        { method: 'GET', url: '/api/data', status: 200, fetchDest: 'empty', resourceType: null },
       ]);
     } finally {
       await browser.close();
     }
+  });
+  it('classifies plain-http custom-host fetches as API calls and strips Gateforge headers upstream', async () => {
+    const session = await openUnclaimedSession();
+    const browser = await chromium.launch({
+      headless: true,
+      args: ['--host-resolver-rules=MAP resource-type.test 127.0.0.1'],
+    });
+    try {
+      const page = await browser.newPage();
+      let sawSecFetchDest = false;
+      await page.route('**/*', async (route) => {
+        const requestHeaders = route.request().headers();
+        sawSecFetchDest ||= requestHeaders['sec-fetch-dest'] !== undefined;
+        const headers: Record<string, string> = {
+          ...requestHeaders,
+          'x-gateforge-resource-type': route.request().resourceType(),
+        };
+        if (route.request().url().endsWith('/api/x')) headers['x-gateforge-initiator'] = 'test-code';
+        await route.continue({ headers });
+      });
+      const proxy = new URL(session.proxyUrl as string);
+      await page.goto(`http://resource-type.test:${proxy.port}/`);
+      const apiResponse = page.waitForResponse((response) => response.url().endsWith('/api/x'));
+      await page.evaluate(async () => (await fetch('/api/x')).text());
+      expect((await apiResponse).status()).toBe(404);
+      expect(sawSecFetchDest).toBe(false);
+      await post('/sessions/close', { sessionId: session.sessionId, outcome: 'passed' });
+      const records = await exchangeRecords();
+      expect(records).toHaveLength(1);
+      const payload = (records[0] as Record<string, unknown>)['payload'] as Record<string, unknown>;
+      const exchanges = payload['exchanges'] as Array<Record<string, unknown>>;
+      expect(exchanges.find((exchange) => exchange['url'] === '/')).toMatchObject({
+        fetchDest: 'document',
+        resourceType: 'document',
+      });
+      expect(exchanges.find((exchange) => exchange['url'] === '/api/x')).toMatchObject({
+        status: 404,
+        fetchDest: 'empty',
+        resourceType: 'fetch',
+      });
+      const ledger = buildHttpLedger(records, [{
+        resourceId: 'http.endpoint:GET /served',
+        method: 'GET',
+        canonicalPath: '/served',
+      }]);
+      expect(ledger.rows.find((row) => row.path === '/api/x')).toMatchObject({
+        kind: 'api',
+        resolution: 'nomatch',
+        status: 404,
+      });
+      const unmatched = evaluateHttpCoverage({ routes: [], ledger, mode: 'block' }).findings;
+      expect(unmatched.filter((finding) => finding.code === HTTP_CALL_UNMATCHED)).toHaveLength(1);
+      expect(upstreamRequestHeaders.some((headers) =>
+        Object.keys(headers).some((name) => name.startsWith('x-gateforge-')),
+      )).toBe(false);
+    } finally {
+      await browser.close();
+    }
+  });
+
+  it('prefers Sec-Fetch-Dest on disagreement and records the conflicting resource type', async () => {
+    const session = await openUnclaimedSession();
+    expect(await proxiedGet(session, '/', 'document', 'fetch')).toBe(200);
+    await post('/sessions/close', { sessionId: session.sessionId, outcome: 'passed' });
+    const records = await exchangeRecords();
+    const payload = (records[0] as Record<string, unknown>)['payload'] as Record<string, unknown>;
+    expect(payload['exchanges']).toEqual([
+      { method: 'GET', url: '/', status: 200, fetchDest: 'document', resourceType: 'fetch', resourceTypeConflict: true },
+    ]);
   });
 
   it('drops the record for a session that did not pass, even with traffic', async () => {
@@ -203,8 +284,8 @@ describe('POST /sessions/close — one http.exchanges record per passed session'
     expect(records).toHaveLength(1);
     const payload = (records[0] as Record<string, unknown>)['payload'] as Record<string, unknown>;
     expect(payload['exchanges']).toEqual([
-      { method: 'GET', url: '/x', status: 200, fetchDest: null },
-      { method: 'GET', url: '/y', status: 200, fetchDest: null },
+      { method: 'GET', url: '/x', status: 200, fetchDest: null, resourceType: null },
+      { method: 'GET', url: '/y', status: 200, fetchDest: null, resourceType: null },
     ]);
   });
 });
@@ -322,7 +403,7 @@ describe('POST /runs/page-sweep — one http.exchanges record for the sweep sess
       // browser's view); the ledger builder interprets them like every
       // other observed path.
       expect(payload['exchanges']).toEqual([
-        { method: 'GET', url: `${sweepAppBase}/api/widgets`, status: 200, fetchDest: null },
+        { method: 'GET', url: `${sweepAppBase}/api/widgets`, status: 200, fetchDest: null, resourceType: null },
       ]);
     } finally {
       sweepApp.close(() => done());

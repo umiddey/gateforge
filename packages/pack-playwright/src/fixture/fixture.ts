@@ -230,10 +230,12 @@ export async function routePageThroughSessionProxy(
     const originalURL = requestURL.href;
     requestURL.host = sessionOrigin.host;
     const initiator = await initiatorForRequest?.(route.request().method(), originalURL);
-    const headers = initiator === 'test-code'
-      ? { ...route.request().headers(), 'x-gateforge-initiator': 'test-code' }
-      : undefined;
-    await route.continue({ url: requestURL.href, ...(headers === undefined ? {} : { headers }) });
+    const headers: Record<string, string> = {
+      ...route.request().headers(),
+      'x-gateforge-resource-type': route.request().resourceType(),
+    };
+    if (initiator === 'test-code') headers['x-gateforge-initiator'] = 'test-code';
+    await route.continue({ url: requestURL.href, headers });
   });
 }
 

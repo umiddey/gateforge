@@ -330,7 +330,7 @@ describe('proxied exchanges — each body checked against its declared response 
     const session = await openSession();
     expect(await proxiedGet(session, '/items/1')).toBe(200);
     const exchanges = await closedExchanges(session);
-    expect(exchanges).toEqual([{ method: 'GET', url: '/items/1', status: 200, fetchDest: 'empty' }]);
+    expect(exchanges).toEqual([{ method: 'GET', url: '/items/1', status: 200, fetchDest: 'empty', resourceType: null }]);
   });
 });
 

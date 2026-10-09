@@ -385,8 +385,12 @@ interface ObservedExchange {
   method: string;
   path: string;
   status: number;
-  /** Lowercased Sec-Fetch-Dest, null when the client omitted it. */
+  /** Effective lowercased destination used for API classification. */
   fetchDest: string | null;
+  /** Playwright resource type, or null when the fixture omitted it. */
+  resourceType: string | null;
+  /** True when the browser destination and fixture resource type disagree. */
+  resourceTypeConflict?: boolean;
   seq: number;
   /** sha256 hex of the bounded response-body snapshot. */
   bodySha256: string;
@@ -1091,6 +1095,23 @@ async function startObservedProxy(
       // recorded byte-identical to today.
       const forwardUrl = stripMountPath(req.url ?? '/', state.options.mountPath);
       const testCodeInitiated = req.headers['x-gateforge-initiator'] === 'test-code';
+      const rawFetchDest = typeof req.headers['sec-fetch-dest'] === 'string'
+        ? req.headers['sec-fetch-dest'].toLowerCase()
+        : null;
+      const resourceType = typeof req.headers['x-gateforge-resource-type'] === 'string'
+        ? req.headers['x-gateforge-resource-type'].toLowerCase()
+        : null;
+      const inferredFetchDest = resourceType === 'fetch' || resourceType === 'xhr'
+        ? 'empty'
+        : resourceType === 'document'
+          ? 'document'
+          : resourceType === 'stylesheet'
+            ? 'style'
+            : resourceType === 'texttrack'
+              ? 'track'
+              : resourceType;
+      const fetchDest = rawFetchDest ?? inferredFetchDest;
+      const resourceTypeConflict = rawFetchDest !== null && inferredFetchDest !== null && rawFetchDest !== inferredFetchDest;
       // In-flight accounting (plan §11.4): a proxy exchange that starts
       // before `/run-context` binds must refuse the bind — otherwise
       // traffic from an older invocation could be signed under the new
@@ -1202,9 +1223,9 @@ async function startObservedProxy(
             method,
             path: observedPath,
             status,
-            fetchDest: typeof req.headers['sec-fetch-dest'] === 'string'
-              ? req.headers['sec-fetch-dest'].toLowerCase()
-              : null,
+            fetchDest,
+            resourceType,
+            ...(resourceTypeConflict ? { resourceTypeConflict: true } : {}),
             seq,
             bodySha256: createHash('sha256').update(bodySnapshot).digest('hex'),
             bodyBytes: totalBytes,
@@ -1254,7 +1275,9 @@ async function startObservedProxy(
         upstream.pipe(res);
       };
       const forwardHeaders: OutgoingHttpHeaders = { ...req.headers, host: proxyTargetUrl.host };
-      delete forwardHeaders['x-gateforge-initiator'];
+      for (const name of Object.keys(forwardHeaders)) {
+        if (name.startsWith('x-gateforge-')) delete forwardHeaders[name];
+      }
       const forward = request(
         {
           protocol: proxyTargetUrl.protocol,
@@ -2178,14 +2201,11 @@ async function handleBrowserAction(
         method: exchange.method,
         path: exchange.path,
         fetchDest: exchange.fetchDest ?? null,
+        resourceType: null,
         status: exchange.status,
         seq: (state.observedSeq += 1),
         bodySha256: createHash('sha256').update(exchange.body).digest('hex'),
         bodyBytes: exchange.body.length,
-        // Engine-captured exchanges carry no request body (the engine
-        // typed the input; entered fields ride the ui.action record) —
-        // they can never serve an observe finalize, which requires the
-        // proxied request bytes.
         requestBody: null,
         requestTruncated: false,
         requestBytes: 0,
@@ -5797,6 +5817,8 @@ interface TransportExchange {
   url: string;
   status: number;
   fetchDest: string | null;
+  resourceType: string | null;
+  resourceTypeConflict?: boolean;
   initiator?: 'test-code';
   shape?: ResponseShape;
 }
@@ -5827,7 +5849,7 @@ function transportSnapshot(state: WitnessState, session: TestSession): Transport
   let truncated = false;
   for (const exchange of state.observed) {
     if (exchange.sessionId !== session.sessionId || exchange.seq <= watermark) continue;
-    const key = `${exchange.method} ${exchange.path} ${String(exchange.status)} ${exchange.initiator ?? 'page'} ${exchange.fetchDest ?? ''}`;
+    const key = `${exchange.method} ${exchange.path} ${String(exchange.status)} ${exchange.initiator ?? 'page'} ${exchange.fetchDest ?? ''} ${exchange.resourceType ?? ''}`;
     const at = seen.get(key);
     if (at !== undefined) {
       // A repeat keeps the WORST shape verdict, so a mismatch on any repeat survives the dedup.
@@ -5847,7 +5869,8 @@ function transportSnapshot(state: WitnessState, session: TestSession): Transport
       url: exchange.path,
       status: exchange.status,
       fetchDest: exchange.fetchDest,
-      ...(exchange.initiator === 'test-code' ? { initiator: exchange.initiator } : {}),
+      resourceType: exchange.resourceType,
+      ...(exchange.resourceTypeConflict ? { resourceTypeConflict: true } : {}),
       ...(exchange.shape === undefined ? {} : { shape: exchange.shape }),
     });
   }
@@ -5861,13 +5884,20 @@ function transportSnapshot(state: WitnessState, session: TestSession): Transport
  * list (the page sweep's visits).
  */
 function cappedExchangeSnapshot(
-  exchanges: ReadonlyArray<{ method: string; url: string; status: number; fetchDest?: string | null }>,
+  exchanges: ReadonlyArray<{
+    method: string;
+    url: string;
+    status: number;
+    fetchDest?: string | null;
+    resourceType?: string | null;
+    resourceTypeConflict?: boolean;
+  }>,
 ): TransportSnapshot {
   const seen: Record<string, true> = Object.create(null) as Record<string, true>;
   const kept: TransportExchange[] = [];
   let truncated = false;
   for (const exchange of exchanges) {
-    const key = `${exchange.method} ${exchange.url} ${String(exchange.status)} ${exchange.fetchDest ?? ''}`;
+    const key = `${exchange.method} ${exchange.url} ${String(exchange.status)} ${exchange.fetchDest ?? ''} ${exchange.resourceType ?? ''}`;
     if (key in seen) continue;
     seen[key] = true;
     if (kept.length >= OBSERVED_EXCHANGES_CAP) {
@@ -5879,6 +5909,8 @@ function cappedExchangeSnapshot(
       url: exchange.url,
       status: exchange.status,
       fetchDest: exchange.fetchDest ?? null,
+      resourceType: exchange.resourceType ?? null,
+      ...(exchange.resourceTypeConflict ? { resourceTypeConflict: true } : {}),
     });
   }
   return { exchanges: kept, truncated };

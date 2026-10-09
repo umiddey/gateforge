@@ -1,13 +1,18 @@
 # Changelog
 
 ## 0.14.0 (unreleased)
-- Record each observed exchange's lowercased `Sec-Fetch-Dest` as `fetchDest`.
-  Only `empty` (fetch/XHR) is an API call for `HTTP_CALL_UNMATCHED` and
-  `HTTP_CALL_AMBIGUOUS`; documents and other assets stay visible in the
-  ledger but do not produce API-call or response-shape findings. Missing
-  destination metadata is `unknown` and never blocks. An absent, empty, or
-  incomplete route inventory cannot prove a call unmatched; reports identify
-  the inventory as unavailable or incomplete instead.
+- Record each observed exchange's effective destination as `fetchDest` and
+  the Playwright resource type as `resourceType`. Browser `Sec-Fetch-Dest`
+  takes precedence when present; on plain-http custom hostnames the fixture
+  supplies the resource type and maps fetch/XHR to API destination `empty`.
+  A disagreement is recorded but never overrides the browser destination.
+  The resource-type fact is test-process supplied: it can only hide an R2
+  call, cannot make a fake test pass, and is not used by proof rules.
+  Documents and assets stay visible in the ledger but do not produce
+  API-call or response-shape findings. Missing destination metadata is
+  `unknown` and never blocks. An absent, empty, or incomplete route
+  inventory cannot prove a call unmatched; reports identify the inventory
+  as unavailable or incomplete instead.
 - Only a missing-route response (HTTP 404 or 405) is `HTTP_CALL_UNMATCHED`
   and eligible to block or be adopted. Other statuses show
   `HTTP_ROUTE_NOT_INVENTORIED` as a report-only advisory: the app answered,
