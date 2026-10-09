@@ -89,7 +89,10 @@ describe('fastapi import-root resolution (.gateforge/fastapi.json)', () => {
       '/api/v1/leasing/leases',
     ]);
     for (const fact of leaseFacts) {
-      expect(fact.attributes['mountProvenance']).toBe('include-chain');
+      // A mount proof is now the include chain itself (finding 13/13c),
+      // not a bare vocabulary token: this router is reached through the
+      // central registry of the app that includes it.
+      expect(fact.attributes['mountProvenance']).toMatch(/^include-chain:.+/);
     }
   });
 
@@ -187,7 +190,7 @@ describe('fastapi registry-function propagation (function-mediated include_route
       'GET /api/v1/ping',
     ]);
     for (const fact of facts(outcome.resources)) {
-      expect(fact.attributes['mountProvenance']).toBe('include-chain');
+      expect(fact.attributes['mountProvenance']).toMatch(/^include-chain:.+/);
     }
   });
 

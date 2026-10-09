@@ -66,7 +66,19 @@ export const ENDPOINT_CAPABILITY_CONTRADICTION = 'ENDPOINT_CAPABILITY_CONTRADICT
  */
 export const HTTP_OBSERVATION_UNTRUSTED = 'HTTP_OBSERVATION_UNTRUSTED';
 
-/** Every typed outcome code defined by this package. */
+/**
+ * An endpoint declared by a router no scanned app mounts (plan finding
+ * 13/13c). REPORT-ONLY — deliberately NOT in
+ * {@link HTTP_BLOCK_CODES}: an unmounted route is a fact about the
+ * source, not a broken build, and the coverage rules already subtract
+ * it from `served`. It names the declaration so the reader can decide
+ * whether to mount the router or delete the dead code. Minted only when
+ * the run carries mount proofs at all — with no proof anywhere, an
+ * unmounted route is unprovable, not proven.
+ */
+export const HTTP_ENDPOINT_UNMOUNTED = 'HTTP_ENDPOINT_UNMOUNTED';
+
+/** Every BLOCKING typed outcome code defined by this package. */
 export const HTTP_BLOCK_CODES = [
   HTTP_PATH_DYNAMIC,
   HTTP_METHOD_DYNAMIC,

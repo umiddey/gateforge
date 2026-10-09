@@ -358,3 +358,32 @@ describe('a run with no witnessed exchanges', () => {
     expect(result.findings).toEqual([]);
   });
 });
+describe('R1/R5 — a conditional route is mounted, so it stays served (finding 13b)', () => {
+  it('counts a route whose declaration is env-gated as served, not unmounted', () => {
+    // 13b marks a module-level-`if` route `conditional`: served-ness is
+    // unknown statically. It is NOT unmounted — its router is included,
+    // so the mount proof stands and the route stays in the denominator.
+    // `conditional` is deliberately not an input to `isServed`: a route
+    // the app may not serve in production is still a route the app owns.
+    const conditional: HttpCoverageRoute = {
+      ...route({ resourceId: X }),
+      mountProvenances: ['include-chain:app.main:app'],
+    };
+    const result = evaluateHttpCoverage({
+      routes: [
+        conditional,
+        // The contrast case: a route with NO proof at all. It — not X —
+        // is the one that leaves the served denominator.
+        route({ resourceId: DEAD, consumed: true, callSites: ['f.ts:1:0'] }),
+      ],
+      ledger: ledger([row({ testId: 't#one', path: '/dead', route: DEAD, resolution: 'match' })]),
+      verdicts: transportVerdicts(DEAD, 'satisfied'),
+      mountProvenanceEmitted: true,
+      mode: 'report',
+    });
+    // The subtraction is decided by `mountProvenances` ALONE: the
+    // conditional route stays IN the denominator; the proof-less one
+    // leaves it even though it is statically consumed and witnessed.
+    expect(result.summary).toMatchObject({ served: 1, used: 0, proven: 0 });
+  });
+});

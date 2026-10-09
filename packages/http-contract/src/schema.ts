@@ -145,6 +145,29 @@ export const HttpContractFactSchema = z
      * absent means "plain, matches its whole slot".
      */
     typedPathParams: z.literal(true).optional(),
+    /**
+     * The detector's MOUNT PROOF for this route (plan finding 13/13c):
+     * the include chain that reaches it, `include-chain:<app> → <router>
+     * → …` in the same `<module>:<var>` identity {@link registration}'s
+     * `scope` uses. ABSENT when no include edge mounts the route's
+     * router — the detector still reports the route (a declaration is a
+     * claim) but proves nothing serves it, which is what lets the
+     * coverage rules subtract it from the served denominator instead of
+     * counting dead code as served. A detector that cannot follow the
+     * mount graph emits no proof anywhere in the run, and the rules
+     * treat every route as served (unknown, never refuted).
+     */
+    mountProvenance: z.string().min(1).optional(),
+    /**
+     * The route's declaration sits inside a conditional block (a
+     * module-level `if`, `try`, `with`, `for` or `while`), so it
+     * registers only when that branch runs and its served-ness is
+     * unknown statically (plan finding 13b). Present only as `true` —
+     * absent means "declared unconditionally". It is NOT a served-ness
+     * input: the route's router is mounted either way, so the route
+     * keeps its {@link mountProvenance} and its {@link registration}.
+     */
+    conditional: z.literal(true).optional(),
     /** Where the fact was found. */
     source: HttpLocationSchema,
   })

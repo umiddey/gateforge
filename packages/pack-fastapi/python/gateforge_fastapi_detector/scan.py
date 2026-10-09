@@ -15,7 +15,12 @@ Detector vocabulary (frozen with the pack):
   by the pack wrapper so canonicalization has exactly one implementation),
   ``framework`` (``fastapi``), ``handlerSymbol``, ``isAsync``,
   ``responseModel``, ``requestSchemaSymbols``, ``tags``, ``operationId``,
-  and ``mountProvenance`` (``include-chain`` or ``standalone``).
+  and ``mountProvenance`` (plan finding 13/13c): the include chain that
+  reaches the route, ``include-chain:<app> → <router> → …`` in the same
+  ``<module>:<var>`` identity ``registration.scope`` uses. ABSENT when no
+  include edge mounts the route's router — the standalone fallback still
+  reports the route (a declaration is a claim), but an absent proof is
+  what lets the coverage rules drop it from the served denominator.
 - Registration order (0.14): every endpoint the detector can place
   statically in an app's flattened registration sequence also carries
   ``registration`` ``{scope, order}`` (``scope``: the app's
@@ -33,6 +38,13 @@ Detector vocabulary (frozen with the pack):
   its function-body top-level ``include_router`` statements join the app
   module's statement order (nested include statements and chained helper
   hops stay unregistered).
+- Conditional declarations (plan finding 13b): a route decorator inside
+  a module-level ``if``/``try``/``with``/``for``/``while`` body registers
+  only when that branch runs, so its served-ness is unknown statically.
+  Such a fact carries ``conditional: true`` — marked, never dropped, and
+  never a served-ness input: its router IS mounted either way, so the
+  route keeps its ``mountProvenance`` and its ``registration`` (which is
+  right whenever the route does register).
 - One fact per (effective mounted path, concrete method): an
   ``api_route(methods=[...])`` yields one fact per listed method, and a
   router mounted twice yields one fact per mount (plan phase 2.3).
@@ -133,6 +145,13 @@ FASTAPI_PREFIX_UNRESOLVED = "FASTAPI_PREFIX_UNRESOLVED"
 # by no scanned app, and the reader must be told which file declares them.
 FASTAPI_ROUTER_UNMOUNTED = "FASTAPI_ROUTER_UNMOUNTED"
 
+# Report-only counterpart of ``FASTAPI_ROUTER_UNMOUNTED``: the same
+# proven-unmounted evidence stated over ENDPOINTS, the unit the
+# inventory, the route table and the coverage denominator speak in. Never
+# blocking — an unmounted route is a fact about the code, not a broken
+# build; the coverage rules subtract it from ``served`` instead.
+HTTP_ENDPOINT_UNMOUNTED = "HTTP_ENDPOINT_UNMOUNTED"
+
 _DECORATOR_METHODS = {
     "get": "GET",
     "post": "POST",
@@ -220,6 +239,14 @@ class RouteDef:
     # the route registers when the ENCLOSING function runs, at a time no
     # static pass can order — the route carries no ``registration``.
     nested: bool = False
+    # True when the decorator sits inside a module-level conditional
+    # block (``if``/``try``/``with``/``for``/``while``): the route
+    # registers only when that branch runs, so served-ness is unknown
+    # statically. The fact is emitted and MARKED (``conditional``), and
+    # it keeps its registration order (which is right whenever the route
+    # does register — plan finding 13b, and the CP ``/tasks/debug``
+    # measurement that confirmed the order holds when served).
+    conditional: bool = False
 
 
 @dataclass
@@ -579,6 +606,48 @@ class _ModuleVisitor(ast.NodeVisitor):
         # Identity set of the current registry function's top-level
         # expression statements (empty outside one).
         self._function_top_expr_ids: set[int] = set()
+        # Nesting depth of module-level CONDITIONAL blocks (``if`` /
+        # ``try`` / ``with`` / ``for`` / ``while`` bodies at module
+        # level, outside any function). A route decorator reached at
+        # depth > 0 registers only when its branch runs, so the fact is
+        # marked ``conditional`` (plan finding 13b). Inside a function
+        # body the flag is NOT set: ``nested`` already covers that case
+        # with its own (stronger) unattributable posture.
+        self._conditional_depth = 0
+
+    def visit_If(self, node: ast.If) -> None:
+        self._visit_conditional(node)
+
+    def visit_Try(self, node: ast.Try) -> None:
+        self._visit_conditional(node)
+
+    def visit_With(self, node) -> None:
+        self._visit_conditional(node)
+
+    def visit_For(self, node) -> None:
+        self._visit_conditional(node)
+
+    def visit_While(self, node) -> None:
+        self._visit_conditional(node)
+
+    def _visit_conditional(self, node: ast.AST) -> None:
+        """Visits a conditional/exception block, marking routes inside it.
+
+        The block's own body executes only under a runtime condition (or
+        may not execute at all), so a route declared there cannot be
+        claimed as unconditionally registered. Depth is counted only at
+        module level: inside a function body, ``nested`` already says
+        the position is unorderable, and a class body is a different
+        namespace entirely.
+        """
+        if self._function is not None:
+            self.generic_visit(node)
+            return
+        self._conditional_depth += 1
+        try:
+            self.generic_visit(node)
+        finally:
+            self._conditional_depth -= 1
 
     def visit_Module(self, node: ast.Module) -> None:
         self._module_top_def_ids = {
@@ -744,6 +813,7 @@ class _ModuleVisitor(ast.NodeVisitor):
                     effective_response_model=None, request_schemas=[],
                     tags=[], operation_id=None,
                     nested=self._function is not None,
+                    conditional=self._conditional_depth > 0,
                 ))
             return
         elif method_attr == "api_route":
@@ -773,6 +843,7 @@ class _ModuleVisitor(ast.NodeVisitor):
             ],
             operation_id=_static_string(_keyword(node, "operation_id")),
             nested=self._function is not None,
+            conditional=self._conditional_depth > 0,
         )
         router = self.index.routers.get(owner.id)
         if router is None:
@@ -917,6 +988,16 @@ def _module_of(relpath: str) -> str:
     if without_ext.endswith("/__init__"):
         without_ext = without_ext[: -len("/__init__")]
     return without_ext.replace("/", ".")
+
+
+def _scope_identity(node_key: str) -> str:
+    """``<relpath>:<var>`` walk node → the ``<module>:<var>`` identity.
+
+    The same spelling ``registration.scope`` uses, so one reader can
+    compare a mount chain against a registration scope directly.
+    """
+    relpath, _, var = node_key.rpartition(":")
+    return f"{_module_of(relpath)}:{var}"
 
 
 def _root_candidates(dotted: str, import_roots: tuple[str, ...], scanned: frozenset[str]) -> list[str]:
@@ -1125,6 +1206,9 @@ class _Resolver:
         self.models = _ModelIndex(indexes, import_roots)
         self.facts: list[dict] = []
         self.unresolved: list[dict] = []
+        # Report-only findings the resolver mints (unmounted routers);
+        # merged into the outcome's `findings` by `scan()`.
+        self.findings: list[dict] = []
         # Registration bookkeeping (0.14): ``include_positions`` maps each
         # provably-included (file, router var) to the (file, line, col) of
         # every include edge targeting it; ``registration_claims`` collects
@@ -1151,7 +1235,7 @@ class _Resolver:
                 # ``<module>:<var>``).
                 self._scope = f"{_module_of(relpath)}:{var}"
                 self._order = 0
-                self._walk(relpath, var, "", (), "include-chain", included, True)
+                self._walk(relpath, var, "", (), included, True)
             for name in sorted(index.routers):
                 router = index.routers[name]
                 if router.alias_of is not None:
@@ -1163,7 +1247,7 @@ class _Resolver:
                 # Standalone fallback: the router is provably served by no
                 # scanned app, so there is no scope to register under.
                 self._scope = None
-                self._walk(relpath, name, "", (), "standalone", included, True)
+                self._walk(relpath, name, "", (), included, True)
                 if router.routes:
                     unmounted.append((relpath, name, router))
         self._report_unmounted_routers(
@@ -1184,6 +1268,25 @@ class _Resolver:
             claims = self.registration_claims.get(fact["id"], [])
             if len(claims) == 1:
                 fact["attributes"]["registration"] = claims[0]
+
+    def _mount_proof(self, chain: tuple[str, ...], node_key: str) -> str | None:
+        """The mount chain reaching ``node_key``, or None when unscoped.
+
+        The proof names the nodes the walk crossed, root app first, in
+        the same ``<module>:<var>`` identity ``registration.scope`` uses:
+        ``include-chain:app.main:app → app.api:api_router``. ``chain`` is
+        the walk's own visited-node tuple, so this is the SAME traversal
+        that positions the route — there is no second mount resolver.
+
+        Returns None on the standalone fallback (``_scope`` is None): no
+        include edge mounts that router, so it has no proof to give. A
+        route with no proof stays in the inventory as a declaration and
+        leaves the served denominator.
+        """
+        if self._scope is None:
+            return None
+        nodes = [_scope_identity(node) for node in (*chain, node_key)]
+        return "include-chain:" + " → ".join(nodes)
 
     def _report_unmounted_routers(
         self,
@@ -1228,6 +1331,20 @@ class _Resolver:
                     "is dead code"
                 ),
                 "location": loc(relpath, router.prefix_node),
+            })
+            # Report-only, alongside the typed blocking entry above:
+            # `HTTP_ENDPOINT_UNMOUNTED` names the ENDPOINTS (the unit the
+            # inventory and the coverage denominator speak in), while the
+            # unresolved entry keeps the router-level blocker. Same
+            # evidence, two readers — neither invents reachability.
+            self.findings.append({
+                "code": HTTP_ENDPOINT_UNMOUNTED,
+                "detail": (
+                    f"router '{name}' in {relpath} is mounted by no app in the scanned "
+                    f"set, so {len(routes)} endpoint(s) are declared but not served: "
+                    f"{', '.join(routes)}"
+                ),
+                "locations": [loc(relpath, router.prefix_node)],
             })
 
     def _materialize_function_includes(self) -> None:
@@ -1733,7 +1850,6 @@ class _Resolver:
         var: str,
         prefix: str,
         chain: tuple[str, ...],
-        mount: str,
         included: set[tuple[str, str]],
         certain: bool,
     ) -> None:
@@ -1745,6 +1861,11 @@ class _Resolver:
         below it emits NO ``registration`` while still emitting its facts
         exactly as before; an order-certain expansion joins the app
         module's statement order and stays certain.
+
+        The walk IS the mount proof: every route emitted under a scope
+        carries the chain of nodes crossed to reach it (see
+        ``_mount_proof``). A walk with no scope (the standalone fallback
+        for a router no include edge targets) carries none.
         """
         index = self.indexes[relpath]
         node_key = f"{relpath}:{var}"
@@ -1784,7 +1905,7 @@ class _Resolver:
                             "location": loc(relpath, router.prefix_node),
                         })
                     return
-                self._walk(target[0], target[1], prefix, chain + (node_key,), mount, included, certain)
+                self._walk(target[0], target[1], prefix, chain + (node_key,), included, certain)
                 return
             if router.prefix is None:
                 self.unresolved.append({
@@ -1806,7 +1927,7 @@ class _Resolver:
                 return
             prefix = prefix + router.prefix
             self._emit_ordered(
-                relpath, index, var, router, prefix, mount, chain, node_key, included, certain,
+                relpath, index, var, router, prefix, chain, node_key, included, certain,
             )
             return
         if var not in index.apps:
@@ -1871,7 +1992,7 @@ class _Resolver:
             return
         self._walk(
             target[0], target[1], prefix + edge.prefix,
-            chain + (node_key,), "include-chain", included, certain,
+            chain + (node_key,), included, certain,
         )
 
     def _emit_ordered(
@@ -1881,7 +2002,6 @@ class _Resolver:
         var: str,
         router: RouterDef,
         prefix: str,
-        mount: str,
         chain: tuple[str, ...],
         node_key: str,
         included: set[tuple[str, str]],
@@ -1932,7 +2052,7 @@ class _Resolver:
             # and every sub-block is uncertain (fail closed).
             for edge in owned:
                 self._walk_edge(relpath, edge, prefix, chain, node_key, included, False)
-            self._emit_routes(index, router, prefix, mount, {})
+            self._emit_routes(index, router, prefix, {}, self._mount_proof(chain, node_key))
             return
         route_claims: dict[int, tuple[str, int]] = {}
         items: list[tuple[tuple[int, int, int], str, int]] = [
@@ -1964,7 +2084,7 @@ class _Resolver:
                     relpath, edge, prefix, chain, node_key, included,
                     certain and not (edge.materialized and not edge.ordered),
                 )
-        self._emit_routes(index, router, prefix, mount, route_claims)
+        self._emit_routes(index, router, prefix, route_claims, self._mount_proof(chain, node_key))
 
     def _edge_order_key(self, edge: IncludeEdge) -> tuple[int, int, int]:
         """Sort key placing one owned edge in its module's statement order.
@@ -2016,11 +2136,13 @@ class _Resolver:
         index: FileIndex,
         router: RouterDef,
         prefix: str,
-        mount: str,
         route_claims: dict[int, tuple[str, int]],
+        proof: str | None,
     ) -> None:
         """Emits one fact per (route, concrete method); a route with a
-        proven registration claim stamps every fact it emits."""
+        proven registration claim stamps every fact it emits, and every
+        fact carries the mount ``proof`` (None on the standalone
+        fallback: no include edge mounts this router)."""
         for route in router.routes:
             if not route.methods:
                 if not any(node is route.node for node, _ in index.unsupported):
@@ -2045,7 +2167,7 @@ class _Resolver:
                 continue
             claim = route_claims.get(id(route))
             for method in route.methods:
-                fact = _fact(route.file, route, method, prefix + route.path, mount, self.models)
+                fact = _fact(route.file, route, method, prefix + route.path, proof, self.models)
                 if claim is not None:
                     self.registration_claims.setdefault(fact["id"], []).append(
                         {"scope": claim[0], "order": claim[1]},
@@ -2058,7 +2180,7 @@ def _fact(
     route: RouteDef,
     method: str,
     effective_path: str,
-    mount: str,
+    proof: str | None,
     models: _ModelIndex,
 ) -> dict:
     handler_qname = f"{relpath[:-3].replace('/', '.')}:{route.handler}"
@@ -2075,8 +2197,20 @@ def _fact(
         "requestSchemaSymbols": route.request_schemas,
         "tags": route.tags,
         "operationId": route.operation_id,
-        "mountProvenance": mount,
     }
+    # Mount proof (plan finding 13/13c): the include chain that reaches
+    # this route, ``include-chain:<app> → <router> → …``. ABSENT when no
+    # include edge mounts the route's router — the standalone fallback
+    # still reports the route (a declaration is a claim), but an absent
+    # proof is what lets the coverage rules drop it from the served
+    # denominator instead of counting dead code as served.
+    if proof is not None:
+        attributes["mountProvenance"] = proof
+    # 13b: the route registers only when its module-level branch runs,
+    # so served-ness is unknown statically. Marked, never dropped, and
+    # never a served-ness input: the router IS mounted either way.
+    if route.conditional:
+        attributes["conditional"] = True
     # A typed path convertor in the raw path string (``{n:int}``,
     # ``{p:path}``): the route matches NARROWER than its canonical
     # single-slot shape suggests, so registration-order attribution
@@ -2162,6 +2296,10 @@ def scan(paths: list[str], root: Path | None = None, import_roots: list[str] | N
 
     resources = resolver.facts
     unresolved = resolver.unresolved
+
+    # The resolver's report-only findings join the per-file syntax ones
+    # on the same channel (union, then the ONE deterministic sort below).
+    findings.extend(resolver.findings)
 
     resources.sort(key=lambda r: r["id"])
     unresolved.sort(

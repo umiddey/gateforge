@@ -59,6 +59,7 @@ import {
   ENDPOINT_SEMANTICS_UNRESOLVED,
   HTTP_CONTRACT_KIND,
   HTTP_ENDPOINT_KIND,
+  HTTP_ENDPOINT_UNMOUNTED,
   HTTP_PARAM_SLOT,
   HttpContractFactSchema,
   canonicalEndpointIdentity,
@@ -513,6 +514,19 @@ function contractFactCandidate(resource: Resource): Record<string, unknown> {
   const registration = attributes['registration'];
   if (isRouteRegistration(registration)) candidate['registration'] = registration;
   if (attributes['typedPathParams'] === true) candidate['typedPathParams'] = true;
+  // Mount proof (0.14, plan finding 13/13c): projected only when the
+  // detector emitted a NON-EMPTY string. Anything else stays ABSENT, so
+  // the endpoint compiles with an empty proof list — the honest "this
+  // route's router is mounted by nothing we could prove" — instead of
+  // a fabricated one.
+  if (isMountProvenance(attributes['mountProvenance'])) {
+    candidate['mountProvenance'] = attributes['mountProvenance'];
+  }
+  // Conditional declaration (0.14, finding 13b): projected only on the
+  // exact literal `true`, so a malformed value is treated as
+  // "unconditional" (the pre-0.14 reading) rather than silently
+  // changing what the coverage rules subtract.
+  if (attributes['conditional'] === true) candidate['conditional'] = true;
   return candidate;
 }
 
@@ -540,6 +554,15 @@ function isRouteRegistration(value: unknown): value is RouteRegistration {
   if (typeof order !== 'number' || !Number.isInteger(order) || order < 0) return false;
   if (orderMax === undefined) return true;
   return typeof orderMax === 'number' && Number.isInteger(orderMax) && orderMax >= order;
+}
+
+/**
+ * A non-empty mount-proof string (0.14, plan finding 13/13c). Any other
+ * shape — absent, empty, non-string — fails closed: no proof, so the
+ * route stays out of the proven-mounted set.
+ */
+function isMountProvenance(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0;
 }
 
 /** Extracts and validates contract facts from every contribution. */
@@ -1107,6 +1130,19 @@ export function compileEndpointContribution(
       }
     }
 
+    // Mount proofs (0.14, plan finding 13/13c): every distinct chain
+    // behind ANY raw route of this identity, deduplicated and sorted.
+    // Empty when the detector proved no mount — the standalone fallback
+    // reports the route as a declaration and nothing more, and core's
+    // `isServed` subtracts it from the served denominator exactly then.
+    const mountProvenances = [
+      ...new Set(
+        endpointRoutes
+          .map((route) => route.mountProvenance)
+          .filter(isMountProvenance),
+      ),
+    ].sort(compareText);
+
     const record: EndpointRecord = {
       method,
       canonicalPath,
@@ -1138,13 +1174,19 @@ export function compileEndpointContribution(
         frameworks: [...new Set(record.routes.map((route) => route.framework))].sort(compareText),
         serverSources: [...new Set(record.routes.map((route) => locationText(route.source)))].sort(compareText),
         callSources: [...new Set(record.calls.map((call) => locationText(call.source)))].sort(compareText),
-        mountProvenances: [
-          ...new Set(
-            record.routes
-              .map((route) => (route as HttpContractFact & { mountProvenance?: string }).mountProvenance)
-              .filter((value): value is string => typeof value === 'string'),
-          ),
-        ].sort(compareText),
+        // The endpoint's mount proofs: every distinct include chain
+        // behind ANY of its raw routes, deduplicated and sorted. Empty
+        // when nothing mounts the route's router — which is exactly
+        // what core's `isServed` reads to drop it from `served`.
+        mountProvenances,
+        // A conditional declaration (0.14, finding 13b) marks the
+        // endpoint as served only when its branch runs. Present when
+        // ANY backing fact is conditional (the endpoint may then serve
+        // under one mount and not another) — and never a served-ness
+        // input: the mount proof above still stands.
+        ...(endpointRoutes.some((route) => route.conditional === true)
+          ? { conditional: true }
+          : {}),
         capabilities,
         capabilityTrace,
         ...(registration !== null ? { registration } : {}),
@@ -1209,6 +1251,33 @@ export function compileEndpointContribution(
         // asserting any other plane must meet that assertion, not mute it.
         signals.push(planeSignal('global', record, 'operational'));
       }
+    }
+  }
+
+  // Report-only unmounted endpoints (0.14, plan finding 13/13c): an
+  // endpoint whose route carries NO mount proof, in a run that DOES
+  // carry proofs. The gate matters: with no proof anywhere the
+  // detector simply could not follow the mount graph (or is not a
+  // mounting framework), so an empty proof means "unknown", never
+  // "dead code" — and flagging it would report every route of every
+  // such detector. The coverage rules already subtract these from
+  // `served`; this finding only names them for the reader.
+  const mountProofsEmitted = routes.some((route) => isMountProvenance(route.mountProvenance));
+  if (mountProofsEmitted) {
+    const seenUnmounted = new Set<string>();
+    for (const endpoint of endpoints) {
+      if (endpoint.routes.some((route) => isMountProvenance(route.mountProvenance))) continue;
+      if (seenUnmounted.has(endpoint.identity)) continue;
+      seenUnmounted.add(endpoint.identity);
+      findings.push({
+        code: HTTP_ENDPOINT_UNMOUNTED,
+        detail:
+          `endpoint '${endpoint.identity}' is declared at ` +
+          `${endpoint.routes.map((route) => locationText(route.source)).join(', ')} but no scanned app mounts its router; ` +
+          'it is reported as a declaration and counted as NOT served — mount the router, ' +
+          'or delete it if it is dead code',
+        locations: [endpoint.routes[0]?.source ?? { file: '<unknown>', line: 1, col: 0 }],
+      });
     }
   }
 

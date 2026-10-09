@@ -25,6 +25,7 @@ import {
   extractContractFacts,
   type CompileResult,
 } from '../src/endpoint-compiler.js';
+import type { DetectorOutput, Resource } from '@gate-forge/core';
 
 let seq = 100;
 function routeFact(
@@ -1772,5 +1773,163 @@ describe('slash-variant registration merge (two decorators, one handler)', () =>
       ]),
     ]);
     expect(registrationOfIdentity(compiled, 'GET /preferences/resolve')).toBeUndefined();
+  });
+});
+
+/**
+ * Mount proofs (plan finding 13/13c): the detector's `mountProvenance`
+ * attribute must survive the projection into the shared fact and then
+ * into the compiled `http.endpoint` resource. Before this, the
+ * projection whitelist dropped it and EVERY endpoint shipped
+ * `mountProvenances: []` — so `isServed` could never subtract an
+ * unmounted route from the denominator.
+ */
+
+/** The compiled `http.endpoint` resource for one identity, by attribute. */
+function endpointResource(compiled: CompileResult, identity: string): Record<string, unknown> {
+  const resource = compiled.contribution.resources.find(
+    (entry) => entry.kind === HTTP_ENDPOINT_KIND && entry.attributes['identity'] === identity,
+  );
+  if (resource === undefined) throw new Error(`no endpoint resource for ${identity}`);
+  return resource.attributes;
+}
+
+/** Detector-wire attributes for one route fact, as a python detector emits them. */
+function wireRoute(
+  method: HttpMethod,
+  path: string,
+  attributes: Record<string, unknown>,
+): Resource {
+  return {
+    schemaVersion: 1,
+    id: `http.contract:test:${method}:${path}`,
+    kind: 'http.contract',
+    source: 'backend/routes.py',
+    location: { file: 'backend/routes.py', line: 10, col: 0 },
+    detectorVersion: '0.1.0',
+    attributes: {
+      role: 'server-route',
+      method,
+      rawPath: path,
+      normalizedPath: path,
+      effectivePath: path,
+      framework: 'fastapi',
+      handlerSymbol: 'app.handler',
+      ...attributes,
+    },
+  };
+}
+
+/** One detector contribution over raw python-emitted resources. */
+function wireContribution(resources: Resource[]): DetectorOutput {
+  return {
+    detectorId: 'gateforge.pack-fastapi',
+    detectorVersion: '0.1.0',
+    resources,
+    unresolved: [],
+    findings: [],
+    classificationSignals: [],
+  };
+}
+
+
+describe('mount proof projection (finding 13c)', () => {
+  it('carries the detector mount chain onto the endpoint resource', () => {
+    const compiled = compileEndpointContribution([
+      wireContribution([
+        wireRoute('GET', '/api/v1/items/export', {
+          mountProvenance: 'include-chain:app.main:app → app.items:items_router',
+        }),
+      ]),
+    ]);
+    expect(
+      endpointResource(compiled, 'GET /api/v1/items/export')['mountProvenances'],
+    ).toEqual(['include-chain:app.main:app → app.items:items_router']);
+  });
+
+  it('leaves mountProvenances EMPTY when the detector proves no mount (fail closed)', () => {
+    // The standalone fallback emits a route claim with no proof. A
+    // non-empty array here would make core's `isServed` call dead code
+    // served, so the honest empty array must survive compilation.
+    const compiled = compileEndpointContribution([
+      wireContribution([wireRoute('GET', '/orphan/ping', {})]),
+    ]);
+    expect(endpointResource(compiled, 'GET /orphan/ping')['mountProvenances']).toEqual([]);
+  });
+
+  it('collects EVERY mount behind one identity, deduplicated and sorted', () => {
+    const compiled = compileEndpointContribution([
+      wireContribution([
+        wireRoute('GET', '/api/v1/items/export', {
+          mountProvenance: 'include-chain:app.main:app → app.items:items_router',
+        }),
+        // The same router mounted a second time (same method+path ⇒ one
+        // endpoint identity, two raw routes).
+        wireRoute('GET', '/api/v1/items/export', {
+          mountProvenance: 'include-chain:app.dev:dev_app → app.items:items_router',
+        }),
+        // A slash-variant twin repeating the first proof verbatim.
+        wireRoute('GET', '/api/v1/items/export', {
+          rawPath: '/api/v1/items/export/',
+          mountProvenance: 'include-chain:app.main:app → app.items:items_router',
+        }),
+      ]),
+    ]);
+    expect(
+      endpointResource(compiled, 'GET /api/v1/items/export')['mountProvenances'],
+    ).toEqual([
+      'include-chain:app.dev:dev_app → app.items:items_router',
+      'include-chain:app.main:app → app.items:items_router',
+    ]);
+  });
+
+  it('reports an unmounted endpoint as a report-only HTTP_ENDPOINT_UNMOUNTED finding', () => {
+    // Only minted when the run carries mount proofs at all: without a
+    // single proof, "unmounted" is not provable (the mounting code may
+    // be outside the scanned set) and every endpoint would be flagged.
+    const withProof = compileEndpointContribution([
+      wireContribution([
+        wireRoute('GET', '/api/v1/items/export', {
+          mountProvenance: 'include-chain:app.main:app → app.items:items_router',
+        }),
+        wireRoute('GET', '/orphan/ping', {}),
+      ]),
+    ]);
+    const codes = withProof.contribution.findings.map((finding) => finding.code);
+    expect(codes).toContain('HTTP_ENDPOINT_UNMOUNTED');
+    const finding = withProof.contribution.findings.find(
+      (entry) => entry.code === 'HTTP_ENDPOINT_UNMOUNTED',
+    );
+    expect(finding?.detail).toContain('/orphan/ping');
+
+    // No proof anywhere ⇒ no unmounted finding at all.
+    const withoutProofs = compileEndpointContribution([
+      wireContribution([wireRoute('GET', '/orphan/ping', {})]),
+    ]);
+    expect(withoutProofs.contribution.findings.map((entry) => entry.code)).not.toContain(
+      'HTTP_ENDPOINT_UNMOUNTED',
+    );
+  });
+
+  it('marks a conditional route and keeps its mount proof (finding 13b)', () => {
+    // The route is mounted when its `if` branch runs: it keeps the
+    // proof (so `isServed` still counts it) and gains `conditional`.
+    const compiled = compileEndpointContribution([
+      wireContribution([
+        wireRoute('GET', '/api/tasks/debug', {
+          mountProvenance: 'include-chain:app.main:app',
+          conditional: true,
+        }),
+        wireRoute('GET', '/api/tasks/{task_id}', {
+          mountProvenance: 'include-chain:app.main:app',
+        }),
+      ]),
+    ]);
+    const conditional = endpointResource(compiled, 'GET /api/tasks/debug');
+    expect(conditional['conditional']).toBe(true);
+    expect(conditional['mountProvenances']).toEqual(['include-chain:app.main:app']);
+
+    const plain = endpointResource(compiled, 'GET /api/tasks/{task_id}');
+    expect(plain['conditional']).toBeUndefined();
   });
 });
