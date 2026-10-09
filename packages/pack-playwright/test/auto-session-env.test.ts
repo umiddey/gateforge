@@ -1,3 +1,7 @@
+import { spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { describe, expect, it } from 'vitest';
@@ -6,6 +10,31 @@ import { supervisedRunnerChildEnv } from '../src/discovery/supervised-run.js';
 
 const hook = fileURLToPath(new URL('../dist/fixture/auto-session.cjs', import.meta.url));
 describe('witnessed Playwright preload environment', () => {
+  it('fails closed with the selected runner and cause when its fixture cannot load', () => {
+    const root = mkdtempSync(join(tmpdir(), 'gateforge-preload-missing-runner-'));
+    try {
+      const cli = join(root, 'node_modules/playwright/cli.js');
+      mkdirSync(join(root, 'node_modules/playwright'), { recursive: true });
+      writeFileSync(cli, "console.log('runner continued without fixture');\n");
+      const child = spawnSync(process.execPath, [cli, 'test'], {
+        cwd: root,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          GATEFORGE_WITNESS_URL: 'http://127.0.0.1:9',
+          GATEFORGE_PLAYWRIGHT_CONFIG_DIR: root,
+          NODE_OPTIONS: autoSessionNodeOptions(undefined),
+        },
+      });
+      expect(child.error).toBeUndefined();
+      expect(child.status).not.toBe(0);
+      expect(child.stderr).toContain(`gateforge auto-session: cannot load the witnessed fixture for runner ${cli}`);
+      expect(child.stderr).toContain("Cannot find module 'playwright/test'");
+      expect(child.stdout).not.toContain('runner continued without fixture');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
   it('quotes the shipped hook and preserves existing options', () => {
     expect(autoSessionNodeOptions('--max-old-space-size=512')).toBe(`--max-old-space-size=512 --require ${JSON.stringify(hook)}`);
   });

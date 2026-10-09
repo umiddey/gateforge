@@ -14,7 +14,16 @@ const wrapper = path.join(__dirname, 'auto-session-wrapper.cjs');
 // Load the one fixture before ESM linking starts. A later CJS spec cannot
 // synchronously require an ESM graph that is already being linked by a spec.
 // The internal loader thread resolves modules, but must not evaluate the runner.
-if (!require('node:worker_threads').isInternalThread) require('./fixture.js');
+if (!require('node:worker_threads').isInternalThread) {
+  try {
+    require('./fixture.js');
+  } catch (cause) {
+    throw new Error(
+      `gateforge auto-session: cannot load the witnessed fixture for runner ${process.argv[1]}: ${cause instanceof Error ? cause.message : String(cause)}`,
+      { cause },
+    );
+  }
+}
 const resolveFilename = Module._resolveFilename;
 Module._resolveFilename = function (specifier, parent, ...args) {
   if (specifier === '@playwright/test' && parent?.filename &&

@@ -17,6 +17,8 @@
   Node commands untouched, without loading the fixture or redirecting imports.
 - Automatic root-module forwarding uses a separate test wrapper, preserving the
   explicit Gateforge fixture's own API when plain and explicit imports coexist.
+- Automatic preload binding failures name the selected runner and underlying
+  cause, and stop the child rather than continuing without witnessed fixtures.
 
 ## 0.14.0
 
