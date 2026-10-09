@@ -609,16 +609,15 @@ describe('strict supervised gate (test-gates --changed + receipt + check)', () =
         ]) {
           expect(report.verdicts.find((entry) => entry.obligationId === id)?.verdict).toBe('satisfied');
         }
-        // The Playwright no-change proof (runner-agnostic evidence): the
-        // documents this genuine engine-browser run produces keep
-        // EXACTLY today's key sets. Any renamed, dropped or added key in
-        // the JSON report, the sealed execution result or the receipt
-        // fails here — the Playwright path is not rewritten.
+        // The Playwright run remains unchanged; the current report key set
+        // includes the report-only HTTP ledger and coverage.
         expect(Object.keys(report).sort()).toEqual([
           'blocking',
           'diagnosticContext',
           'engine',
           'execution',
+          'httpCoverage',
+          'httpLedger',
           'run',
           'schemaVersion',
           'scope',

@@ -30,7 +30,19 @@ describe('example first run', () => {
         [join(EXAMPLE_ROOT, '..', 'packages', 'pack-playwright'), join(behaviorModules, '@gate-forge', 'pack-playwright')],
         [join(EXAMPLE_ROOT, '..', 'packages', 'witness'), join(behaviorModules, '@gate-forge', 'witness')],
         [join(EXAMPLE_ROOT, '..', 'packages', 'core'), join(behaviorModules, '@gate-forge', 'core')],
-        ...['playwright', 'playwright-core', 'typescript', 'yaml', 'zod'].map((name) => [
+        [join(EXAMPLE_ROOT, '..', 'packages', 'http-contract'), join(behaviorModules, '@gate-forge', 'http-contract')],
+        ...[
+          'playwright',
+          'playwright-core',
+          'typescript',
+          'yaml',
+          'zod',
+          'ajv',
+          'fast-deep-equal',
+          'fast-uri',
+          'json-schema-traverse',
+          'require-from-string',
+        ].map((name) => [
           join(WORKSPACE_NODE_MODULES, name),
           join(behaviorModules, name),
         ]),

@@ -15,6 +15,7 @@ import { describe, expect, it } from 'vitest';
 import { withTempRepo } from '@gate-forge/core';
 import { configYml, runCli } from './helpers.js';
 import {
+  INVENTORY_GAP_PATH,
   SERVED_PATH,
   TEST_ID,
   UNSERVED_PATH,
@@ -113,6 +114,22 @@ describe('the HTTP call rules end to end (0.14 WP3 R2/R3/R5)', () => {
     });
   }, 60_000);
 
+  it('keeps a successful response outside the blocking and adoption channels', async () => {
+    await withTempRepo({}, async (repo) => {
+      installRepo(repo, 'block');
+      await sealRunWithCalls(repo, [INVENTORY_GAP_PATH], [SERVED_PATH, INVENTORY_GAP_PATH]);
+      const report = await checkJson(repo);
+      expect(report.code).toBe(0);
+      expect(report.httpCoverage.unmatched).toBe(0);
+      expect(report.blocking.filter((entry) => entry.detail.includes('HTTP_ROUTE_NOT_INVENTORIED'))).toEqual([]);
+      expect(report.advisories).toContainEqual(
+        expect.objectContaining({
+          cause: null,
+          detail: expect.stringContaining('HTTP_ROUTE_NOT_INVENTORIED'),
+        }),
+      );
+    });
+  }, 60_000);
   it('prints the summary and mints no finding for a run without exchanges', async () => {
     await withTempRepo({}, async (repo) => {
       installRepo(repo, 'report');

@@ -2029,7 +2029,18 @@ function installConsumerDependencies(repoRoot: string): void {
   for (const name of ['pack-playwright', 'core', 'witness', 'http-contract']) {
     cpSync(join(ROOT, 'packages', name), join(engine, name), { recursive: true, dereference: true });
   }
-  for (const name of ['playwright', 'playwright-core', 'typescript', 'yaml', 'zod']) {
+  for (const name of [
+    'playwright',
+    'playwright-core',
+    'typescript',
+    'yaml',
+    'zod',
+    'ajv',
+    'fast-deep-equal',
+    'fast-uri',
+    'json-schema-traverse',
+    'require-from-string',
+  ]) {
     cpSync(join(installed, name), join(modules, name), { recursive: true, dereference: true });
   }
 }

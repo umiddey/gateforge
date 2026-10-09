@@ -451,15 +451,18 @@ export function evaluateHttpCoverage(input: HttpCoverageInput): HttpCoverageResu
  *   BlockingEntry[]: one entry per finding, deterministically ordered.
  */
 export function httpCallFindingEntries(findings: readonly HttpCallFinding[]): BlockingEntry[] {
-  return findings.map((finding) => ({
-    kind: 'finding' as const,
-    resourceId: finding.resourceId,
-    name: null,
-    detail: `${finding.code}: ${finding.detail}`,
-    location: finding.location,
-    cause: finding.code as CauseCode,
-    nextAction: CAUSE_NEXT_ACTIONS[finding.code as CauseCode],
-  }));
+  return findings.map((finding) => {
+    const inventoryGap = finding.code === HTTP_ROUTE_NOT_INVENTORIED;
+    return {
+      kind: 'finding' as const,
+      resourceId: finding.resourceId,
+      name: null,
+      detail: `${finding.code}: ${finding.detail}`,
+      location: finding.location,
+      cause: inventoryGap ? null : (finding.code as CauseCode),
+      nextAction: inventoryGap ? null : CAUSE_NEXT_ACTIONS[finding.code as CauseCode],
+    };
+  });
 }
 
 /**

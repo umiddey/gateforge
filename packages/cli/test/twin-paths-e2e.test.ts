@@ -119,7 +119,7 @@ async function startTwinApp(): Promise<FixtureApp> {
 /** The json report `test-gates --format json` printed. */
 interface TwinReport {
   summary: { obligations: number; blocking: number };
-  advisories?: Array<{ cause: string; detail: string }>;
+  advisories?: Array<{ cause: string | null; detail: string }>;
   blocking?: Array<{ cause: string; detail: string }>;
   verdicts?: Array<{ obligationId: string; verdict: string; recordIds: string[] }>;
   execution?: { selectedTests?: { selected: number; passed: number; failed: number } };
@@ -287,7 +287,7 @@ async function runFixture(
 }
 
 /** Every TWIN_PATH_DIVERGENT entry a report carries, from either surface. */
-function divergences(report: TwinReport): Array<{ cause: string; detail: string }> {
+function divergences(report: TwinReport): Array<{ cause: string | null; detail: string }> {
   return [...(report.advisories ?? []), ...(report.blocking ?? [])].filter(
     (entry) => entry.cause === 'TWIN_PATH_DIVERGENT',
   );
@@ -403,16 +403,19 @@ describe('twin path coverage (E64): a green run that covered a different path', 
   it('is byte-identical with the option off and with no twin linked', async () => {
     await withTempRepo({}, async (repo) => {
       installRepo(repo, DIVERGENT);
-      const app = await startTwinApp();
-      const proxy = await startAttestationProxy(app.url, FINGERPRINT);
+      let app = await startTwinApp();
+      let proxy = await startAttestationProxy(app.url, FINGERPRINT);
       try {
         // (1) the option is not configured at all.
         const off = await runFixture(repo, proxy.url, { ...DIVERGENT, enforcement: null });
         const offReport = parseReport(off);
         const offFiles = filesUnder(stateDir(repo));
-        // (2) the option is on and NOTHING is linked: an unlinked raw
-        // twin has no pair to compare, so the run must not even grow a
-        // state file for it.
+        // Reset the stateful fixture app so both runs observe identical app
+        // state; the ledger faithfully retains document paths it sees.
+        proxy.stop();
+        app.stop();
+        app = await startTwinApp();
+        proxy = await startAttestationProxy(app.url, FINGERPRINT);
         const unlinked = await runFixture(repo, proxy.url, { ...DIVERGENT, rawTitle: UNLINKED_TITLE });
         const unlinkedReport = parseReport(unlinked);
         const unlinkedFiles = filesUnder(stateDir(repo));
@@ -424,10 +427,10 @@ describe('twin path coverage (E64): a green run that covered a different path', 
         expect(foldedStateFiles(unlinkedFiles)).toEqual(foldedStateFiles(offFiles));
         expect(offFiles.filter((name) => name.startsWith('twin-'))).toEqual([]);
         expect(unlinkedFiles.filter((name) => name.startsWith('twin-'))).toEqual([]);
-        expect(Object.keys(offReport)).not.toContain('advisories');
-        expect(Object.keys(unlinkedReport)).not.toContain('advisories');
+        expect(offReport.advisories ?? []).toEqual([]);
+        expect(unlinkedReport.advisories ?? []).toEqual([]);
       } finally {
-        await proxy.stop();
+        proxy.stop();
         app.stop();
       }
     });
@@ -443,7 +446,11 @@ describe('twin path coverage (E64): a green run that covered a different path', 
         const report = parseReport(run);
         expect(run.code, `a blocking twin divergence must fail the run\nstdout:\n${run.stdout}`).toBe(1);
         expect(divergences(report), JSON.stringify(report.blocking)).not.toEqual([]);
-        expect(report.advisories ?? []).toEqual([]);
+        expect(
+          report.advisories?.every(
+            (entry) => entry.cause === null && entry.detail.includes('HTTP_ROUTE_NOT_INVENTORIED'),
+          ),
+        ).toBe(true);
         // The tests themselves still passed: what failed is the claim
         // that they covered the same path.
         expect(report.execution?.selectedTests?.failed, run.stderr).toBe(0);

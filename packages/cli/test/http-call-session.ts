@@ -76,6 +76,7 @@ planes:
 `;
 
 export const SERVED_PATH = '/x';
+export const INVENTORY_GAP_PATH = '/not-in-inventory';
 export const UNSERVED_PATH = '/nowhere';
 export const RUN_ID = '22222222-0000-4000-8000-0000000000c3';
 export const TOKEN = 'wp3-call-findings-token';
@@ -87,11 +88,13 @@ const VERIFIER_HEADER = 'x-gateforge-verifier';
 /** The loopback host this suite names (built, never copied from output). */
 const LOOPBACK = [127, 0, 0, 1].join('.');
 
-/** Target serving `/x` with 200 and everything else with 404. */
-export async function startTarget(): Promise<{ url: string; stop: () => Promise<void> }> {
+/** Target serving declared success paths with 200 and everything else with 404. */
+export async function startTarget(
+  successPaths: readonly string[] = [SERVED_PATH],
+): Promise<{ url: string; stop: () => Promise<void> }> {
   const server: Server = createServer((req, res) => {
     const path = (req.url ?? '/').split('?')[0] ?? '/';
-    res.writeHead(path === SERVED_PATH ? 200 : 404, { 'content-type': 'application/json' });
+    res.writeHead(successPaths.includes(path) ? 200 : 404, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ path }));
   });
   await new Promise<void>((resolve) => server.listen(0, LOOPBACK, () => resolve()));
@@ -127,8 +130,12 @@ export function installRepo(repo: TempRepo, callFindings?: 'report' | 'block'): 
  *   repo: the temp repo with the routes installed.
  *   paths: the request paths the session calls, in order.
  */
-export async function sealRunWithCalls(repo: TempRepo, paths: readonly string[]): Promise<void> {
-  const target = await startTarget();
+export async function sealRunWithCalls(
+  repo: TempRepo,
+  paths: readonly string[],
+  successPaths: readonly string[] = [SERVED_PATH],
+): Promise<void> {
+  const target = await startTarget(successPaths);
   const witness = await startWitness({
     runId: RUN_ID,
     token: TOKEN,
@@ -154,8 +161,8 @@ export async function sealRunWithCalls(repo: TempRepo, paths: readonly string[])
         headers: { 'sec-fetch-dest': 'empty' },
       });
       await response.text();
-      // The target serves only SERVED_PATH with 200; every other path is a 404.
-      expect(response.status).toBe(path === SERVED_PATH ? 200 : 404);
+      // Configured success paths simulate routes served by the app but missing from static inventory.
+      expect(response.status).toBe(successPaths.includes(path) ? 200 : 404);
     }
     const closed = await fetch(`${witness.url}/sessions/close`, {
       method: 'POST',
