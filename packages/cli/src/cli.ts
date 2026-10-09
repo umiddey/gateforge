@@ -19,6 +19,7 @@ import { discoverCommand } from './commands/discover.js';
 import { obligationsCommand } from './commands/obligations.js';
 import { checkCommand } from './commands/check.js';
 import { nextCommand } from './commands/next.js';
+import { configCommand } from './commands/config.js';
 import { testGatesCommand } from './commands/test-gates.js';
 import { preCommitCommand } from './commands/pre-commit.js';
 import { baselineCommand } from './commands/baseline.js';
@@ -165,6 +166,8 @@ export async function main(
       return runWithExitCodes(io, () => checkCommand(io, rest));
     case 'next':
       return runWithExitCodes(io, () => nextCommand(io, rest));
+    case 'config':
+      return runWithExitCodes(io, () => Promise.resolve(configCommand(io, rest)));
     case 'test-gates':
       return runWithExitCodes(io, () => testGatesCommand(io, rest));
     case 'run':
