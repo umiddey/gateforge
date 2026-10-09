@@ -85,14 +85,14 @@ interface FixtureApp {
   /** Its loopback origin. */
   url: string;
   /** Stops the process. */
-  stop: () => void;
+  stop: () => Promise<void>;
 }
 
 /** Starts the twin fixture app as a child; resolves its loopback origin. */
 async function startTwinApp(): Promise<FixtureApp> {
   const child = spawn(process.execPath, [join(ROOT, 'packages/cli/test/fixtures/twin-app/server.mjs')], {
     cwd: ROOT,
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: ['pipe', 'pipe', 'pipe'],
   });
   let stdout = '';
   const url = await new Promise<string>((resolveUrl, rejectUrl) => {
@@ -113,7 +113,15 @@ async function startTwinApp(): Promise<FixtureApp> {
       rejectUrl(new Error(`the twin fixture app exited early (code ${String(code)}): ${stdout}`));
     });
   });
-  return { url, stop: () => child.kill('SIGTERM') };
+  return {
+    url,
+    stop: async () => {
+      if (child.exitCode !== null || child.signalCode !== null) return;
+      const exited = once(child, 'exit');
+      child.kill('SIGTERM');
+      await exited;
+    },
+  };
 }
 
 /** The json report `test-gates --format json` printed. */
@@ -346,7 +354,7 @@ describe('twin path coverage (E64): a green run that covered a different path', 
         });
       } finally {
         await proxy.stop();
-        app.stop();
+        await app.stop();
       }
     });
   }, 600_000);
@@ -371,7 +379,7 @@ describe('twin path coverage (E64): a green run that covered a different path', 
         expect(shapes.twins.filter((twin) => twin.shapes.length > 0).length, JSON.stringify(shapes)).toBeGreaterThan(1);
       } finally {
         await proxy.stop();
-        app.stop();
+        await app.stop();
       }
     });
   }, 600_000);
@@ -395,7 +403,7 @@ describe('twin path coverage (E64): a green run that covered a different path', 
         expect(run.stderr).toContain('runs with the Gateforge test fixture');
       } finally {
         await proxy.stop();
-        app.stop();
+        await app.stop();
       }
     });
   }, 600_000);
@@ -413,7 +421,7 @@ describe('twin path coverage (E64): a green run that covered a different path', 
         // Reset the stateful fixture app so both runs observe identical app
         // state; the ledger faithfully retains document paths it sees.
         proxy.stop();
-        app.stop();
+        await app.stop();
         app = await startTwinApp();
         proxy = await startAttestationProxy(app.url, FINGERPRINT);
         const unlinked = await runFixture(repo, proxy.url, { ...DIVERGENT, rawTitle: UNLINKED_TITLE });
@@ -431,7 +439,7 @@ describe('twin path coverage (E64): a green run that covered a different path', 
         expect(unlinkedReport.advisories ?? []).toEqual([]);
       } finally {
         proxy.stop();
-        app.stop();
+        await app.stop();
       }
     });
   }, 900_000);
@@ -456,7 +464,7 @@ describe('twin path coverage (E64): a green run that covered a different path', 
         expect(report.execution?.selectedTests?.failed, run.stderr).toBe(0);
       } finally {
         await proxy.stop();
-        app.stop();
+        await app.stop();
       }
     });
   }, 600_000);
@@ -486,7 +494,7 @@ describe('twin path coverage (E64): a green run that covered a different path', 
         expect(stateText, 'no state file may name a value the owner never allowlisted').not.toContain(nonce.nonce);
       } finally {
         await proxy.stop();
-        app.stop();
+        await app.stop();
       }
     });
   }, 600_000);
@@ -548,7 +556,7 @@ describe('twin path coverage (E64): a green run that covered a different path', 
         rmSync(externalDir, { recursive: true, force: true });
         rmSync(join(keyFile, '..'), { recursive: true, force: true });
         await proxy.stop();
-        app.stop();
+        await app.stop();
       }
     });
   }, 600_000);
