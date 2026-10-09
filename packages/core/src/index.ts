@@ -1028,6 +1028,18 @@ export {
 export { interpretObservedPath, matchHttpRoute, resolveHttpRoute, pathMatchesShape } from './verdict/index.js';
 
 /**
+ * The verdict-time exchange ledger (0.14 WP2): report-only rows built
+ * from witnessed `http.exchanges` records through the one resolver.
+ */
+export {
+  buildHttpLedger,
+  type HttpLedger,
+  type HttpLedgerResolution,
+  type HttpLedgerRow,
+  type HttpLedgerSummary,
+} from './verdict/index.js';
+
+/**
  * Required-case aggregation (plan 2026-09-19 §4.7, Phase 5): pure
  * semantic grading across an obligation's required behavior cases.
  */

@@ -978,6 +978,7 @@ async function legacyTestGates(io: Io, options: LegacyOptions): Promise<number> 
     engineLine: reportEngineLine(),
     lifecycleDerivation: pipeline.lifecycleDerivation,
     diagnosticContext,
+    ...(evaluated.httpLedger === undefined ? {} : { httpLedger: evaluated.httpLedger }),
   });
   writeLine(io.stdout, report);
 
@@ -993,6 +994,7 @@ async function legacyTestGates(io: Io, options: LegacyOptions): Promise<number> 
       engineLine: reportEngineLine(),
       lifecycleDerivation: pipeline.lifecycleDerivation,
       diagnosticContext,
+      ...(evaluated.httpLedger === undefined ? {} : { httpLedger: evaluated.httpLedger }),
     }),
   );
 
@@ -3577,6 +3579,7 @@ async function runSupervisedTestGatesInner(
                   },
                 }),
       },
+      ...(evaluated.httpLedger === undefined ? {} : { httpLedger: evaluated.httpLedger }),
     });
     writeLine(io.stdout, report);
     const gateCode = runExitCode({ verdicts: evaluated.verdicts, blocking: evaluated.blocking });
@@ -4028,6 +4031,7 @@ async function runSupervisedTestGatesInner(
               },
             }),
       },
+      ...(evaluated.httpLedger === undefined ? {} : { httpLedger: evaluated.httpLedger }),
     });
     writeLine(io.stdout, report);
     writeLine(
@@ -6050,6 +6054,7 @@ async function runSupervisedTestGatesInner(
       ? {}
       : { chaos: { ...chaosRun, ...(chaosSchedule === null ? {} : { schedule: chaosSchedule }) } }),
     ...(localFailures.length === 0 ? {} : { failedTests: localFailures }),
+    ...(evaluated.httpLedger === undefined ? {} : { httpLedger: evaluated.httpLedger }),
   });
   /**
    * The persisted json document: the same report shape stdout shows for a
@@ -6077,6 +6082,7 @@ async function runSupervisedTestGatesInner(
           ...(chaosRun === null
             ? {}
             : { chaos: { ...chaosRun, ...(chaosSchedule === null ? {} : { schedule: chaosSchedule }) } }),
+          ...(evaluated.httpLedger === undefined ? {} : { httpLedger: evaluated.httpLedger }),
         }),
       ) as Record<string, unknown>),
       ...(gateMode === 'strict'

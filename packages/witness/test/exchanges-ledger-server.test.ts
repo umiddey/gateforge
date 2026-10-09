@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { chromium } from 'playwright';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { buildHttpLedger, type HttpRouteCandidate } from '@gate-forge/core';
 import { HTTP_EXCHANGES_KIND, RUN_HEADER, VERIFIER_HEADER } from '../src/constants.js';
 import { startWitness, type WitnessHandle } from '../src/witness/server.js';
 import type { SessionCredential } from '../src/witness/types.js';
@@ -172,6 +173,44 @@ describe('POST /sessions/close — one http.exchanges record per passed session'
       { method: 'GET', url: '/x', status: 200 },
       { method: 'GET', url: '/y', status: 200 },
     ]);
+  });
+});
+
+describe('the verdict-time httpLedger (WP2 step 3)', () => {
+  it('reports an UNCLAIMED test call to /x as match and an unserved path as nomatch', async () => {
+    const session = await openUnclaimedSession('tests/ledger#unclaimed-x');
+    expect(await proxiedGet(session, '/x')).toBe(200);
+    expect(await proxiedGet(session, '/nowhere')).toBe(200);
+    const close = await post('/sessions/close', { sessionId: session.sessionId, outcome: 'passed' });
+    expect(close.status).toBe(200);
+
+    const response = await fetch(`${witness.url}/records`, { headers: { [RUN_HEADER]: RUN_TOKEN } });
+    const body = (await response.json()) as { records?: Array<Record<string, unknown>> };
+    // The ledger core builds at verdict time from the run's records over
+    // the run's complete route inventory — the same input shape the CLI
+    // passes (`buildHttpLedger(authorizedRecords, httpRoutesView(graph))`).
+    const ledger = buildHttpLedger(body.records ?? [], [
+      { resourceId: 'http.endpoint:GET /x', method: 'GET', canonicalPath: '/x' },
+    ] satisfies HttpRouteCandidate[]);
+    expect(ledger.rows).toEqual([
+      {
+        testId: 'tests/ledger#unclaimed-x',
+        method: 'GET',
+        path: '/nowhere',
+        status: 200,
+        route: null,
+        resolution: 'nomatch',
+      },
+      {
+        testId: 'tests/ledger#unclaimed-x',
+        method: 'GET',
+        path: '/x',
+        status: 200,
+        route: 'http.endpoint:GET /x',
+        resolution: 'match',
+      },
+    ]);
+    expect(ledger.summary).toEqual({ exchanges: 2, matched: 1, unmatched: 1, ambiguous: 0, incomplete: 0 });
   });
 });
 

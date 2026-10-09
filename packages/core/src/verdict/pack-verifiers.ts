@@ -97,7 +97,7 @@ const HTTP_OBSERVED_KIND = 'http.observed';
  * report-only. Mirrors `HTTP_EXCHANGES_KIND` in `@gate-forge/witness`'s
  * `src/constants.ts` — keep in lockstep.
  */
-const HTTP_EXCHANGES_KIND = 'http.exchanges';
+export const HTTP_EXCHANGES_KIND = 'http.exchanges';
 
 /**
  * Payload discriminant the witness stamps on every observe-finalized

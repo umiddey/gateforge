@@ -1,10 +1,10 @@
 /**
  * Unit tests of `matchHttpRoute` — the ONE obligation-free route
  * resolver (WP2: one route resolver). The 4 matcher cases here are
- * ported from the deleted http-contract `matchExchange` (WP1) so the
- * router semantics live with the single matcher in core; the
- * obligation-aware wrapper (`resolveHttpRoute`) stays pinned by
- * verifier-registry.test.ts.
+ * ported from the http-contract matcher WP1 added (deleted in WP2
+ * with its module) so the router semantics live with the single
+ * matcher in core; the obligation-aware wrapper (`resolveHttpRoute`)
+ * stays pinned by verifier-registry.test.ts.
  */
 import { describe, expect, it } from 'vitest';
 import type { HttpRouteCandidate } from '../src/verdict/registry.js';

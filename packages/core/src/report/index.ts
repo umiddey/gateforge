@@ -25,7 +25,7 @@ import type { ClassificationDecisionTrace, LifecycleDerivation } from '../classi
 import type { BlockingEntry } from '../policy/index.js';
 import type { RunManifest } from '../schemas/run-manifest.js';
 import type { Verdict } from '../schemas/verdict.js';
-import { BLOCKING_VERDICTS, type ObligationVerdict } from '../verdict/index.js';
+import { BLOCKING_VERDICTS, type HttpLedger, type ObligationVerdict } from '../verdict/index.js';
 import { ENGINE_UPGRADE_REFUSAL_PREFIX, humanMessage } from './human-message.js';
 
 /** The official SARIF 2.1.0 (errata 01) JSON schema location. */
@@ -369,6 +369,15 @@ export interface RenderRunOptions {
    * json and SARIF documents keep exactly the keys they always had.
    */
   failedTests?: readonly { title: string; message: string }[];
+  /**
+   * The verdict-time exchange ledger (0.14 WP2): every witnessed
+   * `http.exchanges` exchange, resolved through the ONE route matcher.
+   * REPORT-ONLY — it changes no verdict and no exit code — and the json
+   * document carries it only when the caller supplies it, so runs
+   * without session-exchange evidence keep exactly the keys they always
+   * had.
+   */
+  httpLedger?: HttpLedger;
 }
 
 /** A run's exit code (architecture contract 4). */
@@ -603,6 +612,9 @@ function jsonReport(
   }
   if (options.selectors !== undefined) report['selectors'] = options.selectors;
   if (options.serialExpansions !== undefined) report['serialExpansions'] = options.serialExpansions;
+  // Report-only exchange ledger (0.14 WP2): present only when the run
+  // witnessed session exchanges, so existing reports keep their keys.
+  if (options.httpLedger !== undefined) report['httpLedger'] = options.httpLedger;
   return report;
 }
 

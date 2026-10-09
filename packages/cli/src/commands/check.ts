@@ -2355,6 +2355,7 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
             },
           }),
     },
+    ...(evaluated.httpLedger === undefined ? {} : { httpLedger: evaluated.httpLedger }),
   });
   // Unmatched by-id routes the owner graded as advisory (0.9.0, owner
   // decision D7): loud at the TOP of the text report, not buried in the

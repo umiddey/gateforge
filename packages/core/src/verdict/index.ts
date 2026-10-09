@@ -33,6 +33,19 @@ export {
   type HttpRouteCandidate,
 } from './registry.js';
 /**
+ * The verdict-time exchange ledger (0.14 WP2): witnessed `http.exchanges`
+ * rows resolved by the ONE route matcher — report-only input for the run
+ * report's `httpLedger`, never a verdict input.
+ */
+export {
+  buildHttpLedger,
+  type HttpLedger,
+  type HttpLedgerResolution,
+  type HttpLedgerRow,
+  type HttpLedgerSummary,
+} from './http-ledger.js';
+export { HTTP_EXCHANGES_KIND } from './pack-verifiers.js';
+/**
  * Cause mapping for the shared report model (plan §5.4): stable cause
  * codes + next actions for blocking verdicts, and the precise capability
  * gaps strict preflight fails closed on (ADR 0005).

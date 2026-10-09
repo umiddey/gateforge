@@ -26,6 +26,7 @@ import {
   evaluateCoveragePolicy,
   type MappedCoverage,
   evaluateObligations,
+  buildHttpLedger,
   fingerprintObligation,
   loadWaivers,
   strictCapabilityGaps,
@@ -36,6 +37,7 @@ import {
   type Claim,
   type CoverageOperation,
   type GateforgeConfig,
+  type HttpLedger,
   type Obligation,
   type ObligationVerdict,
   type ResourceGraph,
@@ -328,6 +330,15 @@ export interface EvaluateResult {
    * evidence has no proof.
    */
   records: readonly unknown[];
+  /**
+   * The verdict-time exchange ledger (0.14 WP2), REPORT-ONLY: rows built
+   * from this run's witnessed `http.exchanges` records through the one
+   * route matcher over the run's complete route inventory. Present only
+   * when the run witnessed at least one such record, so reports of runs
+   * without session-exchange evidence keep exactly the keys they always
+   * had. It never changes a verdict or the exit code.
+   */
+  httpLedger?: HttpLedger;
 }
 
 /**
@@ -710,10 +721,21 @@ export function evaluateRun(input: EvaluateInput): EvaluateResult {
     applied.blocking.length > 0 ||
     gradedVerdicts.some((entry) => BLOCKING_VERDICTS.includes(entry.verdict));
 
+  // Verdict-time exchange ledger (0.14 WP2): built from THIS run's
+  // authorized records (the same set every verdict above graded from —
+  // never a raw records.json read) through the one route matcher over
+  // the same complete inventory the transport verifiers used. Strictly
+  // REPORT-ONLY: its presence here can never change the verdicts or the
+  // blocking set above. Omitted when the run witnessed no session
+  // exchanges, so such runs' reports keep exactly the keys they had.
+  const ledger = buildHttpLedger(records, httpRoutes);
+  const httpLedger: HttpLedger | undefined = ledger.rows.length > 0 ? ledger : undefined;
+
   return {
     verdicts: gradedVerdicts,
     blocking: applied.blocking,
     records,
+    httpLedger,
     baselined: applied.baselined,
     notGradedObligations: input.obligations.length - scoped.length,
     waiverCounts: {
