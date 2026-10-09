@@ -20,13 +20,41 @@ const cases = [
   ['explicit.spec.ts', "import { test, expect } from '@gate-forge/pack-playwright/fixture';", 'test'],
 ] as const;
 
+const ROUTE_SPEC = `import { test, expect } from '@playwright/test';
+test('context stub keeps its outcome', async ({ page, context }) => {
+  await page.goto('/');
+  await context.unroute('**/*');
+  await context.route('**/*', route => route.fulfill({ json: { message: 'Stubbed' } }));
+  await page.getByRole('button', { name: 'Load' }).click();
+  await expect(page.getByText('Stubbed')).toBeVisible();
+});
+test('context continue keeps the session rewrite', async ({ page, context }) => {
+  await page.goto('/');
+  const urls = [];
+  await context.route('**/*', route => { urls.push(route.request().url()); return route.continue(); });
+  await page.getByRole('button', { name: 'Load' }).click();
+  await expect(page.getByText('Loaded')).toBeVisible();
+  expect(urls).toHaveLength(1);
+  expect(new URL(urls[0]).origin).not.toBe(new URL(process.env.TEST_SERVICE_URL).origin);
+});
+test('later page continue keeps its outcome', async ({ page }) => {
+  await page.goto('/');
+  const urls = [];
+  await page.route('**/*', route => { urls.push(route.request().url()); return route.continue(); });
+  await page.getByRole('button', { name: 'Load' }).click();
+  await expect(page.getByText('Loaded')).toBeVisible();
+  expect(urls).toHaveLength(1);
+  expect(new URL(urls[0]).origin).toBe(new URL(process.env.TEST_SERVICE_URL).origin);
+});
+`;
+
 describe('automatic witnessed Playwright sessions', () => {
   it('attributes every unchanged import shape, preserves extension hooks and direct API boundaries', async () => {
     const app = createServer((req, res) => {
       res.setHeader('x-gateforge-env-fingerprint', FINGERPRINT);
       if (req.url === '/') {
         res.setHeader('content-type', 'text/html');
-        res.end('<button>Load</button><div id="result"></div><script>document.querySelector("button").onclick=async()=>{await fetch("/api/items");document.querySelector("#result").textContent="Loaded"}</script>');
+        res.end('<button>Load</button><div id="result"></div><script>document.querySelector("button").onclick=async()=>{const response=await fetch("/api/items");const body=await response.json();document.querySelector("#result").textContent=body.message||"Loaded"}</script>');
       } else { res.setHeader('content-type', 'application/json'); res.end('{}'); }
     });
     await new Promise<void>((resolve) => app.listen(0, '127.0.0.1', resolve));
@@ -39,6 +67,7 @@ describe('automatic witnessed Playwright sessions', () => {
           specs[`specs/${file}`] = `${imports}\n${call}('${file}', async ({ page }) => {\n${file === 'root.spec.ts' ? "const api = await test.request.newContext(); await api.get('/api/direct'); await api.dispose();" : ''}\nawait page.goto('/'); await page.getByRole('button', { name: 'Load' }).click(); await expect(page.getByText('Loaded')).toBeVisible();\n});\n`;
         }
         specs['specs/direct.spec.ts'] = "import { test, request, expect } from '@playwright/test';\ntest('direct only', async () => { const api = await request.newContext(); expect((await api.get('/api/direct')).status()).toBe(200); await api.dispose(); });\n";
+        specs['specs/routes.spec.ts'] = ROUTE_SPEC;
         repo.writeFiles({
           ...specs,
           '.gateforge.yml': `${GATEFORGE_YML.replace('adapters: .gateforge/adapters', 'adapters: .gateforge/adapters-api')}runtime: .gateforge/runtime.yml\n`,
@@ -47,7 +76,7 @@ describe('automatic witnessed Playwright sessions', () => {
           '.gateforge/fixture-detector.mjs': "import { endpointResourceName } from '@gate-forge/http-contract';\nexport default { async discover() { const resourceName = endpointResourceName('GET', '/api/items'); return { resources: [{ schemaVersion: 1, id: 'items', kind: 'http.endpoint', source: 'src/accounts.js', location: { file: 'src/accounts.js', line: 1, col: 0 }, detectorVersion: '1.0.0', attributes: { resourceName, method: 'GET', canonicalPath: '/api/items', identity: 'GET /api/items' } }], unresolved: [], findings: [], classificationSignals: ['plane', 'identity'].map(dimension => ({ schemaVersion: 1, target: { resourceName }, dimension, assertion: dimension === 'plane' ? 'tenant' : ['GET', '/api/items'], basis: 'declaration', source: 'gateforge.fixture', location: { file: 'src/accounts.js', line: 1, col: 0 }, detector: { id: 'gateforge.fixture', version: '1.0.0' } })) }; } };\n",
           '.gateforge/policies.yml': 'schemaVersion: 1\npolicies:\n  - id: observed\n    when: { kind: http.endpoint }\n    require: [http:request-observed, http:response-status-ok]\n',
           'playwright.config.mjs': "export default { testDir: 'specs', workers: 1, retries: 0, projects: [{ name: 'chromium', use: { browserName: 'chromium' } }], use: { headless: true, baseURL: process.env.TEST_SERVICE_URL } };\n",
-          '.gateforge/test-map.yml': 'schemaVersion: 1\ntests:\n' + cases.map(([file]) => `  - key: playwright:chromium:specs/${file}:${file}\n    selector: { runner: playwright, project: chromium, file: specs/${file}, titlePath: ['${file}'] }\n    kind: observed-e2e\n    claims: ['tenant.${endpointResourceName('GET', '/api/items')}:http:request-observed', 'tenant.${endpointResourceName('GET', '/api/items')}:http:response-status-ok']\n    reason: Browser action loads items.\n`).join(''),
+          '.gateforge/test-map.yml': 'schemaVersion: 1\ntests:\n' + [...cases.map(([file]) => ({ file, title: file })), ...['context continue keeps the session rewrite', 'later page continue keeps its outcome'].map(title => ({ file: 'routes.spec.ts', title }))].map(({ file, title }) => `  - key: playwright:chromium:specs/${file}:${title}\n    selector: { runner: playwright, project: chromium, file: specs/${file}, titlePath: ['${title}'] }\n    kind: observed-e2e\n    claims: ['tenant.${endpointResourceName('GET', '/api/items')}:http:request-observed', 'tenant.${endpointResourceName('GET', '/api/items')}:http:response-status-ok']\n    reason: Browser action loads items.\n`).join(''),
         });
         repo.git(['add', '-A']);
         repo.git(['commit', '--no-gpg-sign', '--quiet', '-m', 'neutral automatic session fixture']);
@@ -68,7 +97,7 @@ describe('automatic witnessed Playwright sessions', () => {
         const records = JSON.parse(readFileSync(repo.path('.gateforge/test-gates/records.json'), 'utf8')) as Array<{ kind: string; testId?: string; payload?: { channel?: string; exchanges?: Array<{ url: string }> } }>;
         const result = JSON.parse(readFileSync(repo.path('.gateforge/test-gates/execution-result.json'), 'utf8'));
         const evidence = `${stdout}\n${stderr}`;
-        expect.soft(result.outcomes, evidence).toHaveLength(cases.length + 1);
+        expect.soft(result.outcomes, evidence).toHaveLength(cases.length + 4);
         expect.soft(result.outcomes.every((row: { status: string }) => row.status === 'passed'), evidence).toBe(true);
         for (const [file] of cases) {
           const outcome = result.outcomes.find((row: { titlePath: string[] }) => row.titlePath.includes(file));
@@ -77,12 +106,18 @@ describe('automatic witnessed Playwright sessions', () => {
           expect.soft(observed.flatMap(row => row.payload?.exchanges ?? []).some(exchange => exchange.url.endsWith('/api/items')), file + evidence).toBe(true);
           expect.soft(result.sessionTrace.find((row: { titlePath: string[] }) => row.titlePath.includes(file))?.sessions.length, file + evidence).toBe(1);
         }
+        for (const title of ['context stub keeps its outcome', 'context continue keeps the session rewrite', 'later page continue keeps its outcome']) {
+          const outcome = result.outcomes.find((row: { titlePath: string[] }) => row.titlePath.includes(title));
+          expect.soft(outcome?.status, title + evidence).toBe('passed');
+          const hasItemsExchange = records.some(row => row.kind === 'http.observed' && row.testId === outcome?.runnerTestId && row.payload?.channel !== 'direct' && row.payload?.exchanges?.some(exchange => exchange.url.endsWith('/api/items')));
+          expect.soft(hasItemsExchange, title + evidence).toBe(title === 'context continue keeps the session rewrite');
+        }
         expect.soft(records.filter(row => row.kind === 'http.observed' && row.payload?.channel !== 'direct').flatMap(row => row.payload?.exchanges ?? []).some(exchange => exchange.url.endsWith('/api/direct')), evidence).toBe(false);
         expect.soft(records.filter(row => row.kind === 'http.observed' && row.testId && row.payload?.channel === 'direct').flatMap(row => row.payload?.exchanges ?? []).some(exchange => exchange.url.endsWith('/api/direct')), evidence).toBe(true);
-        expect.soft(result.measuredTests, evidence).toBe(cases.length + 1);
-        expect.soft(result.executedTests, evidence).toBe(cases.length + 1);
-        expect.soft(report.execution.measuredTests, evidence).toBe(cases.length + 1);
-        expect.soft(report.execution.executedTests, evidence).toBe(cases.length + 1);
+        expect.soft(result.measuredTests, evidence).toBe(cases.length + 4);
+        expect.soft(result.executedTests, evidence).toBe(cases.length + 4);
+        expect.soft(report.execution.measuredTests, evidence).toBe(cases.length + 4);
+        expect.soft(report.execution.executedTests, evidence).toBe(cases.length + 4);
       });
     } finally {
       await new Promise<void>((resolve, reject) => app.close(error => error ? reject(error) : resolve()));

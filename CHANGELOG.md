@@ -8,6 +8,10 @@
   Direct API calls remain diagnostics, never browser evidence. Execution results
   and report execution summaries include `measuredTests` (tests with witness
   sessions) and `executedTests`; ordinary unwitnessed runs stay unchanged.
+- Session proxy routing yields to consumer context routes, preserving fulfilled
+  stubs and retaining the session rewrite when those handlers continue requests.
+  A later consumer page route that continues directly still takes precedence:
+  its outcome is unchanged, but that request bypasses session attribution.
 
 ## 0.14.0
 

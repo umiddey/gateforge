@@ -186,8 +186,8 @@ async function attachInitiatorTracking(page: Page, appBaseURL: string): Promise<
  * Routes browser requests for the configured app origin through the
  * supervisor-issued session proxy, preserving the app URL and path.
  *
- * Every OTHER origin the page requests is continued untouched — that is
- * what a third-party asset needs. When such an origin is on the app's
+ * Every OTHER origin the page requests is passed to remaining routes untouched,
+ * preserving the consumer's handlers for third-party assets. When an origin is on the app's
  * own host (or loopback) it is also a silent ORIGIN MISMATCH: the page
  * is talking to an app origin Gateforge never configured, so nothing it
  * fetches can reach the session proxy. `onUnroutedOrigin` reports those
@@ -224,7 +224,7 @@ export async function routePageThroughSessionProxy(
       if (onUnroutedOrigin !== undefined && isAppHostOrigin(requestURL, appOrigin)) {
         onUnroutedOrigin(requestURL.origin);
       }
-      await route.continue();
+      await route.fallback();
       return;
     }
     const originalURL = requestURL.href;
@@ -235,7 +235,9 @@ export async function routePageThroughSessionProxy(
       'x-gateforge-resource-type': route.request().resourceType(),
     };
     if (initiator === 'test-code') headers['x-gateforge-initiator'] = 'test-code';
-    await route.continue({ url: requestURL.href, headers });
+    // Yield to consumer context routes while carrying the session rewrite.
+    // continue() would skip their stubs and change the test's response.
+    await route.fallback({ url: requestURL.href, headers });
   });
 }
 
