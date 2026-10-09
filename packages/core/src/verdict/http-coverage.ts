@@ -155,6 +155,8 @@ export interface HttpCoverageSummary {
   unmatched: number;
   /** Ledger rows the one resolver placed on several equal candidates. */
   ambiguous: number;
+  /** Route inventory availability for safe unmatched-call adjudication. */
+  inventory?: 'complete' | 'incomplete' | 'unavailable';
 }
 
 /** What R1-R5 produced. */
@@ -213,7 +215,7 @@ function usedRoutes(
     if (route.consumed) serve(route, []);
   }
   for (const entry of ledger?.rows ?? []) {
-    if (entry.resolution !== 'match' || entry.route === null) continue;
+    if (entry.kind !== 'api' || entry.resolution !== 'match' || entry.route === null) continue;
     const route = routes.find((candidate) => candidate.resourceId === entry.route);
     // A row matched by the resolver can only name a route of the same
     // inventory; an id the table does not carry is never invented here.
@@ -325,7 +327,7 @@ function callFindings(
   const findings: HttpCallFinding[] = [];
   const grouped = new Map<string, HttpLedger['rows'][number][]>();
   for (const entry of ledger?.rows ?? []) {
-    if (entry.resolution !== 'nomatch' && entry.resolution !== 'ambiguous') continue;
+    if (entry.kind !== 'api' || (entry.resolution !== 'nomatch' && entry.resolution !== 'ambiguous')) continue;
     const key = `${entry.resolution}\u0000${entry.testId}\u0000${entry.method}\u0000${pathShape(entry.path)}`;
     const bucket = grouped.get(key);
     if (bucket === undefined) grouped.set(key, [entry]);
@@ -405,8 +407,11 @@ export function evaluateHttpCoverage(input: HttpCoverageInput): HttpCoverageResu
       used: used.size,
       proven: proven.size,
       missing: missingRoutes.length,
-      unmatched: rows.filter((entry) => entry.resolution === 'nomatch').length,
-      ambiguous: rows.filter((entry) => entry.resolution === 'ambiguous').length,
+      unmatched: rows.filter((entry) => entry.kind === 'api' && entry.resolution === 'nomatch').length,
+      ambiguous: rows.filter((entry) => entry.kind === 'api' && entry.resolution === 'ambiguous').length,
+      ...((ledger?.summary.inventory ?? (routes.length === 0 ? 'unavailable' : 'complete')) === 'complete'
+        ? {}
+        : { inventory: ledger?.summary.inventory ?? 'unavailable' }),
     },
     findings: callFindings(ledger, input.unresolvedCallSites ?? []),
     missingRoutes,
@@ -454,7 +459,7 @@ export function httpCallFindingEntries(findings: readonly HttpCallFinding[]): Bl
  */
 export function httpResponseShapeEntries(rows: readonly HttpLedgerRow[]): BlockingEntry[] {
   return rows
-    .filter((row) => row.shape === 'mismatch' || row.shape === 'refused')
+    .filter((row) => row.kind === 'api' && (row.shape === 'mismatch' || row.shape === 'refused'))
     .map((row) => {
       const cause: CauseCode = row.shape === 'mismatch' ? 'HTTP_RESPONSE_SHAPE_MISMATCH' : 'HTTP_BODY_TOO_LARGE';
       return {

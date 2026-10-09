@@ -13,6 +13,7 @@ import { describe, expect, it } from 'vitest';
 import {
   evaluateHttpCoverage,
   httpCallFindingEntries,
+  httpResponseShapeEntries,
   type HttpCallFinding,
   type HttpCoverageRoute,
   type HttpCoverageVerdict,
@@ -31,7 +32,7 @@ function route(partial: Partial<HttpCoverageRoute> & { resourceId: string }): Ht
 
 /** One ledger row. */
 function row(partial: Partial<HttpLedger['rows'][number]> & { testId: string; path: string }): HttpLedger['rows'][number] {
-  return { method: 'GET', status: 200, route: null, resolution: 'nomatch', ...partial };
+  return { method: 'GET', status: 200, kind: 'api', route: null, resolution: 'nomatch', ...partial };
 }
 
 /** One ledger with the given rows. */
@@ -246,6 +247,21 @@ describe('R2/R3 — an unmatched or ambiguous witnessed call is a finding', () =
     expect(result.findings[0]?.detail).toContain('GET /items/actions (http.endpoint:GET /items/actions)');
   });
 
+  it('never reports page, asset, or unknown exchanges as unmatched API calls', () => {
+    const result = evaluateHttpCoverage({
+      routes: SERVED,
+      ledger: ledger([
+        row({ testId: 'tests/a#one', path: '/', kind: 'page' }),
+        row({ testId: 'tests/a#one', path: '/app.js', kind: 'asset' }),
+        row({ testId: 'tests/a#one', path: '/legacy', kind: 'unknown' }),
+      ]),
+      verdicts: [],
+      unresolvedCallSites: [],
+      mode: 'block',
+    });
+    expect(result.findings).toEqual([]);
+    expect(result.summary.unmatched).toBe(0);
+  });
   it('never turns an incomplete placement into a finding', () => {
     const result = evaluateHttpCoverage({
       routes: SERVED,
@@ -391,5 +407,13 @@ describe('R1/R5 — a conditional route is mounted, so it stays served (finding 
     // conditional route stays IN the denominator; the proof-less one
     // leaves it even though it is statically consumed and witnessed.
     expect(result.summary).toMatchObject({ served: 1, used: 0, proven: 0 });
+  });
+});
+describe('response-shape findings', () => {
+  it('does not promote page, asset, or unknown shape mismatches into findings', () => {
+    const rows = (['page', 'asset', 'unknown'] as const).map((kind) =>
+      row({ testId: 'tests/a#one', path: '/entry', kind, shape: 'mismatch' }),
+    );
+    expect(httpResponseShapeEntries(rows)).toEqual([]);
   });
 });

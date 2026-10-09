@@ -20,7 +20,7 @@ import type { HttpLedger } from '../src/verdict/http-ledger.js';
 
 /** One ledger row; a row with no route is a call that matched nothing. */
 function row(partial: Partial<HttpLedger['rows'][number]> & { testId: string; path: string }): HttpLedger['rows'][number] {
-  return { method: 'GET', status: 404, route: null, resolution: 'nomatch', ...partial };
+  return { method: 'GET', status: 404, kind: 'api', route: null, resolution: 'nomatch', ...partial };
 }
 
 /** One ledger with the given rows. */

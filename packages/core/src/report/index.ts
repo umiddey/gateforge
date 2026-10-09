@@ -787,7 +787,8 @@ function textReport(
     const http = options.httpCoverage;
     lines.push(
       `HTTP: ${String(http.served)} served, ${String(http.used)} used, ${String(http.proven)} proven, ` +
-        `${String(http.missing)} missing, ${String(http.unmatched)} unmatched, ${String(http.ambiguous)} ambiguous`,
+        `${String(http.missing)} missing, ${String(http.unmatched)} unmatched, ${String(http.ambiguous)} ambiguous ` +
+        `(${http.inventory ?? 'complete'} route inventory)`,
     );
   }
   if (options.chaos !== undefined) {

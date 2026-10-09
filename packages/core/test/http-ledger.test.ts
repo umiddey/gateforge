@@ -31,11 +31,28 @@ interface ExchangeFixture {
   method: string;
   url: string;
   status: number;
+  fetchDest?: string | null;
 }
 
 /** One witnessed, provenance-valid http.exchanges record. */
-function exchangesRecord(testId: string, exchanges: ExchangeFixture[], sessionId = 'sess-1'): Record<string, unknown> {
-  const payload = { channel: 'observe', sessionId, exchanges };
+function exchangesRecord(
+  testId: string,
+  exchanges: ExchangeFixture[],
+  sessionId = 'sess-1',
+  legacy = false,
+): Record<string, unknown> {
+  const payload = {
+    channel: 'observe',
+    sessionId,
+    exchanges: exchanges.map((exchange) => {
+      if (legacy && exchange.fetchDest === undefined) {
+        const entry = { ...exchange };
+        delete entry.fetchDest;
+        return entry;
+      }
+      return { ...exchange, fetchDest: exchange.fetchDest === undefined ? 'empty' : exchange.fetchDest };
+    }),
+  };
   return {
     schemaVersion: 1,
     runId: RUN_ID,
@@ -68,8 +85,8 @@ describe('buildHttpLedger — every witnessed exchange becomes one row', () => {
       INVENTORY,
     );
     expect(ledger.rows).toEqual([
-      { testId: 'tests/a#one', method: 'GET', path: '/nowhere', status: 404, route: null, resolution: 'nomatch' },
-      { testId: 'tests/a#one', method: 'GET', path: '/x', status: 200, route: 'http.endpoint:GET /x', resolution: 'match' },
+      { testId: 'tests/a#one', method: 'GET', path: '/nowhere', status: 404, kind: 'api', route: null, resolution: 'nomatch' },
+      { testId: 'tests/a#one', method: 'GET', path: '/x', status: 200, kind: 'api', route: 'http.endpoint:GET /x', resolution: 'match' },
     ]);
     expect(ledger.summary).toEqual({ exchanges: 2, matched: 1, unmatched: 1, ambiguous: 0, incomplete: 0 });
   });
@@ -131,19 +148,35 @@ describe('buildHttpLedger — every witnessed exchange becomes one row', () => {
     expect(ledger.summary.exchanges).toBe(2);
   });
 
-  it('grades an unattributable inventory incomplete and an empty inventory nomatch', () => {
-    const incomplete = buildHttpLedger(
+  it('marks missing inventories unavailable and keeps page, asset, and unknown traffic non-API', () => {
+    const ledger = buildHttpLedger(
+      [
+        exchangesRecord('tests/a#one', [
+          { method: 'GET', url: '/', status: 200, fetchDest: 'document' },
+          { method: 'GET', url: '/app.js', status: 200, fetchDest: 'script' },
+          { method: 'GET', url: '/old', status: 404, fetchDest: null },
+        ]),
+      ],
+      [],
+    );
+    expect(ledger.rows.map(({ kind, resolution }) => [kind, resolution])).toEqual([
+      ['page', 'incomplete'],
+      ['asset', 'incomplete'],
+      ['unknown', 'incomplete'],
+    ]);
+    expect(ledger.summary).toMatchObject({ unmatched: 0, inventory: 'unavailable' });
+    const incompleteInventory = buildHttpLedger(
       [exchangesRecord('tests/a#one', [{ method: 'GET', url: '/x', status: 200 }])],
       [route('http.endpoint:ANY /x', '/x', 'ANY')],
     );
-    expect(incomplete.rows[0]).toMatchObject({ resolution: 'incomplete', route: null });
-    expect(incomplete.summary).toEqual({ exchanges: 1, matched: 0, unmatched: 0, ambiguous: 0, incomplete: 1 });
-
-    const noInventory = buildHttpLedger(
-      [exchangesRecord('tests/a#one', [{ method: 'GET', url: '/x', status: 200 }])],
-      null,
+    expect(incompleteInventory.rows[0]).toMatchObject({ kind: 'api', resolution: 'incomplete' });
+    expect(incompleteInventory.summary).toMatchObject({ unmatched: 0, inventory: 'incomplete' });
+    const legacy = buildHttpLedger(
+      [exchangesRecord('tests/a#legacy', [{ method: 'GET', url: '/x', status: 200 }], 'sess-legacy', true)],
+      INVENTORY,
     );
-    expect(noInventory.rows[0]).toMatchObject({ resolution: 'nomatch', route: null });
+    expect(legacy.rows[0]).toMatchObject({ kind: 'unknown', resolution: 'match' });
+    expect(legacy.summary).toMatchObject({ matched: 0, unmatched: 0 });
   });
 });
 

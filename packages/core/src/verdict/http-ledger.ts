@@ -14,8 +14,11 @@ import { isProvenancedRecord } from '../provenance.js';
 import { HTTP_EXCHANGES_KIND, interpretObservedPath, matchHttpRoute } from './pack-verifiers.js';
 import type { HttpRouteCandidate } from './registry.js';
 
-/** How the ONE resolver placed one witnessed exchange. */
+/** How the one resolver placed one witnessed exchange. */
 export type HttpLedgerResolution = 'match' | 'nomatch' | 'ambiguous' | 'incomplete';
+
+/** Whether the observed request represents API, page, asset or unknown traffic. */
+export type HttpLedgerKind = 'api' | 'page' | 'asset' | 'unknown';
 
 /** The witness's body-vs-model verdict as the ledger shows it (0.14 WP4). */
 export type HttpLedgerShape = 'ok' | 'mismatch' | 'unchecked' | 'refused';
@@ -30,6 +33,8 @@ export interface HttpLedgerRow {
   path: string;
   /** The observed response status. */
   status: number;
+  /** Sec-Fetch-Dest classification; only `api` may produce R2/R3 findings. */
+  kind: HttpLedgerKind;
   /** The serving route's resource id, or null when unresolved. */
   route: string | null;
   /** The ONE resolver's placement of the exchange. */
@@ -49,6 +54,7 @@ export interface HttpLedgerSummary {
   unmatched: number;
   ambiguous: number;
   incomplete: number;
+  inventory: 'complete' | 'incomplete' | 'unavailable';
 }
 
 /** The whole-run ledger embedded report-only in the run report JSON. */
@@ -154,12 +160,25 @@ export function buildHttpLedger(
       const interpreted = interpretObservedPath(url);
       const path = interpreted.ok ? interpreted.path : (url.split(/[?#]/, 1)[0] ?? url);
       const shape = ledgerShapeOf(exchange['shape']);
-      const resolution = matchHttpRoute(method, path, httpRoutes ?? []);
+      const fetchDest = exchange['fetchDest'];
+      const kind: HttpLedgerKind =
+        fetchDest === 'empty'
+          ? 'api'
+          : fetchDest === 'document' || fetchDest === 'iframe'
+            ? 'page'
+            : fetchDest === null || fetchDest === undefined
+              ? 'unknown'
+              : 'asset';
+      const resolution =
+        httpRoutes === null || httpRoutes === undefined || httpRoutes.length === 0
+          ? { status: 'incomplete' as const, reason: 'route inventory unavailable' }
+          : matchHttpRoute(method, path, httpRoutes);
       rows.push({
         testId: record.testId,
         method: method.toUpperCase(),
         path,
         status,
+        kind,
         route: resolution.status === 'match' ? resolution.matched.resourceId : null,
         resolution: resolution.status,
         ...(resolution.status === 'ambiguous' ? { candidates: [...resolution.candidates] } : {}),
@@ -174,8 +193,22 @@ export function buildHttpLedger(
       compareStrings(left.path, right.path) ||
       compareStrings(String(left.status), String(right.status)),
   );
-  const summary: HttpLedgerSummary = { exchanges: rows.length, matched: 0, unmatched: 0, ambiguous: 0, incomplete: 0 };
+  const inventory =
+    httpRoutes === null || httpRoutes === undefined || httpRoutes.length === 0
+      ? 'unavailable'
+      : rows.some((row) => row.resolution === 'incomplete')
+        ? 'incomplete'
+        : 'complete';
+  const summary: HttpLedgerSummary = {
+    exchanges: rows.length,
+    matched: 0,
+    unmatched: 0,
+    ambiguous: 0,
+    incomplete: 0,
+    ...(inventory === 'complete' ? {} : { inventory }),
+  };
   for (const row of rows) {
+    if (row.kind !== 'api') continue;
     if (row.resolution === 'match') summary.matched += 1;
     else if (row.resolution === 'nomatch') summary.unmatched += 1;
     else if (row.resolution === 'ambiguous') summary.ambiguous += 1;
