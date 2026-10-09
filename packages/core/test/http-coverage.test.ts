@@ -203,6 +203,8 @@ describe('R2/R3 — an unmatched or ambiguous witnessed call is a finding', () =
         code: 'HTTP_CALL_UNMATCHED',
         resourceId: null,
         location: null,
+        key: 'HTTP_CALL_UNMATCHED POST /nowhere (test tests/a#one)',
+        fingerprint: expect.stringMatching(/^[0-9a-f]{64}$/),
         detail:
           "test 'tests/a#one' called 'POST /nowhere' which matched no route in the run's inventory (HTTP 404)",
       },
@@ -279,6 +281,8 @@ describe('R4 — a static call site the join could not resolve', () => {
         code: 'HTTP_CALL_UNRESOLVED',
         resourceId: null,
         location: { file: 'frontend/api.ts', line: 42, col: 4 },
+        key: 'HTTP_CALL_UNRESOLVED frontend/api.ts: call target cannot be resolved statically (fetch)',
+        fingerprint: expect.stringMatching(/^[0-9a-f]{64}$/),
         detail:
           'FRONTEND_CALL_TARGET_UNRESOLVED: call target cannot be resolved statically (fetch) — frontend/api.ts:42',
       },
@@ -309,6 +313,8 @@ describe('the call findings ride a channel the owner declares', () => {
       code: 'HTTP_CALL_UNMATCHED',
       resourceId: null,
       location: null,
+      key: 'HTTP_CALL_UNMATCHED POST /nowhere (test tests/a#one)',
+      fingerprint: 'a'.repeat(64),
       detail: "test 'tests/a#one' called 'POST /nowhere' which matched no route in the run's inventory (HTTP 404)",
     },
   ];

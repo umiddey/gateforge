@@ -37,6 +37,12 @@ export interface InitPresetSettings {
    */
   responseShape: 'report' | 'block';
   /**
+   * The `http.callFindings` the goal writes (0.14 WP5): `block` fails the
+   * gate on NEW HTTP call findings (recorded ones are debt); `report` keeps
+   * them advisory and out of the exit code.
+   */
+  callFindings: 'report' | 'block';
+  /**
    * How much gate wiring the goal implies:
    * - `none` — no hook at all; the report is the product.
    * - `pre-commit` — a fast static hook over the files you touched.
@@ -61,6 +67,7 @@ export const INIT_PRESETS: Readonly<Record<InitPresetName, InitPresetSettings>> 
     strictnessMode: 'warn',
     strictE2E: false,
     responseShape: 'report',
+    callFindings: 'report',
     wiring: 'none',
     mode: 'changed',
     ci: false,
@@ -71,6 +78,7 @@ export const INIT_PRESETS: Readonly<Record<InitPresetName, InitPresetSettings>> 
     strictnessMode: 'changed',
     strictE2E: false,
     responseShape: 'report',
+    callFindings: 'block',
     wiring: 'pre-commit',
     mode: 'changed',
     ci: true,
@@ -81,6 +89,7 @@ export const INIT_PRESETS: Readonly<Record<InitPresetName, InitPresetSettings>> 
     strictnessMode: 'strict',
     strictE2E: true,
     responseShape: 'block',
+    callFindings: 'block',
     wiring: 'blocking',
     mode: 'staged',
     ci: true,

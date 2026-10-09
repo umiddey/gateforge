@@ -358,6 +358,8 @@ export interface RenderRunOptions {
     adoptedAt?: string;
     ageDays?: number;
     neverWitnessed?: number;
+    /** Adopted HTTP call findings (0.14 WP5 debt), counted apart from obligations. */
+    httpCallFindings?: number;
   };
   /**
    * The run's failing tests with their guarded first error line, for a
@@ -539,6 +541,9 @@ function jsonReport(
               : {}),
             ...(options.baseline.neverWitnessed !== undefined
               ? { neverWitnessedBaselinedObligations: options.baseline.neverWitnessed }
+              : {}),
+            ...(options.baseline.httpCallFindings !== undefined
+              ? { baselinedHttpCallFindings: options.baseline.httpCallFindings }
               : {}),
           }
         : {}),

@@ -23,13 +23,13 @@ export const HttpConfigSchema = z
     routeSource: z.enum(['openapi', 'detectors', 'both']).default('both'),
     /**
      * Which channel the HTTP call findings (plan §4.3 R2-R4) block on.
-     * `report` (default) prints and serializes them every run and keeps
-     * the exit code untouched — the only safe default while every
-     * existing consumer still carries hits the adoption migration has
-     * not recorded yet. `block` makes them fail the check exactly like
-     * any other blocking finding.
+     * `block` (default, 0.14 WP5) fails the check on every NEW finding;
+     * findings the adoption receipt records (`gateforge adopt`, or the
+     * `--family http-calls` migration) are known debt and do not block.
+     * `report` prints and serializes them every run and keeps the exit
+     * code untouched (the `light` preset writes it).
      */
-    callFindings: z.enum(['report', 'block']).default('report'),
+    callFindings: z.enum(['report', 'block']).default('block'),
     /**
      * Whether the witness checks each proxied response body against the
      * app's declared OpenAPI response schema (0.14 WP4). `off` (default)
@@ -527,7 +527,7 @@ export const GateforgeConfigSchema = z
      */
     http: HttpConfigSchema.default({
       routeSource: 'both',
-      callFindings: 'report',
+      callFindings: 'block',
       responseShape: 'off',
       openapiPath: '/openapi.json',
     }),

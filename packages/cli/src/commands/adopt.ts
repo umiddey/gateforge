@@ -81,6 +81,12 @@ import { writeLine } from '../io.js';
 import { UsageError } from '../errors.js';
 import { parseArgs, stringFlag } from '../args.js';
 import { evaluateRun, obligationFingerprint } from '../evaluate.js';
+import {
+  adoptionEvidenceScope,
+  captureEvidencePreInventory,
+  deriveEvidenceAuthority,
+} from '../evidence-authority.js';
+import { resolveVerifierKeyring } from '../verifier-keys.js';
 import { headSha, resolveRepoPath, runPipeline, sourcesByResourceId } from '../pipeline.js';
 import {
   engineRootFromInvocation,
@@ -200,15 +206,16 @@ export async function adoptCommand(io: Io, argv: readonly string[]): Promise<num
   const family = stringFlag(options, 'family');
   const confirm = options['confirm'] === true;
   if (confirm && family === undefined) {
-    throw new UsageError(`--confirm is only valid with --family pages (${ADOPT_USAGE})`);
+    throw new UsageError(`--confirm is only valid with --family pages or http-calls (${ADOPT_USAGE})`);
   }
   if (!existsSync(join(io.cwd, '.gateforge.yml'))) {
     throw new UsageError('no .gateforge.yml found — run `gateforge init` first');
   }
   if (family === undefined) return adoptWholeRepository(io);
+  if (family === 'http-calls') return adoptHttpCallsFamily(io, confirm);
   if (family !== 'pages') {
     throw new UsageError(
-      `unknown adoption family '${family}' — only 'pages' exists (${ADOPT_USAGE})`,
+      `unknown adoption family '${family}' — only 'pages' and 'http-calls' exist (${ADOPT_USAGE})`,
     );
   }
   return adoptPagesFamily(io, confirm);
@@ -255,6 +262,8 @@ async function adoptWholeRepository(io: Io): Promise<number> {
   // the same evaluator `check` uses, with forgiveness DISABLED (baseline:
   // null) — the red set must be captured raw, never pre-forgiven.
   const stateDir = join(io.cwd, '.gateforge', 'test-gates');
+  const scope = adoptionEvidenceScope(io.cwd, config, stateDir);
+  const preInventory = captureEvidencePreInventory(scope);
   const pipeline = await runPipeline({
     cwd: io.cwd,
     env: io.env,
@@ -262,9 +271,8 @@ async function adoptWholeRepository(io: Io): Promise<number> {
     provider: 'all-files',
     stateDir,
   });
-  const evaluated = evaluateRun({
+  const grading = {
     cwd: io.cwd,
-    config,
     graph: pipeline.graph,
     obligations: pipeline.policy.obligations,
     blocking: pipeline.policy.blocking,
@@ -273,7 +281,21 @@ async function adoptWholeRepository(io: Io): Promise<number> {
     engineAlembicRecords: pipeline.engineAlembicRecords,
     changedFiles: null,
     baseline: null,
-  });
+  };
+  const evaluated = evaluateRun({ ...grading, config });
+  // The HTTP call findings (0.14 WP5) are graded from the authenticated
+  // sealed records, in report mode (the findings exist in every mode; only
+  // the blocking channel depends on the mode). They are NOT part of the red
+  // set above: that grading has no authority, so it stays exactly as it was
+  // before WP5. The findings become the `http-calls` family only.
+  const authority = deriveEvidenceAuthority(scope, preInventory, pipeline, resolveVerifierKeyring(io.cwd, io.env, [stateDir]));
+  const callFindings = evaluateRun({
+    ...grading,
+    config: { ...config, http: { ...config.http, callFindings: 'report' } },
+    witnessVerifierKey: authority.witnessVerifierKey,
+    witnessVerifierKeys: authority.witnessVerifierKeys,
+    evidenceContext: authority.evidenceContext,
+  }).httpCoverage.findings;
   // R1-9: adoption is plane-ordered. A plane-unresolved blocking
   // entry names a resource whose identity is NOT yet decided — a
   // plane answer changes it — so the red set captured now would
@@ -386,16 +408,27 @@ async function adoptWholeRepository(io: Io): Promise<number> {
         obligationSources.get(obligation.resourceId) ?? [],
       ]),
     ),
-    ...(pagesFamily === null
+    // Family markers exist only when they have something to record, exactly
+    // like `pages`: a repository with no call findings and no page debt keeps
+    // the 0.13 receipt shape (no `families` key). A call finding that appears
+    // later is then named by the one-line migration message (D5).
+    ...(callFindings.length === 0 && pagesFamily === null
       ? {}
       : {
           families: {
-            pages: adoptFamily({
-              adoptedAt: pipeline.now,
-              gitSha: headSha(io.cwd),
-              fingerprintsById: pagesFamily.fingerprintsById,
-              forgiven: pagesFamily.forgiven,
-            }),
+            ...(callFindings.length === 0
+              ? {}
+              : { 'http-calls': httpCallsFamilyOf(callFindings, pipeline.now, headSha(io.cwd)) }),
+            ...(pagesFamily === null
+              ? {}
+              : {
+                  pages: adoptFamily({
+                    adoptedAt: pipeline.now,
+                    gitSha: headSha(io.cwd),
+                    fingerprintsById: pagesFamily.fingerprintsById,
+                    forgiven: pagesFamily.forgiven,
+                  }),
+                }),
           },
         }),
   });
@@ -424,6 +457,11 @@ async function adoptWholeRepository(io: Io): Promise<number> {
         'the family is then already adopted — a repeat records nothing, and pages discovered later are new work to prove',
     );
   }
+  writeLine(
+    io.stdout,
+    `http call findings recorded as debt: ${callFindings.length} (family 'http-calls'; ` +
+      'a new call finding blocks, a removed one leaves the debt automatically)',
+  );
   writeLine(io.stdout, `adoption record: ${recordPath} (${pipeline.now})`);
   writeLine(
     io.stdout,
@@ -724,6 +762,157 @@ async function adoptPagesFamily(io: Io, confirm: boolean): Promise<number> {
   writeLine(
     io.stdout,
     'shrink what resolves: `gateforge baseline update --family-pages <fingerprint>...` (`--family-pages=` keeps none) — ' +
+      'the marker is retained',
+  );
+  return 0;
+}
+
+/**
+ * The `http-calls` family marker (0.14 WP5): every HTTP call finding the
+ * receipt records as recorded debt, keyed by its readable finding key.
+ * `forgiven` is the same fingerprint set, sorted and unique, so the
+ * evaluator forgives exactly these and nothing else. The marker is
+ * permanent: a repeat migration can never re-arm.
+ *
+ * Args:
+ *   findings: the current HTTP call findings (de-duplicated by fingerprint).
+ *   adoptedAt: the run's injected clock instant.
+ *   gitSha: HEAD sha, or null outside a git repo.
+ *
+ * Returns:
+ *   AdoptionFamily: the marker to fold into the receipt.
+ */
+function httpCallsFamilyOf(
+  findings: readonly { readonly key: string; readonly fingerprint: string }[],
+  adoptedAt: string,
+  gitSha: string | null,
+): AdoptionFamily {
+  const ordered = [...findings].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  return adoptFamily({
+    adoptedAt,
+    gitSha,
+    fingerprintsById: Object.fromEntries(ordered.map((finding) => [finding.key, finding.fingerprint])),
+    forgiven: [...new Set(ordered.map((finding) => finding.fingerprint))].sort(),
+  });
+}
+
+/**
+ * The http-calls migration (`gateforge adopt --family http-calls`, 0.14
+ * WP5): revise an ALREADY-adopted repository (a 0.13 receipt, or any
+ * receipt without the marker) so its current HTTP call findings are
+ * recorded debt. Preview by default; `--confirm` performs ONE atomic
+ * receipt write. The baseline document is never touched.
+ *
+ * Args:
+ *   io: process context.
+ *   confirm: false = preview (nothing written); true = record.
+ *
+ * Returns:
+ *   Promise<number>: 0 recorded, previewed or already recorded; 2 not adopted.
+ */
+async function adoptHttpCallsFamily(io: Io, confirm: boolean): Promise<number> {
+  const config = loadConfigAt(io.cwd);
+  const baselinePath = resolveRepoPath(io.cwd, config.baselines);
+  const recordPath = join(dirname(baselinePath), ADOPTION_RECORD_FILENAME);
+
+  const existingRecord = loadAdoptionRecord(recordPath);
+  if (existingRecord === null) {
+    writeLine(
+      io.stderr,
+      'adopt --family http-calls: this repository is not adopted yet — run `gateforge adopt` first ' +
+        '(it records the call findings too). The family path revises an EXISTING adoption receipt; it never seeds one.',
+    );
+    return 2;
+  }
+  // INVARIANT: the marker is permanent. Present → loud no-op success.
+  const marked = existingRecord.families?.['http-calls'];
+  if (marked !== undefined) {
+    writeLine(
+      io.stdout,
+      `http-calls family already adopted at ${marked.adoptedAt} — ` +
+        `${Object.keys(marked.fingerprintsById).length} call finding(s) recorded as debt; a repeat records nothing. ` +
+        'A call finding that stops occurring leaves the debt automatically; a new one blocks.',
+    );
+    return 0;
+  }
+
+  // Raw capture through the same pipeline the plain adopt uses. The
+  // findings are read from the coverage result, which carries them in
+  // every channel mode, so the evaluation grades them `report` (they never
+  // enter the blocking set this migration is not about).
+  const stateDir = join(io.cwd, '.gateforge', 'test-gates');
+  const scope = adoptionEvidenceScope(io.cwd, config, stateDir);
+  const preInventory = captureEvidencePreInventory(scope);
+  const pipeline = await runPipeline({
+    cwd: io.cwd,
+    env: io.env,
+    config,
+    provider: 'all-files',
+    stateDir,
+  });
+  const authority = deriveEvidenceAuthority(scope, preInventory, pipeline, resolveVerifierKeyring(io.cwd, io.env, [stateDir]));
+  const evaluated = evaluateRun({
+    cwd: io.cwd,
+    config: { ...config, http: { ...config.http, callFindings: 'report' } },
+    graph: pipeline.graph,
+    obligations: pipeline.policy.obligations,
+    blocking: pipeline.policy.blocking,
+    stateDir,
+    now: pipeline.now,
+    engineAlembicRecords: pipeline.engineAlembicRecords,
+    changedFiles: null,
+    baseline: null,
+    witnessVerifierKey: authority.witnessVerifierKey,
+    witnessVerifierKeys: authority.witnessVerifierKeys,
+    evidenceContext: authority.evidenceContext,
+  });
+  const findings = evaluated.httpCoverage.findings;
+  const sha = headSha(io.cwd);
+
+  if (!confirm) {
+    writeLine(io.stdout, 'adopt --family http-calls (preview — nothing written):');
+    writeLine(io.stdout, `  HTTP call findings discovered: ${findings.length}`);
+    for (const finding of findings) writeLine(io.stdout, `    ${finding.key}`);
+    writeLine(
+      io.stdout,
+      `  would record the family marker 'http-calls' in ${recordPath} (dated ${pipeline.now}, commit ${sha ?? '<no commit>'})`,
+    );
+    writeLine(
+      io.stdout,
+      '  the baseline document stays untouched — the receipt alone carries the sanction',
+    );
+    writeLine(io.stdout, 'confirm with: gateforge adopt --family http-calls --confirm');
+    return 0;
+  }
+
+  // The ONE write: the existing receipt with the marker folded in (sorted
+  // families map, so the receipt bytes stay deterministic).
+  const families: Record<string, AdoptionFamily> = {
+    ...existingRecord.families,
+    'http-calls': httpCallsFamilyOf(findings, pipeline.now, sha),
+  };
+  const sortedFamilies: Record<string, AdoptionFamily> = {};
+  for (const key of Object.keys(families).sort()) sortedFamilies[key] = families[key]!;
+  writeAdoptionRecord(recordPath, { ...existingRecord, families: sortedFamilies });
+
+  writeLine(
+    io.stdout,
+    `http-calls family adopted: ${findings.length} call finding(s) recorded as debt; ` +
+      'the marker is permanent — a repeat records nothing, and a new call finding blocks',
+  );
+  writeLine(
+    io.stdout,
+    'one atomic receipt write: the baseline document was not touched, so no crash window can forgive unrecorded debt',
+  );
+  writeLine(
+    io.stdout,
+    'the trusted-policy digest changed (the receipt is part of the approved revision): strict gates stay ' +
+      'untrusted until the owner repins OUTSIDE this candidate — `gateforge enforcement pin --pin-file <path> --confirm` ' +
+      'after staging, or the approved-digest env var / trusted config',
+  );
+  writeLine(
+    io.stdout,
+    'shrink what resolves: `gateforge baseline update --family-http-calls <fingerprint>...` (`--family-http-calls=` keeps none) — ' +
       'the marker is retained',
   );
   return 0;

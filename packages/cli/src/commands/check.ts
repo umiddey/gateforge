@@ -201,14 +201,10 @@ import type {
   TestCatalog,
 } from '@gate-forge/core';
 import {
-  collectInputFiles,
-  computeInputSnapshot,
-  diffInputFiles,
-  SnapshotUnavailableError,
-  UnsupportedSnapshotError,
-  type InputSnapshot,
-  type SnapshotFileEntry,
-} from '../input-snapshot.js';
+  captureEvidencePreInventory,
+  deriveEvidenceAuthority,
+  type EvidenceScope,
+} from '../evidence-authority.js';
 import { runPipeline, sourcesByResourceId, type PipelineResult } from '../pipeline.js';
 import {
   digestPytestInputs,
@@ -249,7 +245,7 @@ import {
   StagedCandidateBlockError,
   type StagedCandidate,
 } from '../staged-candidate.js';
-import { httpRoutesView, readCandidateTreeEntries, readStateDocument, resolveStateDir } from '../state.js';
+import { readCandidateTreeEntries, readStateDocument, resolveStateDir } from '../state.js';
 import { engineGeneratedStateFileFilter } from '../state-artifacts.js';
 import {
   assertReceiptApprovedPolicy,
@@ -1242,30 +1238,26 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
         : 'all-files';
   const stateDir = resolveStateDir(io.cwd);
   const verifierKeyring = options.verifierKeyring ?? resolveVerifierKeyring(io.cwd, io.env, [stateDir]);
-  const witnessVerifierKey = verifierKeyring?.active.key;
 
   // Pre-discovery file inventory (plan §11.5): the gate context does not
   // exist yet, so only file bytes are captured. A repository without
   // usable Git inventory keeps discovery working but fails evidence
   // authorization (snapshot-unavailable); an uncapturable input or an
   // unsafe --out overlap fails closed before any evaluation.
-  let preFiles: SnapshotFileEntry[] | null = null;
-  let snapshotUnavailable = false;
+  const evidenceScope: EvidenceScope = {
+    cwd: io.cwd,
+    config,
+    stateDir,
+    runtimeReuseDigest,
+    runtimeReuseMounts,
+    docsExclusions,
+    cacheExclusions,
+  };
+  const preInventory = captureEvidencePreInventory(evidenceScope);
   // Content-addressed run cache: lives in
   // the EXCLUDED run-state dir (never in the input digest), forced off by
   // --no-cache / GATEFORGE_NO_CACHE / CI. A speed-up, never proof.
   const cacheControl = resolveCacheControl(io.env, options.cacheStateDir ?? stateDir, options.noCache === true);
-  try {
-    preFiles = collectInputFiles(io.cwd, config, stateDir, runtimeReuseMounts, docsExclusions, cacheExclusions);
-  } catch (error) {
-    if (error instanceof SnapshotUnavailableError) {
-      snapshotUnavailable = true;
-    } else if (error instanceof UnsupportedSnapshotError) {
-      throw new UsageError(`unsupported input snapshot: ${error.message}`);
-    } else {
-      throw error;
-    }
-  }
 
   const pipeline = await runPipeline({
     cwd: io.cwd,
@@ -1344,46 +1336,10 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
   // must not have moved under discovery, and the current digest is what
   // the stored envelope must equal (D3). A changing tree cannot
   // establish a reliable digest — the run blocks without certifying.
-  const httpRoutes = httpRoutesView(pipeline.graph);
-  let expectedDigest: string | null = null;
-  let changedInputs = false;
-  let currentSnapshot: InputSnapshot | null = null;
+  const authority = deriveEvidenceAuthority(evidenceScope, preInventory, pipeline, verifierKeyring);
+  const { expectedDigest, changedInputs, snapshotUnavailable, currentSnapshot } = authority;
   let diagnosticCandidateTreeId = options.fixedCandidateTreeId ?? null;
   let diagnosticEvidenceState = 'not-required';
-  if (!snapshotUnavailable) {
-    try {
-      const postFiles = collectInputFiles(io.cwd, config, stateDir, runtimeReuseMounts, docsExclusions, cacheExclusions);
-      if (preFiles !== null && diffInputFiles(preFiles, postFiles).length > 0) {
-        changedInputs = true;
-      } else {
-        currentSnapshot = computeInputSnapshot({
-          cwd: io.cwd,
-          config,
-          stateDir,
-          classifications: pipeline.classificationsView.resources,
-          obligations: pipeline.policy.obligations,
-          httpRoutes,
-          plugins: pipeline.manifest.plugins.map((plugin) => ({
-            id: plugin.id,
-            version: plugin.version,
-          })),
-          runtimeReuseDigest,
-          runtimeReuseMounts,
-          docsExclusions,
-          cacheExclusions,
-        });
-      expectedDigest = currentSnapshot.inputDigest;
-      }
-    } catch (error) {
-      if (error instanceof SnapshotUnavailableError) {
-        snapshotUnavailable = true;
-      } else if (error instanceof UnsupportedSnapshotError) {
-        throw new UsageError(`unsupported input snapshot: ${error.message}`);
-      } else {
-        throw error;
-      }
-    }
-  }
   let claimBindings: Claim[] = [];
   if (expectedDigest !== null && verifierKeyring !== null) {
     const claimPolicyDigest = docsApprovalDigest ?? trustedPolicyDigestForConfig(io.cwd, config);
@@ -1831,18 +1787,13 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
     changedFiles: diffScoped && scopeDecision.mode !== 'all' ? scopeDecision.changedFiles : null,
     claimInventory,
     mappedCoverage,
-    witnessVerifierKey,
-    witnessVerifierKeys: verifierKeyring?.keys.map((entry) => entry.key),
+    witnessVerifierKey: authority.witnessVerifierKey,
+    witnessVerifierKeys: authority.witnessVerifierKeys,
     ...(carriedEvidence === null ? {} : { carriedEvidence }),
     baseline: adoptedBaseline,
     // 0.9.0 D2: see `adoptedBaselineSurvivesStrictE2E` above.
     adoptedBaselineSurvivesStrictE2E,
-    evidenceContext: {
-      expectedInputDigest: expectedDigest,
-      snapshotUnavailable,
-      requireInvocationId: false,
-      changedInputs,
-    },
+    evidenceContext: authority.evidenceContext,
   });
   const baselineReport =
     adoptedBaseline === null
@@ -1859,6 +1810,7 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
             Math.floor((Date.parse(pipeline.now) - Date.parse(adoptedBaseline.adoptedAt)) / 86_400_000),
           ),
           neverWitnessed: evaluated.baselined?.neverWitnessed ?? 0,
+          httpCallFindings: evaluated.httpCallsBaselined,
         };
 
   const baselineDriftAdvisories: BlockingEntry[] = [];
@@ -2498,6 +2450,27 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
                 nextAction: 'gateforge test-gates --changed',
               });
       if (debtLine !== '') report = `${report}\n${debtLine}`;
+    }
+  }
+  // HTTP call findings (0.14 WP5): the debt line, and the explicit 0.13
+  // migration line. Adopted call findings are known debt; a new one blocks
+  // in `block` mode. A receipt without the `http-calls` marker has no
+  // recorded call debt, so its new findings are named with the migration.
+  if (format === 'text') {
+    const newCalls = evaluated.httpCallsNew;
+    const migrates =
+      adoptedBaseline !== null &&
+      !adoptedBaseline.httpCallsRecorded &&
+      config.http.callFindings === 'block' &&
+      newCalls > 0;
+    if (migrates) {
+      report =
+        `${report}\nHTTP call findings: ${String(newCalls)} not yet recorded as debt — run ` +
+        '`gateforge adopt --family http-calls` (preview), then add --confirm to record them; until then they block';
+    } else if (evaluated.httpCallsBaselined + newCalls > 0) {
+      report =
+        `${report}\nHTTP call findings: ${String(evaluated.httpCallsBaselined)} known (baselined), ` +
+        `${String(newCalls)} new ${config.http.callFindings === 'block' ? 'blocking' : 'advisory'}`;
     }
   }
   if (decision.wouldBlock && decision.exitCode !== decision.strictExitCode) {

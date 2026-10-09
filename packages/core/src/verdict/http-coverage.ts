@@ -27,6 +27,7 @@
  * declaration (`http.callFindings`), never this module's judgement.
  */
 import { compareStrings } from '../graph/util.js';
+import { sha256Canonical } from '../canonical-json.js';
 import { CAUSE_NEXT_ACTIONS, type CauseCode } from '../schemas/verdict.js';
 import type { Location } from '../schemas/common.js';
 import type { BlockingEntry } from '../policy/evaluate.js';
@@ -120,6 +121,14 @@ export interface HttpCallFinding {
   resourceId: string | null;
   /** The source location, when the call has one (R4 always does). */
   location: Location | null;
+  /** A readable name for the call. It is not the identity; see `fingerprint`. */
+  key: string;
+  /**
+   * The identity the adoption receipt records (0.14 WP5 D1): a sha256 over
+   * the call's identity, never its status or line. Equal fingerprints are
+   * one debt.
+   */
+  fingerprint: string;
   detail: string;
 }
 
@@ -214,6 +223,30 @@ function usedRoutes(
   return used;
 }
 
+/** The domain tag separating call-finding identities from every other hash. */
+const HTTP_CALL_FINGERPRINT_DOMAIN = 'gateforge.http-call-finding.v1';
+
+/** A path segment that is an id: all digits, a UUID, or a 16+ char hex run. */
+const ID_SEGMENT =
+  /^(?:\d+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{16,})$/i;
+
+/**
+ * The shape of a call's path (0.14 WP5 D1): the query and fragment are
+ * dropped and every id segment collapses to `:id`, so `/items/42` and
+ * `/items/97` are one call shape.
+ *
+ * Args:
+ *   path: the raw path the witness recorded.
+ *
+ * Returns:
+ *   string: the path shape.
+ */
+function pathShape(path: string): string {
+  const bare = path.split(/[?#]/)[0] ?? '';
+  return bare.split('/').map((segment) => (ID_SEGMENT.test(segment) ? ':id' : segment)).join('/');
+}
+
+
 /**
  * Reads one ledger row's placement into a finding, or null when the
  * placement is not a defect (a match, or an inventory that could not be
@@ -237,11 +270,24 @@ function rowFinding(
   if (first === undefined) return null;
   const statuses = [...new Set(rows.map((entry) => String(entry.status)))].sort(compareStrings);
   const call = `'${first.method} ${first.path}'`;
+  const shape = pathShape(first.path);
+  const identity = {
+    domain: HTTP_CALL_FINGERPRINT_DOMAIN,
+    code,
+    method: first.method,
+    pathShape: shape,
+    testId: first.testId,
+  };
+  const named = {
+    key: `${code} ${first.method} ${shape} (test ${first.testId})`,
+    fingerprint: sha256Canonical(identity),
+  };
   if (code === HTTP_CALL_UNMATCHED) {
     return {
       code,
       resourceId: null,
       location: null,
+      ...named,
       detail:
         `test '${first.testId}' called ${call} which matched no route in the run's inventory ` +
         `(HTTP ${statuses.join(', ')})`,
@@ -254,6 +300,7 @@ function rowFinding(
     code,
     resourceId: null,
     location: null,
+    ...named,
     detail:
       `test '${first.testId}' called ${call} which matches ${String(candidates.length)} routes at ` +
       `equal specificity (${candidates.join('; ')})`,
@@ -279,7 +326,7 @@ function callFindings(
   const grouped = new Map<string, HttpLedger['rows'][number][]>();
   for (const entry of ledger?.rows ?? []) {
     if (entry.resolution !== 'nomatch' && entry.resolution !== 'ambiguous') continue;
-    const key = `${entry.resolution}\u0000${entry.testId}\u0000${entry.method}\u0000${entry.path}`;
+    const key = `${entry.resolution}\u0000${entry.testId}\u0000${entry.method}\u0000${pathShape(entry.path)}`;
     const bucket = grouped.get(key);
     if (bucket === undefined) grouped.set(key, [entry]);
     else bucket.push(entry);
@@ -291,10 +338,18 @@ function callFindings(
   }
   for (const entry of unresolved) {
     if (entry.code !== FRONTEND_CALL_TARGET_UNRESOLVED) continue;
+    const identity = {
+      domain: HTTP_CALL_FINGERPRINT_DOMAIN,
+      code: HTTP_CALL_UNRESOLVED,
+      file: entry.location.file,
+      detail: entry.detail,
+    };
     findings.push({
       code: HTTP_CALL_UNRESOLVED,
       resourceId: null,
       location: entry.location,
+      key: `${HTTP_CALL_UNRESOLVED} ${entry.location.file}: ${entry.detail}`,
+      fingerprint: sha256Canonical(identity),
       detail:
         `${entry.code}: ${entry.detail} — ${entry.location.file}:${String(entry.location.line)}`,
     });
@@ -305,7 +360,12 @@ function callFindings(
       compareStrings(left.resourceId ?? '', right.resourceId ?? '') ||
       compareStrings(left.detail, right.detail),
   );
-  return findings;
+  // Equal identities are one debt: a repeated call counts once.
+  const unique = new Map<string, HttpCallFinding>();
+  for (const finding of findings) {
+    if (!unique.has(finding.fingerprint)) unique.set(finding.fingerprint, finding);
+  }
+  return [...unique.values()];
 }
 
 /**

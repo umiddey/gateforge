@@ -28,6 +28,11 @@
  * `shrinkFamilyForgiven`. Both receipt layers may be updated in one
  * call; a repo without an adoption record has nothing to shrink and
  * fails closed.
+ *
+ * The http-calls family (0.14 WP5) shrinks the same way through
+ * `--family-http-calls <fingerprint>...` (`--family-http-calls=` keeps
+ * none). Its marker and its recorded call-finding keys are retained; a
+ * call finding the receipt no longer forgives blocks again.
  */
 import { loadAdoptionRecord, loadBaseline, shrinkClassificationBlocked, shrinkFamilyForgiven, updateBaseline, writeAdoptionRecord, writeBaseline, ADOPTION_RECORD_FILENAME, type AdoptionRecord } from '@gate-forge/core';
 import { dirname, join } from 'node:path';
@@ -40,7 +45,8 @@ import { UsageError } from '../errors.js';
 
 export const BASELINE_USAGE =
   'usage: gateforge baseline update <fingerprint> [<fingerprint> ...] ' +
-  '[--classification-blocked <resourceId>]... [--family-pages <fingerprint>]... | gateforge baseline diff <before> <after>';
+  '[--classification-blocked <resourceId>]... [--family-pages <fingerprint>]... ' +
+  '[--family-http-calls <fingerprint>]... | gateforge baseline diff <before> <after>';
 
 /**
  * Collects the values of a repeatable string flag. A bare `--flag` (no
@@ -72,13 +78,18 @@ export function baselineCommand(io: Io, argv: readonly string[]): number {
     writeLine(io.stdout, BASELINE_USAGE);
     return 0;
   }
-  rejectUnknownFlags(options, ['help', 'classification-blocked', 'family-pages'], BASELINE_USAGE);
+  rejectUnknownFlags(
+    options,
+    ['help', 'classification-blocked', 'family-pages', 'family-http-calls'],
+    BASELINE_USAGE,
+  );
   const sub = positionals[0];
   if (sub === 'diff') {
     if (
       positionals.length !== 3 ||
       options['classification-blocked'] !== undefined ||
-      options['family-pages'] !== undefined
+      options['family-pages'] !== undefined ||
+      options['family-http-calls'] !== undefined
     ) {
       throw new UsageError(`baseline diff requires exactly two baseline files (${BASELINE_USAGE})`);
     }
@@ -150,10 +161,14 @@ export function baselineCommand(io: Io, argv: readonly string[]): number {
   const familyFlagValues = repeatableFlag(options, 'family-pages');
   const familyKeep =
     familyFlagValues.length === 1 && familyFlagValues[0] === '' ? [] : familyFlagValues;
+  const httpCallsFlagValues = repeatableFlag(options, 'family-http-calls');
+  const httpCallsKeep =
+    httpCallsFlagValues.length === 1 && httpCallsFlagValues[0] === '' ? [] : httpCallsFlagValues;
   if (
     fingerprints.length === 0 &&
     classificationFlagValues.length === 0 &&
-    familyFlagValues.length === 0
+    familyFlagValues.length === 0 &&
+    httpCallsFlagValues.length === 0
   ) {
     throw new UsageError(
       `baseline update requires at least one fingerprint to keep (${BASELINE_USAGE})`,
@@ -170,7 +185,11 @@ export function baselineCommand(io: Io, argv: readonly string[]): number {
   const nextBaseline = fingerprints.length > 0 ? updateBaseline(current, fingerprints) : null;
   let record: AdoptionRecord | null = null;
   let nextRecord: AdoptionRecord | null = null;
-  if (classificationFlagValues.length > 0 || familyFlagValues.length > 0) {
+  if (
+    classificationFlagValues.length > 0 ||
+    familyFlagValues.length > 0 ||
+    httpCallsFlagValues.length > 0
+  ) {
     record = loadAdoptionRecord(recordPath);
     if (record === null) {
       // Fail closed: without an adoption receipt there is no adopted
@@ -188,6 +207,9 @@ export function baselineCommand(io: Io, argv: readonly string[]): number {
     }
     if (familyFlagValues.length > 0) {
       nextRecord = shrinkFamilyForgiven(nextRecord, 'pages', familyKeep);
+    }
+    if (httpCallsFlagValues.length > 0) {
+      nextRecord = shrinkFamilyForgiven(nextRecord, 'http-calls', httpCallsKeep);
     }
   }
   if (nextBaseline !== null) {
@@ -208,6 +230,12 @@ export function baselineCommand(io: Io, argv: readonly string[]): number {
       writeLine(
         io.stdout,
         `pages family updated: ${nextRecord.families?.pages?.forgiven.length ?? 0} fingerprint(s) remain forgiven (was ${record.families?.pages?.forgiven.length ?? 0}); the family marker is retained`,
+      );
+    }
+    if (httpCallsFlagValues.length > 0) {
+      writeLine(
+        io.stdout,
+        `http-calls family updated: ${nextRecord.families?.['http-calls']?.forgiven.length ?? 0} fingerprint(s) remain forgiven (was ${record.families?.['http-calls']?.forgiven.length ?? 0}); the family marker is retained`,
       );
     }
     writeAdoptionRecord(recordPath, nextRecord);

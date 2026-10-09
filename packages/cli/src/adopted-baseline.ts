@@ -46,6 +46,8 @@ export function resolveAdoptedBaseline(
       fingerprints: ReadonlySet<string>;
       classificationBlocked?: ReadonlySet<string>;
       adoptedAt: string;
+      /** The receipt carries the `http-calls` family marker (0.14 WP5). */
+      httpCallsRecorded: boolean;
       obligationFingerprintsById?: ReadonlyMap<string, string>;
       obligationSourcesById?: ReadonlyMap<string, readonly string[]>;
     }
@@ -90,6 +92,7 @@ export function resolveAdoptedBaseline(
         : undefined,
     adoptedAt: adoption.adoptedAt,
     obligationFingerprintsById,
+    httpCallsRecorded: adoption.families?.['http-calls'] !== undefined,
     obligationSourcesById,
   };
 }

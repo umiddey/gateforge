@@ -319,6 +319,13 @@ export interface EvaluateResult {
     classificationBlocked: number | undefined;
   } | null;
   /**
+   * HTTP call findings the adopted receipt records as debt (0.14 WP5):
+   * counted, never graded. Zero when no receipt records any.
+   */
+  httpCallsBaselined: number;
+  /** HTTP call findings NOT in the adopted receipt: the ones the channel grades. */
+  httpCallsNew: number;
+  /**
    * The run's AUTHORIZED, quarantine-filtered evidence records — the
    * exact list every obligation verdict in {@link verdicts} was graded
    * from. Exposed so another grader of the same run (the business-rule
@@ -772,7 +779,15 @@ export function evaluateRun(input: EvaluateInput): EvaluateResult {
     })),
     mode: config.http.callFindings,
   });
-  const callEntries = httpCallFindingEntries(httpCoverage.findings);
+  // WP5 (0.14): a finding the adopted receipt records is recorded DEBT,
+  // counted in `httpCallsBaselined` and never graded. Only a NEW finding is
+  // graded by the channel above (`block` blocks it, `report` advises it).
+  const adoptedCallFingerprints = input.baseline?.fingerprints;
+  const newCallFindings = httpCoverage.findings.filter(
+    (finding) => adoptedCallFingerprints?.has(finding.fingerprint) !== true,
+  );
+  const httpCallsBaselined = httpCoverage.findings.length - newCallFindings.length;
+  const callEntries = httpCallFindingEntries(newCallFindings);
   const callBlocking = config.http.callFindings === 'block' ? callEntries : [];
   // `report` shows response-shape mismatches as advisories; `block` grades
   // them through the claim obligation instead (never twice).
@@ -796,6 +811,8 @@ export function evaluateRun(input: EvaluateInput): EvaluateResult {
     httpCoverage,
     httpCallAdvisories,
     baselined: applied.baselined,
+    httpCallsBaselined,
+    httpCallsNew: newCallFindings.length,
     notGradedObligations: input.obligations.length - scoped.length,
     waiverCounts: {
       total: waiverLoad.waivers.length + waiverLoad.staleOwner.length + waiverLoad.expired.length,
