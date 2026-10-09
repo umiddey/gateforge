@@ -21,7 +21,7 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { withTempRepo, type TempRepo } from '@gate-forge/core';
-import { installFixture, runCli } from './helpers.js';
+import { installFixture, runCli, stubPlaywrightFiles } from './helpers.js';
 
 /** The consumer's own release (Chromium 1234), installed and correct. */
 const CONSUMER_REGISTRY = JSON.stringify({
@@ -77,7 +77,7 @@ describe('engine-owned browser readiness is checked apart from the consumer runn
         'node_modules/@gate-forge/pack-playwright/package.json':
           '{"name":"@gate-forge/pack-playwright","version":"0.8.0"}\n',
         'node_modules/playwright/package.json': '{"name":"playwright","version":"1.58.2"}\n',
-        'node_modules/playwright/cli.js': '// the engine install CLI\n',
+        ...stubPlaywrightFiles('// the engine install CLI\n'),
         'node_modules/playwright-core/package.json': '{"name":"playwright-core","version":"1.58.2"}\n',
         'node_modules/playwright-core/browsers.json': ENGINE_REGISTRY,
         'ms-playwright/chromium-1234/INSTALLATION_COMPLETE': '',
@@ -122,7 +122,7 @@ describe('engine-owned browser readiness is checked apart from the consumer runn
         'node_modules/@gate-forge/pack-playwright/package.json':
           '{"name":"@gate-forge/pack-playwright","version":"0.8.0"}\n',
         'node_modules/playwright/package.json': '{"name":"playwright","version":"1.58.2"}\n',
-        'node_modules/playwright/cli.js': '// the engine install CLI\n',
+        ...stubPlaywrightFiles('// the engine install CLI\n'),
         'node_modules/playwright-core/package.json': '{"name":"playwright-core","version":"1.58.2"}\n',
         'node_modules/playwright-core/browsers.json': ENGINE_REGISTRY,
         'ms-playwright/chromium-1234/INSTALLATION_COMPLETE': '',

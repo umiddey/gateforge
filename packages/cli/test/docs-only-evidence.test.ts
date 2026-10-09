@@ -23,6 +23,7 @@
  * product change still needs its own evidence, and any non-docs file in the
  * change keeps today's refusal byte-for-byte.
  */
+import { stubPlaywrightFiles } from './helpers.js';
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -115,7 +116,7 @@ async function installUngated(
     '.gateforge/adapters/refunds.mjs': evidenceAdapter(appUrl),
     ...Object.fromEntries(ADOPTED_NAMES.map((name) => [`src/${name}.txt`, `${name} fixture.table\n`])),
     ...Object.fromEntries(ADOPTED_NAMES.map((name) => [`.gateforge/adapters/${name}.mjs`, evidenceAdapter(appUrl)])),
-    'node_modules/playwright/cli.js': evidenceStubCli(ADOPTED_NAMES),
+    ...stubPlaywrightFiles(evidenceStubCli(ADOPTED_NAMES)),
   });
   repo.commitFiles({}, 'existing product code, no gate yet');
 }

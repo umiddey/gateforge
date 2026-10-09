@@ -25,6 +25,7 @@
  * Ignored run output (`blob-report/`, `playwright/.auth/`) is in both
  * fixtures deliberately: it must enter NEITHER identity.
  */
+import { stubPlaywrightFiles } from './helpers.js';
 import { mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -121,7 +122,7 @@ function installGated(repo: TempRepo, appUrl: string): void {
     ...Object.fromEntries(NAMES.map((name) => [`.gateforge/adapters/${name}.mjs`, evidenceAdapter(appUrl)])),
     // The dependency root: ignored, never committed, mounted into the
     // staged checkout by the runtime document.
-    [`${REUSE_ROOT}/playwright/cli.js`]: evidenceStubCli(NAMES),
+    ...stubPlaywrightFiles(evidenceStubCli(NAMES), REUSE_ROOT),
     // Run output the suite writes into its own worktree.
     'blob-report/index.html': '<html>run output</html>\n',
     'playwright/.auth/user.json': '{"cookies":[]}\n',
@@ -176,7 +177,7 @@ describe('the materialized candidate keeps every tracked byte', () => {
 describe('one reuse identity for the worktree and the mounted candidate', () => {
   it('the declared dependency root binds the same digest from both roots', async () => {
     await withTempRepo({}, async (repo) => {
-      repo.writeFiles({ '.gateforge/runtime.yml': RUNTIME_YML, [`${REUSE_ROOT}/playwright/cli.js`]: 'stub\n' });
+      repo.writeFiles({ '.gateforge/runtime.yml': RUNTIME_YML, ...stubPlaywrightFiles('stub\n', REUSE_ROOT) });
       const runtime = loadRuntimeConfigAt(repo.root, '.gateforge/runtime.yml');
       if (runtime === null) throw new Error('the fixture runtime document did not load');
       // The staged candidate shape: a checkout whose reuse root is a

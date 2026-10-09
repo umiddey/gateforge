@@ -10,7 +10,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { expect } from 'vitest';
 import { GateReceiptSchema, loadConfig, type GateReceipt, type TempRepo } from '@gate-forge/core';
-import { configYml, fixtureFingerprint, installFixture, runCli } from './helpers.js';
+import { configYml, fixtureFingerprint, installFixture, runCli, stubPlaywrightFiles } from './helpers.js';
 import { issueGateReceipt, trustedPolicyDigestForConfig } from '../src/execution.js';
 import { environmentVerifierKeyId } from '../src/verifier-keys.js';
 
@@ -180,7 +180,7 @@ export async function installAndSealParent(
     '.gateforge/adapters/orders.mjs': ADAPTER,
     '.gateforge.yml': `${gateConfig}${configYml()}`,
     'playwright.config.mjs': "export default { testDir: 'e2e', projects: [{ name: 'chromium' }] };\n",
-    'node_modules/playwright/cli.js': STUB_CLI,
+    ...stubPlaywrightFiles(STUB_CLI),
     // `.auth/` is gitignored: the witnessed login stage writes its
     // storage state there, so it exists in the sealed candidate tree as
     // ignored workspace bytes and never in a commit.
@@ -223,7 +223,7 @@ export async function installAndRunFailingParent(
     '.gateforge/adapters/orders.mjs': ADAPTER,
     '.gateforge.yml': `${gateConfig}${configYml()}`,
     'playwright.config.mjs': "export default { testDir: 'e2e', projects: [{ name: 'chromium' }] };\n",
-    'node_modules/playwright/cli.js': STUB_CLI,
+    ...stubPlaywrightFiles(STUB_CLI),
     '.gitignore': '.gateforge/test-gates/\nnode_modules/\n.auth/\n',
   });
   repo.commitFiles({}, 'base');
@@ -653,7 +653,7 @@ export function installEvidenceRepo(
     ...Object.fromEntries(table.map((row) => [`.gateforge/adapters/${row.name}.mjs`, evidenceAdapter(appUrl)])),
     '.gateforge/test-map.yml': evidenceTestMap(names),
     'playwright.config.mjs': "export default { testDir: 'e2e', projects: [{ name: 'chromium' }] };\n",
-    'node_modules/playwright/cli.js': evidenceStubCli(names),
+    ...stubPlaywrightFiles(evidenceStubCli(names)),
     '.gitignore': '.gateforge/test-gates/\nnode_modules/\n',
   });
 }

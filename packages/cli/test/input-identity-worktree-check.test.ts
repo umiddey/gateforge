@@ -15,6 +15,7 @@
  * declared roots. What must keep working is the fail-closed half: one
  * changed byte inside a declared reuse root still moves the identity.
  */
+import { stubPlaywrightFiles } from './helpers.js';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { loadConfig, withTempRepo, type TempRepo } from '@gate-forge/core';
@@ -91,7 +92,7 @@ function installGated(repo: TempRepo, appUrl: string): void {
     ...Object.fromEntries(NAMES.map((name) => [`.gateforge/adapters/${name}.mjs`, evidenceAdapter(appUrl)])),
     // The declared dependency root: ignored, never committed, executed in
     // place — so its bytes belong in the run's input identity.
-    [`${REUSE_ROOT}/playwright/cli.js`]: evidenceStubCli(NAMES),
+    ...stubPlaywrightFiles(evidenceStubCli(NAMES), REUSE_ROOT),
   });
   repo.stage();
   repo.commit('a gated repository that declares a dependency root');

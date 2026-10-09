@@ -17,7 +17,7 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { loadConfig, withTempRepo, type TempRepo } from '@gate-forge/core';
-import { configYml, installFixture, runCli } from './helpers.js';
+import { configYml, installFixture, runCli, stubPlaywrightFiles } from './helpers.js';
 import { ADAPTER, SPECS, STUB_CLI } from './reseal-e2e-fixture.js';
 import { trustedPolicyDigestForConfig } from '../src/execution.js';
 
@@ -39,7 +39,7 @@ function installStrictRepository(repo: TempRepo): void {
     '.gateforge/adapters/orders.mjs': ADAPTER,
     '.gateforge.yml': `enforcement:\n  strictE2E: true\n${configYml()}`,
     'playwright.config.mjs': "export default { testDir: 'e2e', projects: [{ name: 'chromium' }] };\n",
-    'node_modules/playwright/cli.js': STUB_CLI,
+    ...stubPlaywrightFiles(STUB_CLI),
   });
   repo.commitFiles({}, 'base');
 }

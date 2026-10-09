@@ -9,7 +9,7 @@ import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { GateReceiptSchema, RunManifestSchema, loadConfig, withTempRepo, fingerprint, type TempRepo } from '@gate-forge/core';
-import { PLUGIN_SOURCE, configYml, fixtureFingerprint, installFixture, runCli } from './helpers.js';
+import { PLUGIN_SOURCE, configYml, fixtureFingerprint, installFixture, runCli, stubPlaywrightFiles } from './helpers.js';
 import { trustedPolicyDigestForConfig } from '../src/execution.js';
 import { mintCompleteRunReceipt } from './gate-receipts.js';
 
@@ -363,7 +363,7 @@ describe('gateforge test-gates', () => {
           '}',
           '',
         ].join('\n'),
-        'node_modules/playwright/cli.js': [
+        ...stubPlaywrightFiles([
           "const { writeFileSync } = require('node:fs');",
           'if (process.argv.includes("--list")) {',
           "  const title = process.env.GATEFORGE_RUN_TOKEN ? 'wired registration' : 'scrubbed registration';",
@@ -372,7 +372,7 @@ describe('gateforge test-gates', () => {
           `  writeFileSync(${JSON.stringify(marker)}, 'runner invoked');`,
           '}',
           '',
-        ].join('\n'),
+        ].join('\n')),
       });
       repo.commitFiles({}, 'base');
 

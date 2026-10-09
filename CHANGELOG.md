@@ -19,6 +19,8 @@
   explicit Gateforge fixture's own API when plain and explicit imports coexist.
 - Automatic preload binding failures name the selected runner and underlying
   cause, and stop the child rather than continuing without witnessed fixtures.
+- Shared CLI stub installs include Playwright's public `test` entry alongside
+  the CLI, so automatic fixture loading exercises the same install shape.
 
 ## 0.14.0
 
