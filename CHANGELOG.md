@@ -31,11 +31,22 @@
   site the join could not resolve reports `HTTP_CALL_UNRESOLVED` with its
   `file:line`. Served-but-never-used stays a count, never a finding.
 - The channel is the owner's: `http.callFindings: report | block`
-  (default `report`). Report mode prints and serializes every call finding
-  on the existing advisory channel and leaves the exit code alone; block
-  mode puts them on the run's blocking set exactly like any other
-  blocking finding. Blocking by default would refuse every consumer whose
-  existing hits the adoption migration has not recorded yet.
+  (default `block`). Report mode prints and serializes every NEW call
+  finding on the existing advisory channel and leaves the exit code alone;
+  block mode puts new findings on the run's blocking set exactly like any
+  other blocking finding. Findings already recorded as debt are counted, not
+  blocked (next entry).
+- Existing HTTP call findings are adopted, not blocked. Each finding gets a
+  stable identity: method and path shape plus test id for UNMATCHED and
+  AMBIGUOUS; file and scanner detail for UNRESOLVED. The HTTP status and the
+  line number are never part of it. `gateforge adopt --family http-calls`
+  previews, then `--confirm` records today's findings as debt in the adoption
+  receipt. `check` names that migration in one line; a repository with no
+  receipt is pointed at plain `gateforge adopt`. Adopted findings are counted
+  in the debt summary, and a fixed finding leaves the count with no edit.
+  `gateforge baseline update --family-http-calls` shrinks the receipt.
+- `light` writes `http.callFindings: report`; `normal` and `strict` write
+  `block`.
 - One summary line, everywhere. The human report prints
   `HTTP: <served> served, <used> used, <proven> proven, <missing> missing,
   <unmatched> unmatched, <ambiguous> ambiguous`, and the json report gains

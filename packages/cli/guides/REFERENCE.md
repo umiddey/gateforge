@@ -1306,10 +1306,11 @@ Enforcement-relevant sections:
   (default), `detectors`, or `openapi`. `both` unions both inventories and
   reports source-only routes as report-only `ROUTE_SOURCE_MISMATCH` findings.
 - `http.callFindings:` — the channel the HTTP call findings (unmatched,
-  ambiguous, unresolvable) use: `report` (default) or `block`. `report`
-  prints and serializes them on the advisory channel and leaves the exit
-  code alone; `block` fails the check on them. See "The HTTP call rules
-  and the coverage summary" below.
+  ambiguous, unresolvable) use: `block` (default) or `report`. `block` fails
+  the check on NEW findings; findings already recorded as debt by adoption are
+  counted, not blocked. `report` prints and serializes new findings on the
+  advisory channel and leaves the exit code alone. See "Adopting call findings"
+  and "The HTTP call rules and the coverage summary" below.
 - `http.responseShape:` — `off` (default), `report`, or `block`: whether the
   witness checks each proxied JSON response body against the app's OpenAPI
   response schema. The document is read from `http.openapiPath:` (default
@@ -1430,13 +1431,12 @@ The ledger is not decoration: five rules run over it at verdict time.
 
 Which channel these findings use is the owner's:
 
-- `http.callFindings: report | block` (default `report`) — in `report`
-  mode every finding is printed and serialized on the report's existing
-  `advisories` channel and the exit code is untouched; in `block` mode
-  the same entries join the run's blocking set and fail the check exactly
-  like any other blocking finding. The default is `report` because
-  blocking new calls from day one would refuse every repository whose
-  existing calls have not been adopted as debt yet.
+- `http.callFindings: report | block` (default `block`) — in `report`
+  mode every NEW finding is printed and serialized on the report's existing
+  `advisories` channel and the exit code is untouched; in `block` mode the
+  new findings join the run's blocking set and fail the check exactly like
+  any other blocking finding. Findings already recorded as debt are counted,
+  not blocked, in either mode (see "Adopting call findings" below).
 
 Every run also carries the summary line — in the human report as
 
@@ -1453,6 +1453,42 @@ counts used routes whose BOTH transport obligations are `satisfied` (a
 waived or baselined obligation is a recorded forgiveness, never proof),
 and `missing` is `used` minus `proven`.
 
+
+### Adopting call findings (`http.callFindings`, debt, then new blocks)
+
+Existing `HTTP_CALL_UNMATCHED`, `HTTP_CALL_AMBIGUOUS` and `HTTP_CALL_UNRESOLVED`
+findings are recorded as debt. A NEW one blocks in `block` mode.
+
+- **Identity.** Each finding has a fingerprint: a sha256 over a canonical
+  description of the call. For UNMATCHED and AMBIGUOUS the description is the
+  finding code, the HTTP method, the path shape, and the test id. The path shape
+  drops the query and fragment and collapses any segment that is all digits, a
+  UUID, or 16+ hex characters to `:id`. For UNRESOLVED it is the code, the file,
+  and the scanner detail without its trailing `file:line`. The HTTP status and
+  line numbers are NOT part of the identity, so a harmless edit does not churn
+  the debt.
+- **Storage.** Recorded in the adoption receipt as the family marker
+  `families['http-calls']`, never in the baseline document. The marker maps each
+  finding's key to its fingerprint and lists the fingerprints as forgiven. It is
+  written only when there are findings to record, so a repository with none keeps
+  the 0.13 receipt shape.
+- **Migrating an adopted repository.** `gateforge adopt --family http-calls`
+  previews what would be recorded (nothing is written); `--confirm` writes the
+  marker. The marker is permanent, so a repeat is a loud no-op. Until it is
+  recorded, `check` names the migration in one line. A repository with no
+  receipt at all is pointed at the plain `gateforge adopt` instead.
+- **Debt count.** Adopted findings are counted as known debt in the report
+  summary as `baselinedHttpCallFindings`. A FIXED finding leaves that count on
+  the next run with no edit. Its fingerprint stays in the receipt until
+  `gateforge baseline update --family-http-calls <fingerprint>...` shrinks it;
+  `--family-http-calls=` keeps none.
+- **Known limitation.** A call that was fixed, then re-introduced identically,
+  and not yet shrunk out of the receipt is forgiven again. Run
+  `gateforge baseline update --family-http-calls` after a fix to close that
+  window.
+- **Preset defaults.** `light` writes `callFindings: report` (advisory only);
+  `normal` and `strict` write `callFindings: block`. A config with no
+  `callFindings` key takes the schema default, `block`.
 
 ### Mount proofs (`mountProvenances`, `HTTP_ENDPOINT_UNMOUNTED`)
 
