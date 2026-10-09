@@ -48,7 +48,17 @@ function withResolvers<T>(): {
 }
 
 /** The fixture app the session proxy forwards to; serves everything with 200. */
-const app: Server = createServer((_req, res) => {
+const app: Server = createServer((req, res) => {
+  if (req.url === '/') {
+    res.writeHead(200, { 'content-type': 'text/html' });
+    res.end('<script src="/script.js"></script>');
+    return;
+  }
+  if (req.url === '/script.js') {
+    res.writeHead(200, { 'content-type': 'application/javascript' });
+    res.end("fetch('/api/data')");
+    return;
+  }
   res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
   res.end('exchanges-ledger-app');
 });
@@ -140,8 +150,27 @@ describe('POST /sessions/close — one http.exchanges record per passed session'
     const payload = record['payload'] as Record<string, unknown>;
     expect(payload['channel']).toBe('observe');
     expect(payload['sessionId']).toBe(session.sessionId);
-    expect(payload['exchanges']).toEqual([{ method: 'GET', url: '/x', status: 200 }]);
+    expect(payload['exchanges']).toEqual([{ method: 'GET', url: '/x', status: 200, fetchDest: null }]);
     expect(payload['truncated']).toBeUndefined();
+  });
+  it('carries browser document, script, and fetch destinations into http.exchanges', async () => {
+    const session = await openUnclaimedSession();
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const page = await browser.newPage();
+      await page.goto(`${session.proxyUrl as string}/`);
+      await page.waitForResponse((response) => response.url().endsWith('/api/data'));
+      await post('/sessions/close', { sessionId: session.sessionId, outcome: 'passed' });
+      const records = await exchangeRecords();
+      const payload = (records[0] as Record<string, unknown>)['payload'] as Record<string, unknown>;
+      expect(payload['exchanges']).toEqual([
+        { method: 'GET', url: '/', status: 200, fetchDest: 'document' },
+        { method: 'GET', url: '/script.js', status: 200, fetchDest: 'script' },
+        { method: 'GET', url: '/api/data', status: 200, fetchDest: 'empty' },
+      ]);
+    } finally {
+      await browser.close();
+    }
   });
 
   it('drops the record for a session that did not pass, even with traffic', async () => {
@@ -170,8 +199,8 @@ describe('POST /sessions/close — one http.exchanges record per passed session'
     expect(records).toHaveLength(1);
     const payload = (records[0] as Record<string, unknown>)['payload'] as Record<string, unknown>;
     expect(payload['exchanges']).toEqual([
-      { method: 'GET', url: '/x', status: 200 },
-      { method: 'GET', url: '/y', status: 200 },
+      { method: 'GET', url: '/x', status: 200, fetchDest: null },
+      { method: 'GET', url: '/y', status: 200, fetchDest: null },
     ]);
   });
 });
@@ -287,7 +316,7 @@ describe('POST /runs/page-sweep — one http.exchanges record for the sweep sess
       // browser's view); the ledger builder interprets them like every
       // other observed path.
       expect(payload['exchanges']).toEqual([
-        { method: 'GET', url: `${sweepAppBase}/api/widgets`, status: 200 },
+        { method: 'GET', url: `${sweepAppBase}/api/widgets`, status: 200, fetchDest: null },
       ]);
     } finally {
       sweepApp.close(() => done());

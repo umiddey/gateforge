@@ -385,6 +385,8 @@ interface ObservedExchange {
   method: string;
   path: string;
   status: number;
+  /** Lowercased Sec-Fetch-Dest, null when the client omitted it. */
+  fetchDest: string | null;
   seq: number;
   /** sha256 hex of the bounded response-body snapshot. */
   bodySha256: string;
@@ -1200,6 +1202,9 @@ async function startObservedProxy(
             method,
             path: observedPath,
             status,
+            fetchDest: typeof req.headers['sec-fetch-dest'] === 'string'
+              ? req.headers['sec-fetch-dest'].toLowerCase()
+              : null,
             seq,
             bodySha256: createHash('sha256').update(bodySnapshot).digest('hex'),
             bodyBytes: totalBytes,
@@ -2173,6 +2178,7 @@ async function handleBrowserAction(
         method: exchange.method,
         path: exchange.path,
         status: exchange.status,
+        fetchDest: null,
         seq: (state.observedSeq += 1),
         bodySha256: createHash('sha256').update(exchange.body).digest('hex'),
         bodyBytes: exchange.body.length,
@@ -5790,6 +5796,7 @@ interface TransportExchange {
   method: string;
   url: string;
   status: number;
+  fetchDest: string | null;
   initiator?: 'test-code';
   shape?: ResponseShape;
 }
@@ -5820,7 +5827,7 @@ function transportSnapshot(state: WitnessState, session: TestSession): Transport
   let truncated = false;
   for (const exchange of state.observed) {
     if (exchange.sessionId !== session.sessionId || exchange.seq <= watermark) continue;
-    const key = `${exchange.method} ${exchange.path} ${String(exchange.status)} ${exchange.initiator ?? 'page'}`;
+    const key = `${exchange.method} ${exchange.path} ${String(exchange.status)} ${exchange.initiator ?? 'page'} ${exchange.fetchDest ?? ''}`;
     const at = seen.get(key);
     if (at !== undefined) {
       // A repeat keeps the WORST shape verdict, so a mismatch on any repeat survives the dedup.
@@ -5839,6 +5846,7 @@ function transportSnapshot(state: WitnessState, session: TestSession): Transport
       method: exchange.method,
       url: exchange.path,
       status: exchange.status,
+      fetchDest: exchange.fetchDest,
       ...(exchange.initiator === 'test-code' ? { initiator: exchange.initiator } : {}),
       ...(exchange.shape === undefined ? {} : { shape: exchange.shape }),
     });
@@ -5853,20 +5861,25 @@ function transportSnapshot(state: WitnessState, session: TestSession): Transport
  * list (the page sweep's visits).
  */
 function cappedExchangeSnapshot(
-  exchanges: ReadonlyArray<{ method: string; url: string; status: number }>,
+  exchanges: ReadonlyArray<{ method: string; url: string; status: number; fetchDest?: string | null }>,
 ): TransportSnapshot {
   const seen: Record<string, true> = Object.create(null) as Record<string, true>;
-  const kept: Array<{ method: string; url: string; status: number }> = [];
+  const kept: TransportExchange[] = [];
   let truncated = false;
   for (const exchange of exchanges) {
-    const key = `${exchange.method} ${exchange.url} ${String(exchange.status)}`;
+    const key = `${exchange.method} ${exchange.url} ${String(exchange.status)} ${exchange.fetchDest ?? ''}`;
     if (key in seen) continue;
     seen[key] = true;
     if (kept.length >= OBSERVED_EXCHANGES_CAP) {
       truncated = true;
       continue;
     }
-    kept.push({ method: exchange.method, url: exchange.url, status: exchange.status });
+    kept.push({
+      method: exchange.method,
+      url: exchange.url,
+      status: exchange.status,
+      fetchDest: exchange.fetchDest ?? null,
+    });
   }
   return { exchanges: kept, truncated };
 }
