@@ -17,14 +17,15 @@ describe('witnessed Playwright preload environment', () => {
     const child = supervisedRunnerChildEnv({ GATEFORGE_WITNESS_URL: 'http://127.0.0.1:1', NODE_OPTIONS: '--max-old-space-size=512' }, process.cwd(), { NODE_OPTIONS: '--require unwanted.cjs' });
     expect(child['NODE_OPTIONS']).toBe(`--max-old-space-size=512 --require ${JSON.stringify(hook)}`);
   });
-  it('forwards root properties through the fixture proxy without changing the real runner', () => {
+  it('forwards root properties without changing either the fixture or the real runner', () => {
     const forwardRoot = createRequire(import.meta.url)('../src/fixture/auto-session-root.cjs');
     const root = { test: {}, request: {}, chromium: { name: 'original' }, defineConfig: () => 'config' };
     const fixture = new Proxy({ extend: () => 'tracked extension' }, {});
     const request = { newContext: () => 'direct context' };
+    const fixtureKeys = Reflect.ownKeys(fixture);
     const forwarded = forwardRoot(root, fixture, request);
-    expect(forwarded).toBe(fixture);
-    expect(forwarded.test).toBe(fixture);
+    expect(forwarded).not.toBe(fixture);
+    expect(forwarded.test).toBe(forwarded);
     expect(forwarded.request).toBe(request);
     expect(forwarded.extend()).toBe('tracked extension');
     expect(forwarded.defineConfig).toBe(root.defineConfig);
@@ -32,5 +33,11 @@ describe('witnessed Playwright preload environment', () => {
     expect(forwarded.chromium).toBe(root.chromium);
     expect(root.test).not.toBe(fixture);
     expect(root.request).not.toBe(request);
+    expect(Reflect.ownKeys(fixture)).toEqual(fixtureKeys);
+    expect('test' in fixture).toBe(false);
+    expect('request' in fixture).toBe(false);
+    expect('chromium' in fixture).toBe(false);
+    expect('request' in forwarded).toBe(true);
+    expect('chromium' in forwarded).toBe(true);
   });
 });

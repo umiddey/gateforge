@@ -15,6 +15,8 @@
 - The automatic Playwright preload activates only in the test runner and its
   forked test processes; inherited options leave application servers and helper
   Node commands untouched, without loading the fixture or redirecting imports.
+- Automatic root-module forwarding uses a separate test wrapper, preserving the
+  explicit Gateforge fixture's own API when plain and explicit imports coexist.
 
 ## 0.14.0
 

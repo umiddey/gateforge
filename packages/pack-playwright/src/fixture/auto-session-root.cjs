@@ -1,10 +1,14 @@
 'use strict';
 module.exports = function forwardRoot(root, test, request) {
-  for (const key of Reflect.ownKeys(root)) {
-    if (key in test) continue;
-    Object.defineProperty(test, key, { get: () => root[key], configurable: true });
-  }
-  Object.defineProperty(test, 'test', { value: test, configurable: true });
-  Object.defineProperty(test, 'request', { value: request, configurable: true });
-  return test;
+  const forwarded = new Proxy(test, {
+    get(target, key, receiver) {
+      if (key === 'test') return forwarded;
+      if (key === 'request') return request;
+      return key in target ? Reflect.get(target, key, receiver) : Reflect.get(root, key);
+    },
+    has(target, key) {
+      return key === 'test' || key === 'request' || key in target || key in root;
+    },
+  });
+  return forwarded;
 };

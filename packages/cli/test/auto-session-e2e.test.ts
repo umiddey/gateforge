@@ -18,7 +18,7 @@ const cases = [
   ['module.spec.mts', "import { test, expect } from '@playwright/test';", 'test'],
   ['extended.spec.ts', "import { test as base, expect } from '@playwright/test';\nconst test = base.extend({ own: async ({}, use) => { await use(7); } });\ntest.beforeEach(async ({ page }) => { await page.goto('/'); });", 'test'],
   ['root.spec.ts', "import { test as base, expect } from '@playwright/test';\nconst test = base;", 'base.test'],
-  ['explicit.spec.ts', "import { test, expect } from '@gate-forge/pack-playwright/fixture';", 'test'],
+  ['explicit.spec.ts', "import { test as plain } from '@playwright/test';\nimport { test, expect } from '@gate-forge/pack-playwright/fixture';", 'test'],
 ] as const;
 
 const ROUTE_SPEC = `import { test, expect } from '@playwright/test';
@@ -75,7 +75,7 @@ describe('automatic witnessed Playwright sessions', () => {
         installStrictFixture(repo, {});
         const specs: Record<string, string> = {};
         for (const [file, imports, call] of cases) {
-          specs[`specs/${file}`] = `${imports}\n${call}('${file}', async ({ page }) => {\n${file === 'root.spec.ts' ? "const api = await test.request.newContext(); await api.get('/api/direct'); await api.dispose();" : ''}\nawait page.goto('/'); await page.getByRole('button', { name: 'Load' }).click(); await expect(page.getByText('Loaded')).toBeVisible();\n});\n`;
+          specs[`specs/${file}`] = `${imports}\n${call}('${file}', async ({ page }) => {\n${file === 'root.spec.ts' ? "const api = await test.request.newContext(); await api.get('/api/direct'); await api.dispose();" : ''}\n${file === 'explicit.spec.ts' ? "expect(plain.request.newContext).toBeDefined(); expect(plain.chromium).toBeDefined(); expect(test.request).toBeUndefined(); expect(test.chromium).toBeUndefined(); expect(test.test).toBeUndefined();" : ''}\nawait page.goto('/'); await page.getByRole('button', { name: 'Load' }).click(); await expect(page.getByText('Loaded')).toBeVisible();\n});\n`;
         }
         specs['specs/direct.spec.ts'] = "import { test, request, expect } from '@playwright/test';\ntest('direct only', async () => { const api = await request.newContext(); expect((await api.get('/api/direct')).status()).toBe(200); await api.dispose(); });\n";
         specs['specs/routes.spec.ts'] = ROUTE_SPEC;
