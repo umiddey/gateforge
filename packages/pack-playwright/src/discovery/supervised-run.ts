@@ -47,6 +47,7 @@ import type {
   RunnerSelection,
 } from '@gate-forge/core';
 import { ENV_PLAYWRIGHT_CONFIG_DIR } from '../constants.js';
+import { autoSessionNodeOptions } from '../fixture/auto-session-env.js';
 import { buildRunnerChildEnv } from './runner-env.js';
 import { findPlaywrightConfig } from './reconcile.js';
 import { localPlaywrightCliCandidates } from '../runner-resolution.js';
@@ -355,6 +356,7 @@ export function supervisedRunnerChildEnv(
 ): Record<string, string> {
   const child = buildRunnerChildEnv(vars, ambient);
   child[ENV_PLAYWRIGHT_CONFIG_DIR] = nativeConfigDirOf(cwd);
+  if (child['GATEFORGE_WITNESS_URL']) child['NODE_OPTIONS'] = autoSessionNodeOptions(child['NODE_OPTIONS']);
   return child;
 }
 

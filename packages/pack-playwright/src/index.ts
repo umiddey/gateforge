@@ -328,3 +328,4 @@ export {
   SERVER_E2E_TEST_KIND,
   DEFAULT_REQUEST_TIMEOUT_MS,
 } from './constants.js';
+export { autoSessionNodeOptions } from './fixture/auto-session-env.js';
