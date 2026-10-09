@@ -1,4 +1,12 @@
 'use strict';
+// NODE_OPTIONS reaches app servers and helper CLIs too. Playwright's own
+// entry scripts identify its runner and forked test processes before imports.
+// TEST_WORKER_INDEX is set after preload and is inherited by helper children.
+const entry = (process.argv[1] ?? '').replaceAll('\\', '/');
+const runner = /\/node_modules\/(?:@playwright\/test|playwright)\/cli\.js$/.test(entry) &&
+  process.argv[2] === 'test';
+const worker = /\/node_modules\/playwright\/lib\/common\/process\.js$/.test(entry);
+if (!runner && !worker) return;
 const Module = require('node:module');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');

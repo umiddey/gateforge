@@ -12,6 +12,9 @@
   stubs and retaining the session rewrite when those handlers continue requests.
   A later consumer page route that continues directly still takes precedence:
   its outcome is unchanged, but that request bypasses session attribution.
+- The automatic Playwright preload activates only in the test runner and its
+  forked test processes; inherited options leave application servers and helper
+  Node commands untouched, without loading the fixture or redirecting imports.
 
 ## 0.14.0
 
