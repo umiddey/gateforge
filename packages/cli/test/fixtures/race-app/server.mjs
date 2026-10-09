@@ -132,8 +132,16 @@ server.listen(port, LOOPBACK, () => {
   console.log(`race fixture app listening on ${ORIGIN}:${address.port}`);
 });
 
+let shuttingDown = false;
+function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  server.close(() => process.exit(0));
+}
+
+process.stdin.resume();
+process.stdin.once('end', shutdown);
+process.stdin.once('close', shutdown);
 for (const signal of ['SIGINT', 'SIGTERM']) {
-  process.on(signal, () => {
-    server.close(() => process.exit(0));
-  });
+  process.on(signal, shutdown);
 }
