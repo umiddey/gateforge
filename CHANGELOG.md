@@ -45,6 +45,22 @@
   `http:request-observed` / `http:response-status-ok`, the `why` line now
   ends with the witnessing test ids and the static call sites that make
   the route real, so the single next action says WHO depends on it.
+- Prove which routes an app actually mounts. `pack-fastapi` now emits the
+  include chain that reaches each route (`include-chain:<app> → <router>
+  → …`, built from the same walk that positions a route — never a second
+  resolver) instead of a bare vocabulary token, and a router no
+  `include_router` targets emits NO proof at all. The compiled endpoint
+  carries those proofs in `mountProvenances`, so a proven-unmounted route
+  finally leaves the `served` denominator instead of being counted as
+  live. Each is also named report-only as `HTTP_ENDPOINT_UNMOUNTED`; the
+  finding is minted only in a run that carries proofs at all, so a
+  detector that cannot follow the mount graph never flags anything.
+- Mark conditional route declarations. A route declared inside a
+  module-level `if`/`try`/`with`/`for`/`while` registers only when its
+  branch runs, so its fact now carries `conditional: true`. Marked, never
+  dropped, and never a served-ness input: its router is mounted either
+  way, so the route keeps its mount proof and its registration (which is
+  right whenever the route does register).
 
 ## 0.13.10
 

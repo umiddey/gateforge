@@ -1439,6 +1439,39 @@ counts used routes whose BOTH transport obligations are `satisfied` (a
 waived or baselined obligation is a recorded forgiveness, never proof),
 and `missing` is `used` minus `proven`.
 
+
+### Mount proofs (`mountProvenances`, `HTTP_ENDPOINT_UNMOUNTED`)
+
+What "the detector PROVES unmounted" means in practice. The FastAPI pack
+walks each app's `include_router` graph ONCE and stamps every route it
+reaches with the chain it crossed, in the same `<module>:<var>` identity a
+route's `registration.scope` uses:
+
+```
+include-chain:app.main:app → app.api:api_router → app.items:items_router
+```
+
+The compiled `http.endpoint` carries those strings in `mountProvenances`
+(deduplicated, sorted; one entry per mount, so a router included by two
+apps yields two). A route declared by a router NO `include_router` targets
+carries none — it is still reported, because a declaration is a claim, but
+nothing proves an app serves it, and it therefore leaves `served`.
+
+- **`HTTP_ENDPOINT_UNMOUNTED` (report-only).** Names each endpoint whose
+  router nothing mounts, so the reader can mount the router or delete the
+  dead code. It is deliberately not a blocking code, and it is minted only
+  in a run that carries proofs at all: with no proof anywhere, the detector
+  could not follow the mount graph, and an empty proof means "unknown",
+  never "dead code".
+- **`conditional: true`.** A route declared inside a module-level
+  `if`/`try`/`with`/`for`/`while` registers only when that branch runs, so
+  its served-ness is unknown statically. Such an endpoint is MARKED, never
+  dropped, and the flag is never a served-ness input: its router is mounted
+  either way, so the route keeps its `mountProvenances` and its
+  `registration` (which holds whenever the route does register).
+- **`adapters scaffold`** skips exactly these paths. With no mount proof
+  anywhere in the graph it scaffolds nothing unmounted, for the same reason.
+
 `gateforge next` names the caller of a used-but-unproven route: when the
 top item is one of its two transport contracts, the `why` line ends with
 `— this route is used by <testId | file:line:col>, …`, where the names
