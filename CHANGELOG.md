@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.14.0 (unreleased)
+
+- Add a pure OpenAPI path/method route table and merge it with detector
+  inventory using `http.routeSource` (`both` by default). Source-only routes
+  remain in the union and produce report-only `ROUTE_SOURCE_MISMATCH`
+  findings.
+- Resolve concrete HTTP exchanges using existing positional route matching
+  and proven detector registration order. Unknown precedence stays
+  ambiguous; OpenAPI path order never substitutes for registration order.
+
 ## 0.13.10
 
 Theme: Gateforge reads a test's type from what its fixtures are really made

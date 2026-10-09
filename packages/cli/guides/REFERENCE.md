@@ -1,5 +1,6 @@
 # Gateforge CLI reference
 
+
 The reference for the `gateforge` CLI: every command, flag, exit
 code, and protocol, plus the usage documentation that lived in the
 repository README before the 0.9.0 documentation split. Both halves
@@ -1274,7 +1275,36 @@ repo-root-relative. `changed.provider: auto` (the default) picks
 instant for deterministic reports; `system` (default) freezes it at run
 start.
 
+### HTTP route source (`http.routeSource`)
+
+`.gateforge.yml` accepts:
+
+```yaml
+http:
+  routeSource: both
+```
+
+`routeSource` is `both` by default. `both` unions detector routes with the
+operations published in the app's OpenAPI document; `detectors` and
+`openapi` select only that source. In `both` mode, a route present in only
+one source produces a report-only `ROUTE_SOURCE_MISMATCH` finding. The union
+matters because OpenAPI may omit routes hidden from its schema, while
+detectors can also report routes not exposed by the running app.
+
+OpenAPI path insertion order is not dispatch precedence. When multiple
+routes match a concrete request, the matcher uses proven detector
+`registration` order (same serving scope, distinct positions) and selects
+the first registered match. Without enough order evidence it returns an
+ambiguous result rather than guessing. A single full match resolves; no
+matching method and path is unmatched. Matching ignores query strings and
+accepts trailing-slash variants; positional parameters match one segment,
+and a trailing catch-all matches one or more segments.
+
 Enforcement-relevant sections:
+
+- `http.routeSource:` — the served-route inventory source: `both`
+  (default), `detectors`, or `openapi`. `both` unions both inventories and
+  reports source-only routes as report-only `ROUTE_SOURCE_MISMATCH` findings.
 
 - `enforcement:` — `mode: standard | managed` (default `standard`),
   `strictE2E: boolean` (default `false`), and optional
