@@ -26,6 +26,7 @@ import type { BlockingEntry } from '../policy/index.js';
 import type { RunManifest } from '../schemas/run-manifest.js';
 import type { Verdict } from '../schemas/verdict.js';
 import { BLOCKING_VERDICTS, type HttpLedger, type ObligationVerdict } from '../verdict/index.js';
+import type { HttpCoverageSummary } from '../verdict/index.js';
 import { ENGINE_UPGRADE_REFUSAL_PREFIX, humanMessage } from './human-message.js';
 
 /** The official SARIF 2.1.0 (errata 01) JSON schema location. */
@@ -378,6 +379,14 @@ export interface RenderRunOptions {
    * had.
    */
   httpLedger?: HttpLedger;
+  /**
+   * The HTTP coverage summary (0.14 WP3, plan §4.5): the one line that
+   * makes the served/used/proven denominator visible. REPORT-ONLY — it
+   * changes no verdict and no exit code — and it is printed only when
+   * the caller supplies it, so a report without HTTP coverage keeps
+   * exactly the bytes it always had.
+   */
+  httpCoverage?: HttpCoverageSummary;
 }
 
 /** A run's exit code (architecture contract 4). */
@@ -615,6 +624,9 @@ function jsonReport(
   // Report-only exchange ledger (0.14 WP2): present only when the run
   // witnessed session exchanges, so existing reports keep their keys.
   if (options.httpLedger !== undefined) report['httpLedger'] = options.httpLedger;
+  // HTTP coverage summary (0.14 WP3): additive, like the ledger, so a
+  // report without it keeps exactly the document it always had.
+  if (options.httpCoverage !== undefined) report['httpCoverage'] = options.httpCoverage;
   return report;
 }
 
@@ -762,6 +774,16 @@ function textReport(
   } else if (options.engine !== undefined) {
     lines.push(`engine: ${options.engine.version} from ${options.engine.source}`);
     if (options.engine.unpublished) lines.push('unpublished engine: CI will not have this code');
+  }
+  if (options.httpCoverage !== undefined) {
+    // The served/used/proven denominator, always (plan §4.5): a route
+    // the product serves and nobody proves is the hole this whole
+    // feature exists to make visible.
+    const http = options.httpCoverage;
+    lines.push(
+      `HTTP: ${String(http.served)} served, ${String(http.used)} used, ${String(http.proven)} proven, ` +
+        `${String(http.missing)} missing, ${String(http.unmatched)} unmatched, ${String(http.ambiguous)} ambiguous`,
+    );
   }
   if (options.chaos !== undefined) {
     // The one line that makes a red chaos run explainable and

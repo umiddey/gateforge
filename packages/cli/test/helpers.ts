@@ -227,6 +227,12 @@ export function configYml(options: {
      */
     httpClients?: string;
   };
+  /**
+   * The HTTP settings block (0.14 `http:`). Same zero-bytes-when-absent
+   * rule as every other optional section: a fixture that declares nothing
+   * keeps byte-identical `.gateforge.yml` text.
+   */
+  http?: { callFindings?: 'report' | 'block' };
 } = {}): string {
   const include = options.include ?? "['src/**/*.txt']";
   const plugins =
@@ -292,6 +298,12 @@ export function configYml(options: {
       : `\n    testTooling: ${options.testTooling.length === 0 ? '[]' : ''}${options.testTooling
           .map((glob) => `\n      - ${JSON.stringify(glob)}`)
           .join('')}`;
+  // HTTP settings (0.14). Absent emits zero bytes, so a fixture that
+  // declares no HTTP setting keeps byte-identical config text.
+  const httpSection =
+    options.http === undefined
+      ? ''
+      : `\nhttp:${options.http.callFindings === undefined ? '' : `\n  callFindings: ${options.http.callFindings}`}`;
   return `\
 schemaVersion: 1
 project:
@@ -309,6 +321,7 @@ baselines: .gateforge/baselines/obligations.json
 # Scanner settings (0.11.0): REQUIRED in .gateforge.yml. These four keys
 # used to sit at the top of .gateforge/classification-policy.yml.
 ${scanSection}
+${httpSection}
 changed:
   provider: ${options.provider ?? 'auto'}
 witness:

@@ -978,7 +978,11 @@ async function legacyTestGates(io: Io, options: LegacyOptions): Promise<number> 
     engineLine: reportEngineLine(),
     lifecycleDerivation: pipeline.lifecycleDerivation,
     diagnosticContext,
+    ...(evaluated.httpCallAdvisories.length === 0
+      ? {}
+      : { advisories: [...evaluated.httpCallAdvisories] }),
     ...(evaluated.httpLedger === undefined ? {} : { httpLedger: evaluated.httpLedger }),
+    httpCoverage: evaluated.httpCoverage.summary,
   });
   writeLine(io.stdout, report);
 
@@ -994,7 +998,11 @@ async function legacyTestGates(io: Io, options: LegacyOptions): Promise<number> 
       engineLine: reportEngineLine(),
       lifecycleDerivation: pipeline.lifecycleDerivation,
       diagnosticContext,
+      ...(evaluated.httpCallAdvisories.length === 0
+        ? {}
+        : { advisories: [...evaluated.httpCallAdvisories] }),
       ...(evaluated.httpLedger === undefined ? {} : { httpLedger: evaluated.httpLedger }),
+      httpCoverage: evaluated.httpCoverage.summary,
     }),
   );
 
@@ -3579,7 +3587,11 @@ async function runSupervisedTestGatesInner(
                   },
                 }),
       },
+      ...(evaluated.httpCallAdvisories.length === 0
+        ? {}
+        : { advisories: [...evaluated.httpCallAdvisories] }),
       ...(evaluated.httpLedger === undefined ? {} : { httpLedger: evaluated.httpLedger }),
+      httpCoverage: evaluated.httpCoverage.summary,
     });
     writeLine(io.stdout, report);
     const gateCode = runExitCode({ verdicts: evaluated.verdicts, blocking: evaluated.blocking });
@@ -4031,7 +4043,11 @@ async function runSupervisedTestGatesInner(
               },
             }),
       },
+      ...(evaluated.httpCallAdvisories.length === 0
+        ? {}
+        : { advisories: [...evaluated.httpCallAdvisories] }),
       ...(evaluated.httpLedger === undefined ? {} : { httpLedger: evaluated.httpLedger }),
+      httpCoverage: evaluated.httpCoverage.summary,
     });
     writeLine(io.stdout, report);
     writeLine(
@@ -6035,7 +6051,9 @@ async function runSupervisedTestGatesInner(
     // Twin path coverage (E64): reported, never blocking, in advisory
     // mode. An empty list adds no report key, so a run without twin
     // findings keeps exactly the document it always had.
-    ...(runAdvisories.length === 0 ? {} : { advisories: runAdvisories }),
+    ...([...evaluated.httpCallAdvisories, ...runAdvisories].length === 0
+      ? {}
+      : { advisories: [...evaluated.httpCallAdvisories, ...runAdvisories] }),
     waiverCounts: evaluated.waiverCounts,
     run: manifest,
     toolVersion: VERSION,
@@ -6055,6 +6073,7 @@ async function runSupervisedTestGatesInner(
       : { chaos: { ...chaosRun, ...(chaosSchedule === null ? {} : { schedule: chaosSchedule }) } }),
     ...(localFailures.length === 0 ? {} : { failedTests: localFailures }),
     ...(evaluated.httpLedger === undefined ? {} : { httpLedger: evaluated.httpLedger }),
+    httpCoverage: evaluated.httpCoverage.summary,
   });
   /**
    * The persisted json document: the same report shape stdout shows for a
@@ -6068,7 +6087,9 @@ async function runSupervisedTestGatesInner(
         renderRun(evaluated.verdicts, {
           format: 'json',
           blocking: evaluated.blocking,
-          ...(runAdvisories.length === 0 ? {} : { advisories: runAdvisories }),
+          ...([...evaluated.httpCallAdvisories, ...runAdvisories].length === 0
+            ? {}
+            : { advisories: [...evaluated.httpCallAdvisories, ...runAdvisories] }),
           waiverCounts: evaluated.waiverCounts,
           run: manifest,
           toolVersion: VERSION,
@@ -6083,6 +6104,7 @@ async function runSupervisedTestGatesInner(
             ? {}
             : { chaos: { ...chaosRun, ...(chaosSchedule === null ? {} : { schedule: chaosSchedule }) } }),
           ...(evaluated.httpLedger === undefined ? {} : { httpLedger: evaluated.httpLedger }),
+          httpCoverage: evaluated.httpCoverage.summary,
         }),
       ) as Record<string, unknown>),
       ...(gateMode === 'strict'

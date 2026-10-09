@@ -21,6 +21,15 @@ import { bindQueueObserver } from '../verdict/pack-verifiers.js';
 export const HttpConfigSchema = z
   .object({
     routeSource: z.enum(['openapi', 'detectors', 'both']).default('both'),
+    /**
+     * Which channel the HTTP call findings (plan §4.3 R2-R4) block on.
+     * `report` (default) prints and serializes them every run and keeps
+     * the exit code untouched — the only safe default while every
+     * existing consumer still carries hits the adoption migration has
+     * not recorded yet. `block` makes them fail the check exactly like
+     * any other blocking finding.
+     */
+    callFindings: z.enum(['report', 'block']).default('report'),
   })
   .strict();
 
@@ -493,8 +502,12 @@ export const GateforgeConfigSchema = z
     plugins: z.array(ConfigPluginSchema),
     /** Path to the policies YAML document. */
     policies: z.string().min(1),
-    /** Served-route inventory source; absent settings use both sources. */
-    http: HttpConfigSchema.default({ routeSource: 'both' }),
+    /**
+     * Served-route inventory source and the channel the HTTP call
+     * findings block on; absent settings use both sources and report
+     * mode.
+     */
+    http: HttpConfigSchema.default({ routeSource: 'both', callFindings: 'report' }),
     /**
      * Path to the classification-policy YAML document (plan phase 5,
      * ADR 0003 D5): repository-wide deterministic classification rules.

@@ -98,6 +98,13 @@ export const CauseCodeSchema = z.enum([
   'BUSINESS_RULE_TEST_TYPE_MISMATCH',
   'BUSINESS_RULE_TEST_UNPROVEN',
   'BUSINESS_RULE_TEST_FAILING',
+  // The HTTP call rules (0.14 WP3, plan §4.3 R2-R4): a call the
+  // product makes that no route serves, several routes serve equally,
+  // or no static join could resolve. Report-only by default
+  // (`http.callFindings`); blocking only when the owner declares it.
+  'HTTP_CALL_UNMATCHED',
+  'HTTP_CALL_AMBIGUOUS',
+  'HTTP_CALL_UNRESOLVED',
 ]);
 
 /** Inferred cause-code union. */
@@ -202,4 +209,13 @@ export const CAUSE_NEXT_ACTIONS: Readonly<Record<CauseCode, string>> = Object.fr
   BUSINESS_RULE_TEST_FAILING:
     'Fix the mapped test or the behaviour it proves: every mapped test of a case must pass (a green ' +
     'sibling never forgives a red one).',
+  HTTP_CALL_UNMATCHED:
+    'A witnessed call matches no served route: fix the caller URL or serve the route it means; ' +
+    'an unresolvable call is an application bug, not a missing test',
+  HTTP_CALL_AMBIGUOUS:
+    'A witnessed call matches several routes equally: make the routes distinguishable ' +
+    '(or record the router\'s registration order) so exactly one can answer the call',
+  HTTP_CALL_UNRESOLVED:
+    'The static join cannot compute this call\'s URL: declare the wrapper/base URL in the ' +
+    'endpoint scan configuration so the call site resolves instead of staying invisible',
 });

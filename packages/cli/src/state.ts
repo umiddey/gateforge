@@ -35,7 +35,9 @@ import {
   canonicalJson,
   compareStrings,
   fingerprintObligation,
+  HTTP_ENDPOINT_RESOURCE_KIND,
   type HttpRouteCandidate,
+  type HttpCoverageRoute,
   type JsonValue,
   type Obligation,
   type ResourceGraph,
@@ -124,6 +126,44 @@ export function httpRoutesView(graph: ResourceGraph): HttpRouteCandidate[] {
     });
   }
   routes.sort((a, b) => compareStrings(a.resourceId, b.resourceId));
+  return routes;
+}
+
+/**
+ * The served/used denominator of the HTTP call rules (0.14 WP3
+ * R1/R5), derived from the SAME graph resources the route inventory
+ * comes from — no second scan, no second identity rule.
+ *
+ * `mountProvenances` carries the detector's proof that this route's
+ * router is mounted (plan finding 13); `consumed` is the static join the
+ * `consumed: true` policy matches on; `callSites` are the joined call
+ * sites (`file:line:col`). Core subtracts a proven-unmounted route from
+ * `served` only once the detector emits the fact at all.
+ *
+ * Args:
+ *   graph: built resource graph.
+ *
+ * Returns:
+ *   HttpCoverageRoute[]: one entry per `http.endpoint`, sorted by id.
+ */
+export function httpCoverageRoutesView(graph: ResourceGraph): HttpCoverageRoute[] {
+  const routes: HttpCoverageRoute[] = [];
+  for (const resource of graph.resources) {
+    if (resource.id === null || resource.kind !== HTTP_ENDPOINT_RESOURCE_KIND) continue;
+    const mountProvenances = resource.attributes['mountProvenances'];
+    const callSources = resource.attributes['callSources'];
+    routes.push({
+      resourceId: resource.id,
+      mountProvenances: Array.isArray(mountProvenances)
+        ? mountProvenances.filter((value): value is string => typeof value === 'string')
+        : [],
+      consumed: resource.attributes['frontendConsumed'] === true,
+      callSites: Array.isArray(callSources)
+        ? callSources.filter((value): value is string => typeof value === 'string')
+        : [],
+    });
+  }
+  routes.sort((left, right) => compareStrings(left.resourceId, right.resourceId));
   return routes;
 }
 

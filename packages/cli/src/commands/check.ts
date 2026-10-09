@@ -2299,6 +2299,11 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
     format,
     blocking: evaluatedBlocking,
     advisories: [
+      // HTTP call findings in report mode (0.14 WP3, `http.callFindings:
+      // report`): the run's unmatched / ambiguous / unresolved calls,
+      // printed and serialized every run while the exit code stays
+      // untouched. In `block` mode they joined `blocking` instead.
+      ...evaluated.httpCallAdvisories,
       ...annotationAdvisories,
       ...mockedOnlyAdvisories,
       ...baselineDriftAdvisories,
@@ -2356,6 +2361,7 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
           }),
     },
     ...(evaluated.httpLedger === undefined ? {} : { httpLedger: evaluated.httpLedger }),
+    httpCoverage: evaluated.httpCoverage.summary,
   });
   // Unmatched by-id routes the owner graded as advisory (0.9.0, owner
   // decision D7): loud at the TOP of the text report, not buried in the

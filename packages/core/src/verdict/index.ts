@@ -44,6 +44,29 @@ export {
   type HttpLedgerRow,
   type HttpLedgerSummary,
 } from './http-ledger.js';
+/**
+ * The HTTP call rules R1-R5 (0.14 WP3): used/proven/missing counts over
+ * the exchange ledger plus the static join, and the typed call findings
+ * (`HTTP_CALL_UNMATCHED` / `HTTP_CALL_AMBIGUOUS` /
+ * `HTTP_CALL_UNRESOLVED`). Never a verdict input.
+ */
+export {
+  evaluateHttpCoverage,
+  httpCallFindingEntries,
+  HTTP_CALL_UNMATCHED,
+  HTTP_CALL_AMBIGUOUS,
+  HTTP_CALL_UNRESOLVED,
+  type HttpCallFinding,
+  type HttpCallFindingCode,
+  type HttpCallFindingsMode,
+  type HttpCoverageInput,
+  type HttpCoverageResult,
+  type HttpCoverageRoute,
+  type HttpCoverageSummary,
+  type HttpCoverageUnresolved,
+  type HttpCoverageVerdict,
+  type HttpMissingRoute,
+} from './http-coverage.js';
 export { HTTP_EXCHANGES_KIND } from './pack-verifiers.js';
 /**
  * Cause mapping for the shared report model (plan §5.4): stable cause

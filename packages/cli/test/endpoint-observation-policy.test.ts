@@ -208,7 +208,14 @@ describe('http.endpoint.requireObservation (plan Phase 4c, E60)', () => {
       const { stdout } = await runCli(repo, ['check', '--format', 'json']);
       const report = JSON.parse(normalizedReport(stdout)) as {
         advisories?: Array<{ detail: string }>;
+        httpCoverage?: Record<string, number>;
       };
+      // 0.14 WP3 adds the HTTP coverage summary as an ADDITIVE report key,
+      // printed for every run (the visible served/used/proven
+      // denominator). It is asserted exactly here and then removed, so
+      // every other byte is still compared against the pre-Phase-4c
+      // golden, unchanged.
+      expect(report.httpCoverage).toMatchObject({ served: 2, used: 0, unmatched: 0, ambiguous: 0 });
       // WHY the bytes differ from the historical golden: THIS fixture has
       // a by-id route (`GET /accounts/{}`) and no table at all, so 0.9.0
       // has something to report about it. It is an ADVISORY — never
@@ -219,6 +226,7 @@ describe('http.endpoint.requireObservation (plan Phase 4c, E60)', () => {
       expect(report.advisories?.[0]?.detail).toContain('ENDPOINT_RESOURCE_CANDIDATE_UNMATCHED');
       expect(report.advisories?.[0]?.detail).toContain("derives resource name 'accounts'");
       delete report.advisories;
+      delete report.httpCoverage;
       expect(JSON.stringify(report)).toBe(GOLDEN_ABSENT);
     });
   });

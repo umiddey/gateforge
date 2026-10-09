@@ -38,6 +38,26 @@ export { isJsonValue } from './canonical-json.js';
  */
 export { canonicalJson } from './canonical-json.js';
 
+
+/**
+ * The HTTP call rules R1-R5 (0.14 WP3): the used/proven/missing summary
+ * over the exchange ledger and the static join, plus the typed call
+ * findings and their finding-channel projection.
+ */
+export {
+  evaluateHttpCoverage,
+  httpCallFindingEntries,
+  HTTP_CALL_UNMATCHED,
+  HTTP_CALL_AMBIGUOUS,
+  HTTP_CALL_UNRESOLVED,
+  type HttpCallFinding,
+  type HttpCallFindingCode,
+  type HttpCallFindingsMode,
+  type HttpCoverageResult,
+  type HttpCoverageRoute,
+  type HttpCoverageSummary,
+  type HttpMissingRoute,
+} from './verdict/index.js';
 /**
  * Lowercase hex sha256 of a string or byte buffer.
  */

@@ -28,6 +28,9 @@ import {
   evaluateObligations,
   buildHttpLedger,
   fingerprintObligation,
+  evaluateHttpCoverage,
+  httpCallFindingEntries,
+  type HttpCoverageResult,
   loadWaivers,
   strictCapabilityGaps,
   verifyAttestationMac,
@@ -47,7 +50,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { UsageError } from './errors.js';
 import { resolveRepoPath, sourcesByResourceId } from './pipeline.js';
-import { httpRoutesView, readJsonArray } from './state.js';
+import { httpCoverageRoutesView, httpRoutesView, readJsonArray } from './state.js';
 
 /**
  * Pin-#2 fingerprint of an obligation — the identity the baseline
@@ -339,6 +342,20 @@ export interface EvaluateResult {
    * had. It never changes a verdict or the exit code.
    */
   httpLedger?: HttpLedger;
+  /**
+   * The HTTP call rules R1-R5 (0.14 WP3) over this run's ledger, its
+   * graded verdicts and the graph's static join: the summary line's
+   * numbers plus the typed call findings. REPORT-ONLY in itself — it
+   * changes no verdict; only the channel the findings block on (the
+   * owner's `http.callFindings`) reaches the exit code.
+   */
+  httpCoverage: HttpCoverageResult;
+  /**
+   * The call findings in REPORT mode: the owner's advisory channel, so
+   * they are printed and serialized every run while the exit code stays
+   * untouched. Empty in `block` mode, where they joined `blocking`.
+   */
+  httpCallAdvisories: readonly BlockingEntry[];
 }
 
 /**
@@ -717,10 +734,6 @@ export function evaluateRun(input: EvaluateInput): EvaluateResult {
       )
     : applied.verdicts;
 
-  const blockingRun =
-    applied.blocking.length > 0 ||
-    gradedVerdicts.some((entry) => BLOCKING_VERDICTS.includes(entry.verdict));
-
   // Verdict-time exchange ledger (0.14 WP2): built from THIS run's
   // authorized records (the same set every verdict above graded from —
   // never a raw records.json read) through the one route matcher over
@@ -731,11 +744,49 @@ export function evaluateRun(input: EvaluateInput): EvaluateResult {
   const ledger = buildHttpLedger(records, httpRoutes);
   const httpLedger: HttpLedger | undefined = ledger.rows.length > 0 ? ledger : undefined;
 
+  // The HTTP call rules R1-R5 (0.14 WP3) over that ledger, this run's
+  // graded verdicts and the graph's static join facts. R1/R5 are pure
+  // counts; R2-R4 mint typed findings whose CHANNEL is the owner's
+  // declaration (`http.callFindings`), never this engine's judgement:
+  // `report` keeps them out of the exit code, `block` makes them fail
+  // the check exactly like any other blocking finding. They join AFTER
+  // the adoption baseline, so today's debt stays recorded debt and a
+  // new call is never forgiven by an old receipt.
+  const coverageRoutes = httpCoverageRoutesView(graph);
+  const httpCoverage = evaluateHttpCoverage({
+    routes: coverageRoutes,
+    // Plan finding 13: the mount fact is only READ once a detector emits
+    // it; until then no route is subtracted from the served denominator.
+    mountProvenanceEmitted: coverageRoutes.some((route) => route.mountProvenances.length > 0),
+    ledger,
+    verdicts: gradedVerdicts.map((entry) => ({
+      resourceId: entry.obligation.resourceId,
+      contract: entry.obligation.contract,
+      verdict: entry.verdict,
+    })),
+    unresolvedCallSites: graph.unresolved.map((entry) => ({
+      code: entry.reason.code,
+      detail: entry.reason.detail,
+      location: entry.reason.location,
+    })),
+    mode: config.http.callFindings,
+  });
+  const callEntries = httpCallFindingEntries(httpCoverage.findings);
+  const callBlocking = config.http.callFindings === 'block' ? callEntries : [];
+  const httpCallAdvisories = config.http.callFindings === 'block' ? [] : callEntries;
+  const runBlocking = [...applied.blocking, ...callBlocking];
+
+  const blockingRun =
+    runBlocking.length > 0 ||
+    gradedVerdicts.some((entry) => BLOCKING_VERDICTS.includes(entry.verdict));
+
   return {
     verdicts: gradedVerdicts,
-    blocking: applied.blocking,
+    blocking: runBlocking,
     records,
     httpLedger,
+    httpCoverage,
+    httpCallAdvisories,
     baselined: applied.baselined,
     notGradedObligations: input.obligations.length - scoped.length,
     waiverCounts: {
