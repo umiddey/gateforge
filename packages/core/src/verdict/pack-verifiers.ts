@@ -456,26 +456,43 @@ function registrationOrderWinner(
 }
 
 /**
- * Deterministic runtime route attribution over the COMPLETE candidate
- * set (plan §9 steps 4-9, D2; 0.14 registration-order precedence).
+ * The ONE obligation-free route resolution (WP2): where a concrete
+ * observed request lands in the complete route inventory, with no
+ * obligation identity involved. `resolveHttpRoute` wraps this with the
+ * resource-id mismatch check — there is no second resolver.
+ */
+export type HttpRouteMatch =
+  | { status: 'match'; matched: HttpRouteCandidate }
+  | { status: 'nomatch'; reason: string }
+  | { status: 'ambiguous'; candidates: string[] }
+  | { status: 'incomplete'; reason: string };
+
+/**
+ * Obligation-free route attribution over the COMPLETE candidate set
+ * (plan §9 steps 4-9, D2; 0.14 registration-order precedence): the
+ * matcher both the obligation-aware {@link resolveHttpRoute} and the
+ * verdict-time `httpLedger` build on, so the product keeps exactly one
+ * route resolver.
+ *
  * When more than one candidate matches the observation — the literal
  * `/accounts/export` against the parameter `/accounts/{}` — attribution
  * resolves by the framework's OWN registration order, but only when the
  * detector proved it for the whole matched set: same scope, distinct
  * orders, no typed path convertor on the smallest-order candidate (see
- * {@link registrationOrderWinner}). The winner then grades like any
- * unique match — `match` for its own obligation, `mismatch` for every
- * other endpoint's. Without a proven order (other packs, unprovable
- * constructs, mixed scopes, a missing or tied proof, a typed convertor
- * ahead of the field) the transport status is still known but handler
- * attribution is ambiguous and the claim blocks, exactly as before.
+ * {@link registrationOrderWinner}). The winner is returned as the
+ * `match`. Without a proven order (other packs, unprovable constructs,
+ * mixed scopes, a missing or tied proof, a typed convertor ahead of the
+ * field) the transport status is still known but handler attribution is
+ * ambiguous.
  *
  * Args:
- *   observedMethod: the witnessed record's method (any case).
+ *   observedMethod: the witnessed method (any case).
  *   observedPath: the interpreted observed path (from
  *     `interpretObservedPath`).
  *   candidates: the complete host-derived route inventory.
- *   obligationResourceId: the obligation's own resource id.
+ *   subject: optional identity named in the blocking reasons (the
+ *     caller's attribution subject, e.g. an obligation resource id).
+ *     Pure message text — never affects the outcome.
  *
  * Returns:
  *   - `{status: 'incomplete', reason}` when any candidate carries an
@@ -485,22 +502,15 @@ function registrationOrderWinner(
  *   - `{status: 'ambiguous', candidates}` with the sorted identity
  *     texts when more than one distinct resource matches and no proven
  *     registration order singles one out;
- *   - `{status: 'mismatch', matched}` when exactly one candidate
- *     matches (or the proven order winner is) a different endpoint;
- *   - `{status: 'match', matched}` when the unique match (or the
- *     proven order winner) is the obligation's own endpoint.
+ *   - `{status: 'match', matched}` when exactly one candidate matches
+ *     (or the proven order winner does).
  */
-export function resolveHttpRoute(
+export function matchHttpRoute(
   observedMethod: string,
   observedPath: string,
   candidates: readonly HttpRouteCandidate[],
-  obligationResourceId: string,
-):
-  | { status: 'match'; matched: HttpRouteCandidate }
-  | { status: 'mismatch'; matched: HttpRouteCandidate }
-  | { status: 'nomatch'; reason: string }
-  | { status: 'ambiguous'; candidates: string[] }
-  | { status: 'incomplete'; reason: string } {
+  subject?: string,
+): HttpRouteMatch {
   for (let index = 0; index < candidates.length; index += 1) {
     const candidate = candidates[index] as HttpRouteCandidate | undefined;
     if (
@@ -515,7 +525,8 @@ export function resolveHttpRoute(
         reason:
           `route inventory entry ${index} is not attributable ` +
           `(unknown/dynamic method or unsupported shape); uniqueness cannot be established ` +
-          `against an incomplete inventory, so '${obligationResourceId}' stays blocking`,
+          `against an incomplete inventory` +
+          (subject === undefined ? '' : `, so '${subject}' stays blocking`),
       };
     }
   }
@@ -537,8 +548,10 @@ export function resolveHttpRoute(
       status: 'nomatch',
       reason:
         `observed ${upperMethod} ${observedPath} matches none of the ` +
-        `${candidates.length} inventoried routes; evidence from a different endpoint can never ` +
-        `satisfy '${obligationResourceId}'`,
+        `${candidates.length} inventoried routes` +
+        (subject === undefined
+          ? ''
+          : `; evidence from a different endpoint can never satisfy '${subject}'`),
     };
   }
   if (distinct.length > 1) {
@@ -549,9 +562,6 @@ export function resolveHttpRoute(
     // stays ambiguous.
     const winner = registrationOrderWinner(distinct);
     if (winner !== null) {
-      if (winner.resourceId !== obligationResourceId) {
-        return { status: 'mismatch', matched: winner };
-      }
       return { status: 'match', matched: winner };
     }
     return {
@@ -559,11 +569,47 @@ export function resolveHttpRoute(
       candidates: distinct.map(candidateIdentityText).sort(compareStrings),
     };
   }
-  const only = distinct[0] as HttpRouteCandidate;
-  if (only.resourceId !== obligationResourceId) {
-    return { status: 'mismatch', matched: only };
+  return { status: 'match', matched: distinct[0] as HttpRouteCandidate };
+}
+
+/**
+ * Obligation-aware wrapper around {@link matchHttpRoute} (the ONE
+ * resolver): identical matcher, precedence, and messages, plus the ONE
+ * obligation-specific rule — a unique match (or proven order winner)
+ * that is a DIFFERENT endpoint than the obligation's own is a
+ * `mismatch`, never credit.
+ *
+ * Args:
+ *   observedMethod: the witnessed record's method (any case).
+ *   observedPath: the interpreted observed path (from
+ *     `interpretObservedPath`).
+ *   candidates: the complete host-derived route inventory.
+ *   obligationResourceId: the obligation's own resource id.
+ *
+ * Returns:
+ *   - `{status: 'mismatch', matched}` when exactly one candidate
+ *     matches (or the proven order winner is) a different endpoint;
+ *   - `{status: 'match', matched}` when the unique match (or the
+ *     proven order winner) is the obligation's own endpoint;
+ *   - otherwise the unchanged {@link matchHttpRoute} resolution.
+ */
+export function resolveHttpRoute(
+  observedMethod: string,
+  observedPath: string,
+  candidates: readonly HttpRouteCandidate[],
+  obligationResourceId: string,
+):
+  | { status: 'match'; matched: HttpRouteCandidate }
+  | { status: 'mismatch'; matched: HttpRouteCandidate }
+  | { status: 'nomatch'; reason: string }
+  | { status: 'ambiguous'; candidates: string[] }
+  | { status: 'incomplete'; reason: string } {
+  const resolution = matchHttpRoute(observedMethod, observedPath, candidates, obligationResourceId);
+  if (resolution.status !== 'match') return resolution;
+  if (resolution.matched.resourceId !== obligationResourceId) {
+    return { status: 'mismatch', matched: resolution.matched };
   }
-  return { status: 'match', matched: only };
+  return resolution;
 }
 
 /**

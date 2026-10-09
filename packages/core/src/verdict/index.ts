@@ -56,6 +56,7 @@ export {
   registerPackVerifiers,
   bindQueueObserver,
   interpretObservedPath,
+  matchHttpRoute,
   resolveHttpRoute,
   pathMatchesShape,
 } from './pack-verifiers.js';

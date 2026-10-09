@@ -1025,7 +1025,7 @@ export {
  * (same scope, distinct orders, no typed path convertor ahead of the
  * field — 0.14); otherwise ambiguity blocks.
  */
-export { interpretObservedPath, resolveHttpRoute, pathMatchesShape } from './verdict/index.js';
+export { interpretObservedPath, matchHttpRoute, resolveHttpRoute, pathMatchesShape } from './verdict/index.js';
 
 /**
  * Required-case aggregation (plan 2026-09-19 §4.7, Phase 5): pure

@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import {
-  matchExchange,
   mergeRouteSources,
   routeTableFromOpenApi,
   type HttpContractFact,
@@ -86,63 +85,20 @@ describe('route table sources', () => {
     ]);
   });
 
-  it('uses detector registration order, not OpenAPI path insertion order, for first-match dispatch', () => {
+  it('keeps detector registration order, not OpenAPI path insertion order, in the merged table', () => {
     const detector = [
       detectorRoute('GET', '/items/actions', 0),
       detectorRoute('GET', '/items/{}', 1),
     ];
     const result = mergeRouteSources(detector, routeTableFromOpenApi(openapi), 'both');
 
-    expect(matchExchange(result.table, 'GET', '/items/actions')).toEqual({
-      route: expect.objectContaining({ path: '/items/actions' }),
-    });
+    // Dispatch order IS the table order (the one route resolver in core
+    // consumes it with the detector's registration facts).
+    expect(result.table.map((entry) => entry.normalizedPath)).toEqual([
+      '/items/actions',
+      '/items/{}',
+      '/openapi-only',
+    ]);
   });
 });
 
-describe('HTTP exchange route matching', () => {
-  const table = [
-    detectorRoute('GET', '/items/actions', 0),
-    detectorRoute('GET', '/items/{}', 1),
-    detectorRoute('GET', '/items/{*}', 2),
-    detectorRoute('POST', '/items', 3),
-  ];
-
-  it('chooses the first registered full match, including literal-first only when registration says so', () => {
-    expect(matchExchange(table, 'GET', '/items/actions')).toEqual({
-      route: expect.objectContaining({ normalizedPath: '/items/actions' }),
-    });
-  });
-  it('uses a registered parameter route before a later literal route when the router does so', () => {
-    const parameterFirst = [
-      detectorRoute('GET', '/items/{}', 0),
-      detectorRoute('GET', '/items/actions', 1),
-    ];
-    expect(matchExchange(parameterFirst, 'GET', '/items/actions')).toEqual({
-      route: expect.objectContaining({ normalizedPath: '/items/{}' }),
-    });
-  });
-
-  it('accepts trailing-slash variants and ignores query strings', () => {
-    expect(matchExchange(table, 'GET', '/items/actions/?page=2')).toEqual({
-      route: expect.objectContaining({ normalizedPath: '/items/actions' }),
-    });
-  });
-
-  it('returns unmatched for a method mismatch', () => {
-    expect(matchExchange(table, 'DELETE', '/items/actions')).toEqual({ unmatched: true });
-  });
-
-  it('fails closed as ambiguous when equal matches have no proven registration order', () => {
-    const unordered = [
-      detectorRoute('GET', '/items/{}', 0),
-      detectorRoute('GET', '/items/{*}', 1),
-    ].map(({ registration: _registration, ...route }) => route);
-
-    expect(matchExchange(unordered, 'GET', '/items/actions')).toEqual({
-      ambiguous: expect.arrayContaining([
-        expect.objectContaining({ normalizedPath: '/items/{}' }),
-        expect.objectContaining({ normalizedPath: '/items/{*}' }),
-      ]),
-    });
-  });
-});

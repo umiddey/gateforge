@@ -181,7 +181,7 @@ export type ExchangeMatch =
  * Returns:
  *   ExchangeMatch: the one route, the ambiguous candidate set, or no match.
  */
-export function matchExchangeToRoute(
+export function routeForExchange(
   routes: readonly InventoryRoute[],
   method: string,
   path: string,
@@ -263,7 +263,7 @@ export function suggestFromRunEvidence(input: FromRunSuggestInput): FromRunSugge
   const ambiguous: Array<EvidenceRow & { candidates: string[] }> = [];
   for (const exchange of input.exchanges) {
     const row: EvidenceRow = { ...exchange, testResolved: input.testKeyOf(exchange.testId) };
-    const match = matchExchangeToRoute(input.routes, exchange.method, exchange.path);
+    const match = routeForExchange(input.routes, exchange.method, exchange.path);
     if (match.kind === 'unmatched') {
       unmatched.push(row);
       continue;

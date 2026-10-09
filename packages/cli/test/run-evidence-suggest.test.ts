@@ -8,7 +8,7 @@ import { describe, expect, it } from 'vitest';
 import type { TestCatalog } from '@gate-forge/core';
 import {
   exchangesFromRecords,
-  matchExchangeToRoute,
+  routeForExchange,
   suggestFromRunEvidence,
   testKeyResolver,
   type InventoryRoute,
@@ -40,10 +40,10 @@ function pageRecord(testId: string, apiStatuses: Array<Record<string, unknown>>,
   };
 }
 
-describe('matchExchangeToRoute — router semantics over the endpoint inventory', () => {
+describe('routeForExchange — router semantics over the endpoint inventory', () => {
   it('a literal segment beats a parameter match', () => {
     const routes = [route('tenant.param', 'GET', '/api/items/{}'), route('tenant.literal', 'GET', '/api/items')];
-    expect(matchExchangeToRoute(routes, 'GET', '/api/items')).toEqual({
+    expect(routeForExchange(routes, 'GET', '/api/items')).toEqual({
       kind: 'matched',
       route: route('tenant.literal', 'GET', '/api/items'),
     });
@@ -51,7 +51,7 @@ describe('matchExchangeToRoute — router semantics over the endpoint inventory'
 
   it('a parameter route matches a concrete path when no literal exists', () => {
     const routes = [route('tenant.param', 'GET', '/api/items/{}')];
-    expect(matchExchangeToRoute(routes, 'GET', '/api/items/42')).toEqual({
+    expect(routeForExchange(routes, 'GET', '/api/items/42')).toEqual({
       kind: 'matched',
       route: route('tenant.param', 'GET', '/api/items/{}'),
     });
@@ -59,7 +59,7 @@ describe('matchExchangeToRoute — router semantics over the endpoint inventory'
 
   it('a trailing wildcard route absorbs remaining segments as a parameter match', () => {
     const routes = [route('tenant.files', 'GET', '/api/files/{*}')];
-    expect(matchExchangeToRoute(routes, 'GET', '/api/files/a/b')).toEqual({
+    expect(routeForExchange(routes, 'GET', '/api/files/a/b')).toEqual({
       kind: 'matched',
       route: route('tenant.files', 'GET', '/api/files/{*}'),
     });
@@ -67,26 +67,26 @@ describe('matchExchangeToRoute — router semantics over the endpoint inventory'
 
   it('the method must match exactly', () => {
     const routes = [route('tenant.items', 'GET', '/api/items')];
-    expect(matchExchangeToRoute(routes, 'POST', '/api/items')).toEqual({ kind: 'unmatched' });
+    expect(routeForExchange(routes, 'POST', '/api/items')).toEqual({ kind: 'unmatched' });
   });
 
   it('more than one equal match is ambiguous and never guessed', () => {
     const slot = route('tenant.slot', 'GET', '/api/x/{}');
     const wildcard = route('tenant.wild', 'GET', '/api/x/{*}');
-    expect(matchExchangeToRoute([slot, wildcard], 'GET', '/api/x/7')).toEqual({
+    expect(routeForExchange([slot, wildcard], 'GET', '/api/x/7')).toEqual({
       kind: 'ambiguous',
       candidates: [slot, wildcard],
     });
     const a = route('tenant.a', 'GET', '/api/same');
     const b = route('tenant.b', 'GET', '/api/same');
-    expect(matchExchangeToRoute([a, b], 'GET', '/api/same')).toEqual({
+    expect(routeForExchange([a, b], 'GET', '/api/same')).toEqual({
       kind: 'ambiguous',
       candidates: [a, b],
     });
   });
 
   it('ANY routes never join', () => {
-    expect(matchExchangeToRoute([route('tenant.any', 'ANY', '/api/items')], 'GET', '/api/items')).toEqual({
+    expect(routeForExchange([route('tenant.any', 'ANY', '/api/items')], 'GET', '/api/items')).toEqual({
       kind: 'unmatched',
     });
   });

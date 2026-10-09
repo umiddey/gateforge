@@ -8,10 +8,8 @@
  * function so identical inputs produce byte-identical outputs.
  */
 export {
-  matchExchange,
   mergeRouteSources,
   routeTableFromOpenApi,
-  type ExchangeMatch,
   type MergedRouteSources,
   type OpenApiRoute,
   type RouteSourceMismatch,

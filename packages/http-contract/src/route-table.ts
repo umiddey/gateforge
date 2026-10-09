@@ -1,5 +1,4 @@
 import { HTTP_METHODS, type HttpContractFact, type HttpMethod } from './schema.js';
-import { routeMatchKind } from './join.js';
 import { normalizeHttpPath } from './normalize.js';
 
 const OPENAPI_METHODS = new Set<string>(HTTP_METHODS.filter((method) => method !== 'ANY'));
@@ -158,77 +157,6 @@ export function mergeRouteSources(
   return { table, findings };
 }
 
-export type ExchangeMatch =
-  | { readonly route: RouteTableEntry }
-  | { readonly ambiguous: RouteTableEntry[] }
-  | { readonly unmatched: true };
-
-/** Resolve one concrete request using positional route matching and known registration order. */
-export function matchExchange(
-  table: readonly (RouteTableEntry | HttpContractFact)[],
-  method: string,
-  concretePath: string,
-): ExchangeMatch {
-  const upperMethod = method.toUpperCase();
-  if (!OPENAPI_METHODS.has(upperMethod)) return { unmatched: true };
-  const pathname = concretePath.split(/[?#]/, 1)[0] ?? '';
-  const matches: RouteTableEntry[] = [];
-  const seen = new Set<string>();
-  for (const candidate of table) {
-    if (candidate.method !== upperMethod) continue;
-    const routeFact = isRouteTableEntry(candidate)
-      ? candidate.detectorFact ?? {
-        schemaVersion: 1 as const,
-        role: 'server-route' as const,
-        method: candidate.method,
-        normalizedPath: candidate.normalizedPath,
-        rawPath: candidate.path,
-        framework: 'openapi',
-        source: { file: '<openapi>', line: 0, col: 0 },
-      }
-      : candidate;
-    const callFact: HttpContractFact = {
-      schemaVersion: 1,
-      role: 'frontend-call',
-      method: upperMethod as HttpMethod,
-      normalizedPath: pathname,
-      rawPath: pathname,
-      framework: 'runtime',
-      source: { file: '<runtime>', line: 0, col: 0 },
-    };
-    if (routeMatchKind(routeFact, callFact) === null) continue;
-    const identity = routeKey(candidate.method, candidate.normalizedPath);
-    if (seen.has(identity)) continue;
-    seen.add(identity);
-    matches.push(isRouteTableEntry(candidate) ? candidate : {
-      method: candidate.method,
-      path: candidate.rawPath,
-      normalizedPath: candidate.normalizedPath,
-      routeSources: ['detectors'],
-      ...(candidate.registration === undefined ? {} : { registration: candidate.registration }),
-      detectorFact: candidate,
-    });
-  }
-  if (matches.length === 0) return { unmatched: true };
-  if (matches.length === 1) return { route: matches[0] as RouteTableEntry };
-
-  const registrations = matches.map((route) => route.registration);
-  if (registrations.some((registration) => registration === undefined)) {
-    return { ambiguous: matches };
-  }
-  const scopes = new Set(registrations.map((registration) => registration?.scope));
-  if (scopes.size !== 1) return { ambiguous: matches };
-  const ordered = [...matches].sort((left, right) => (left.registration?.order ?? 0) - (right.registration?.order ?? 0));
-  for (let index = 1; index < ordered.length; index += 1) {
-    if (ordered[index]?.registration?.order === ordered[index - 1]?.registration?.order) {
-      return { ambiguous: matches };
-    }
-  }
-  return { route: ordered[0] as RouteTableEntry };
-}
-
-
-
 function routeKey(method: string, normalizedPath: string): string {
   return `${method} ${normalizedPath}`;
 }
@@ -244,8 +172,4 @@ function mismatch(
   presentIn: 'detectors' | 'openapi',
 ): RouteSourceMismatch {
   return { code: 'ROUTE_SOURCE_MISMATCH', reportOnly: true, method, path, presentIn };
-}
-
-function isRouteTableEntry(candidate: RouteTableEntry | HttpContractFact): candidate is RouteTableEntry {
-  return 'routeSources' in candidate;
 }
