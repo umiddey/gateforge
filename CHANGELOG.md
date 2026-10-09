@@ -41,6 +41,10 @@
   <unmatched> unmatched, <ambiguous> ambiguous`, and the json report gains
   the same numbers under `httpCoverage`. Additive: a report that does not
   carry it keeps exactly the bytes it always had.
+- `gateforge next` names the caller. When the top item is a used route's
+  `http:request-observed` / `http:response-status-ok`, the `why` line now
+  ends with the witnessing test ids and the static call sites that make
+  the route real, so the single next action says WHO depends on it.
 
 ## 0.13.10
 

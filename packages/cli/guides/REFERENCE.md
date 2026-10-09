@@ -1439,6 +1439,14 @@ counts used routes whose BOTH transport obligations are `satisfied` (a
 waived or baselined obligation is a recorded forgiveness, never proof),
 and `missing` is `used` minus `proven`.
 
+`gateforge next` names the caller of a used-but-unproven route: when the
+top item is one of its two transport contracts, the `why` line ends with
+`— this route is used by <testId | file:line:col>, …`, where the names
+are the witnessing tests whose exchange matched it (a page-sweep session
+prints as `page-sweep`) and the static call sites joined onto it. A
+non-HTTP obligation never gets an HTTP caller, and a proven route never
+names one.
+
 ## Pages
 
 Each detected frontend route creates two page promises: `page:loads` and

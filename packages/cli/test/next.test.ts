@@ -452,7 +452,15 @@ describe('gateforge next: behavior ranking (plan §5)', () => {
         verdicts: Array<Record<string, unknown>>;
         blocking: Array<Record<string, unknown>>;
       };
-      expect(Object.keys(report).filter((key) => key !== 'engine').sort()).toEqual([
+      // 0.14 WP3 adds `httpCoverage` (the served/used/proven summary) as
+      // an ADDITIVE report key; it is excluded from the contract list
+      // below and asserted in its own test, so the pinned contract of
+      // every earlier key is unchanged.
+      expect(
+        Object.keys(report)
+          .filter((key) => key !== 'engine' && key !== 'httpCoverage')
+          .sort(),
+      ).toEqual([
         'blocking',
         'cache',
         'diagnosticContext',

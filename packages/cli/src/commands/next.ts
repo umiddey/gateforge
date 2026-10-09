@@ -15,6 +15,7 @@ import {
   BLOCKING_VERDICTS,
   CAUSE_NEXT_ACTIONS,
   BEHAVIOR_CASE_DOMAIN,
+  compareStrings,
   HTTP_ENDPOINT_RESOURCE_KIND,
   OWNER_ANSWERS_PATH,
   PolicyFileSchema,
@@ -25,6 +26,7 @@ import {
   type ClassificationDecision,
   type ChangedProvider,
   type Claim,
+  type HttpMissingRoute,
   type ObligationVerdict,
   type ResourceGraph,
 } from '@gate-forge/core';
@@ -188,6 +190,15 @@ function routeFocus(focused: ReadonlySet<string>, id: string): number {
 }
 
 /**
+ * The two transport contracts a used HTTP route owes (plan §4.3 R1).
+ * Only an obligation naming one of them has an HTTP caller to name.
+ */
+const TRANSPORT_CONTRACTS: Record<string, true> = {
+  'http:request-observed': true,
+  'http:response-status-ok': true,
+};
+
+/**
  * Ranks a cause per the plan §2 table: capability gaps first, mapping
  * intent last, everything else blocking after that.
  */
@@ -274,6 +285,8 @@ function rankCause(cause: CauseCode | null | undefined, kind: string): number {
  *   blocking: the run's blocking entries.
  *   verdicts: the run's obligation verdicts.
  *   focused: endpoint identities with real business weight.
+ *   usedButUnproven: the run's used-but-unproven routes with their
+ *     callers (the witnessing test ids and the static call sites).
  *
  * Returns:
  *   NextCandidate[]: ranked candidates.
@@ -282,7 +295,23 @@ function rankBlockers(
   blocking: readonly BlockingEntry[],
   verdicts: readonly ObligationVerdict[],
   focused: ReadonlySet<string>,
+  usedButUnproven: readonly HttpMissingRoute[],
 ): NextCandidate[] {
+  const callers = new Map(usedButUnproven.map((route) => [route.resourceId, route]));
+  /**
+   * The caller sentence appended to an unproven route's `why`: the
+   * witnessing tests and the static call sites that make the route real.
+   * Only the two transport contracts of a used route carry it — a table
+   * obligation's caller is not an HTTP call site.
+   */
+  const callerNote = (obligationId: string): string => {
+    const separator = obligationId.indexOf(':');
+    if (TRANSPORT_CONTRACTS[obligationId.slice(separator + 1)] !== true) return '';
+    const route = callers.get(obligationId.slice(0, separator));
+    if (route === undefined) return '';
+    const names = [...route.ledgerCallers, ...route.callSites].sort(compareStrings);
+    return names.length === 0 ? '' : ` — this route is used by ${names.join(', ')}`;
+  };
   const candidates: NextCandidate[] = [];
   for (const entry of blocking) {
     const cause = entry.cause ?? null;
@@ -308,7 +337,9 @@ function rankBlockers(
     candidates.push({
       id: verdict.obligation.id,
       cause: cause ?? 'EVIDENCE_NOT_COLLECTED',
-      why: verdict.reason ?? `obligation '${verdict.obligation.id}' is ${verdict.verdict}`,
+      why:
+        (verdict.reason ?? `obligation '${verdict.obligation.id}' is ${verdict.verdict}`) +
+        callerNote(verdict.obligation.id),
       do:
         verdict.nextAction ??
         (cause !== null ? CAUSE_NEXT_ACTIONS[cause] : CAUSE_NEXT_ACTIONS['EVIDENCE_NOT_COLLECTED']),
@@ -1252,6 +1283,7 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
     [...evaluated.blocking, ...ruleBlocking],
     evaluated.verdicts,
     focusedRouteKeys(pipeline.graph),
+    evaluated.httpCoverage.missingRoutes,
   );
   // Unmatched by-id routes the owner graded as advisory (0.9.0, owner
   // decision D7): printed near the top whether or not anything blocks,
