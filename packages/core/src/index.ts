@@ -563,7 +563,7 @@ export type { FingerprintInput, ObligationFingerprintSource } from './fingerprin
  * optional coverage policy. Unknown keys and unknown schemaVersion are
  * rejected.
  */
-export { GateforgeConfigSchema, ConfigPluginSchema, EnforcementConfigSchema, AlembicConfigSchema } from './config/index.js';
+export { GateforgeConfigSchema, ConfigPluginSchema, EnforcementConfigSchema, AlembicConfigSchema, HttpConfigSchema } from './config/index.js';
 /** Inferred `.gateforge.yml` type. */
 export type { GateforgeConfig, AlembicConfig } from './config/index.js';
 /** Inferred config-plugin-entry type. */

@@ -8,6 +8,17 @@
  * function so identical inputs produce byte-identical outputs.
  */
 export {
+  matchExchange,
+  mergeRouteSources,
+  routeTableFromOpenApi,
+  type ExchangeMatch,
+  type MergedRouteSources,
+  type OpenApiRoute,
+  type RouteSourceMismatch,
+  type RouteSourceMode,
+  type RouteTableEntry,
+} from './route-table.js';
+export {
   FASTAPI_PREFIX_UNRESOLVED,
   FRONTEND_CALL_TARGET_UNRESOLVED,
   FRONTEND_ROUTE_AMBIGUOUS,

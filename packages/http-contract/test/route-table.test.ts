@@ -61,8 +61,10 @@ describe('route table sources', () => {
       expect.objectContaining({ method: 'POST', path: '/openapi-only' }),
     ]));
     expect(result.findings).toEqual(expect.arrayContaining([
-      expect.objectContaining({ code: 'ROUTE_SOURCE_MISMATCH', reportOnly: true }),
+      expect.objectContaining({ code: 'ROUTE_SOURCE_MISMATCH', reportOnly: true, presentIn: 'detectors' }),
+      expect.objectContaining({ code: 'ROUTE_SOURCE_MISMATCH', reportOnly: true, presentIn: 'openapi' }),
     ]));
+    expect(result.findings).toHaveLength(2);
   });
 
   it('uses detector registration order, not OpenAPI path insertion order, for first-match dispatch', () => {
@@ -89,6 +91,15 @@ describe('HTTP exchange route matching', () => {
   it('chooses the first registered full match, including literal-first only when registration says so', () => {
     expect(matchExchange(table, 'GET', '/items/actions')).toEqual({
       route: expect.objectContaining({ normalizedPath: '/items/actions' }),
+    });
+  });
+  it('uses a registered parameter route before a later literal route when the router does so', () => {
+    const parameterFirst = [
+      detectorRoute('GET', '/items/{}', 0),
+      detectorRoute('GET', '/items/actions', 1),
+    ];
+    expect(matchExchange(parameterFirst, 'GET', '/items/actions')).toEqual({
+      route: expect.objectContaining({ normalizedPath: '/items/{}' }),
     });
   });
 

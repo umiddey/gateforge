@@ -56,6 +56,13 @@ describe('parseConfig (pin #6)', () => {
     expect(config.plugins).toHaveLength(2);
     expect(config.clock.mode).toBe('system');
   });
+  it('defaults HTTP route-source selection to both and rejects unknown sources', () => {
+    expect(parseConfig(validConfig).http.routeSource).toBe('both');
+    for (const routeSource of ['openapi', 'detectors', 'both']) {
+      expect(parseConfig({ ...validConfig, http: { routeSource } }).http.routeSource).toBe(routeSource);
+    }
+    expect(() => parseConfig({ ...validConfig, http: { routeSource: 'guess' } })).toThrow(GateforgeConfigError);
+  });
   it('validates pages router, audiences, error markers and sweep settings', () => {
     const pages = parseConfig({
       ...validConfig,

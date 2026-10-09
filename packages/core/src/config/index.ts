@@ -17,6 +17,13 @@ import { z } from 'zod';
 import { StrictnessModeSchema } from '../strictness.js';
 import { bindQueueObserver } from '../verdict/pack-verifiers.js';
 
+/** HTTP route-source selection; both sources are unioned by default. */
+export const HttpConfigSchema = z
+  .object({
+    routeSource: z.enum(['openapi', 'detectors', 'both']).default('both'),
+  })
+  .strict();
+
 /**
  * A plugin entry in `.gateforge.yml`. Unlike a run-manifest plugin
  * registration, a config entry also declares HOW to launch the plugin:
@@ -486,6 +493,8 @@ export const GateforgeConfigSchema = z
     plugins: z.array(ConfigPluginSchema),
     /** Path to the policies YAML document. */
     policies: z.string().min(1),
+    /** Served-route inventory source; absent settings use both sources. */
+    http: HttpConfigSchema.default({ routeSource: 'both' }),
     /**
      * Path to the classification-policy YAML document (plan phase 5,
      * ADR 0003 D5): repository-wide deterministic classification rules.
