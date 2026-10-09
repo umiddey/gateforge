@@ -1337,6 +1337,49 @@ Enforcement-relevant sections:
   changing the list moves the approved revision. See "Developer and CI
   tooling is owner-declared" above.
 
+### The exchange ledger (`http.exchanges`, `httpLedger`)
+
+Every witnessed test session now leaves its HTTP exchanges as evidence,
+not only the sessions that carry claims. When a session that PASSED
+closes (and when a page sweep completes), the witness issues ONE
+claim-free record of kind `http.exchanges` carrying the same transport
+snapshot the per-claim `http.observed` records carry: the deduplicated,
+capped exchange list (method, url, status), its watermark, and
+`truncated` when the cap cut the list. A session whose test did not
+pass drops its record, and a session that proxied nothing issues none.
+The kind can never satisfy an obligation — it is not selectable by any
+obligation, and it only reaches the report.
+
+At verdict time the report JSON carries `httpLedger` for a run that
+witnessed at least one such record:
+
+```json
+{
+  "httpLedger": {
+    "rows": [
+      {
+        "testId": "tests/checkout#apples",
+        "method": "GET",
+        "path": "/items/apples",
+        "status": 200,
+        "route": "http.endpoint:GET /items/{}",
+        "resolution": "match"
+      }
+    ],
+    "summary": { "exchanges": 1, "matched": 1, "unmatched": 0, "ambiguous": 0, "incomplete": 0 }
+  }
+}
+```
+
+One row per witnessed exchange, sorted by test id, method, path, and
+status. `path` is the query-stripped observed path; `route` is the
+resource id the ONE route matcher attributed it to, or `null`.
+`resolution` is that matcher's answer — `match`, `nomatch`,
+`ambiguous` (with the equal candidates in `candidates`), or
+`incomplete` (an inventory entry cannot be attributed). The ledger is
+report-only: it changes no verdict and no exit code, and the key is
+absent from runs that witnessed no session exchanges.
+
 ## Pages
 
 Each detected frontend route creates two page promises: `page:loads` and

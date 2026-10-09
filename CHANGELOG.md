@@ -9,6 +9,19 @@
 - Resolve concrete HTTP exchanges using existing positional route matching
   and proven detector registration order. Unknown precedence stays
   ambiguous; OpenAPI path order never substitutes for registration order.
+- Keep ONE route resolver. Route attribution now lives in a single
+  obligation-free matcher that both obligation grading and the exchange
+  ledger call; the second matcher the route table shipped with is gone.
+- Every witnessed session's HTTP exchanges become evidence. Closing a
+  session that passed (or completing a page sweep) issues one claim-free
+  `http.exchanges` record carrying that session's transport snapshot, so
+  calls made by tests without claims are no longer invisible. The kind
+  can never satisfy an obligation.
+- Report every exchange's route. A run's report JSON gains `httpLedger`:
+  one row per witnessed exchange (`testId`, method, query-stripped path,
+  status, attributed route, and the matcher's `match`/`nomatch`/
+  `ambiguous`/`incomplete` answer) with a resolution summary. Report-only
+  — no verdict and no exit code changes.
 
 ## 0.13.10
 
