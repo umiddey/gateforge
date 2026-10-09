@@ -22,6 +22,25 @@
   status, attributed route, and the matcher's `match`/`nomatch`/
   `ambiguous`/`incomplete` answer) with a resolution summary. Report-only
   — no verdict and no exit code changes.
+- Ask the ledger for answers. The rules R1-R5 of the plan now run at
+  verdict time: a route a witnessed exchange matched OR the static join
+  consumed is USED, and every used-but-unproven route is counted with its
+  callers. A witnessed call that matches no route reports
+  `HTTP_CALL_UNMATCHED` with the test that made it; one that matches
+  several routes equally reports `HTTP_CALL_AMBIGUOUS`; a static call
+  site the join could not resolve reports `HTTP_CALL_UNRESOLVED` with its
+  `file:line`. Served-but-never-used stays a count, never a finding.
+- The channel is the owner's: `http.callFindings: report | block`
+  (default `report`). Report mode prints and serializes every call finding
+  on the existing advisory channel and leaves the exit code alone; block
+  mode puts them on the run's blocking set exactly like any other
+  blocking finding. Blocking by default would refuse every consumer whose
+  existing hits the adoption migration has not recorded yet.
+- One summary line, everywhere. The human report prints
+  `HTTP: <served> served, <used> used, <proven> proven, <missing> missing,
+  <unmatched> unmatched, <ambiguous> ambiguous`, and the json report gains
+  the same numbers under `httpCoverage`. Additive: a report that does not
+  carry it keeps exactly the bytes it always had.
 
 ## 0.13.10
 
