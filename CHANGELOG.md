@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.15.0 (unreleased)
+
+- Witnessed Playwright runs automatically use the existing Gateforge fixture
+  for consumer `@playwright/test` imports, including CommonJS, ESM, TypeScript,
+  project extensions and root `test.test` calls, without editing specs.
+  Direct API calls remain diagnostics, never browser evidence. Execution results
+  and report execution summaries include `measuredTests` (tests with witness
+  sessions) and `executedTests`; ordinary unwitnessed runs stay unchanged.
+
 ## 0.14.0
 
 Theme: In the witnessed run, Gateforge checks the API calls your UI actually

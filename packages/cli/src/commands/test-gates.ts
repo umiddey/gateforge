@@ -166,6 +166,7 @@ import {
   ENV_TWIN_INVENTORY,
   ENV_TWIN_QUERY_KEYS,
   ENV_TWIN_SHAPES,
+  autoSessionNodeOptions,
   type FreezeSigningKeyPair,
   type SpoolDrainHandle,
   type ExpectedSetResponse,
@@ -878,6 +879,7 @@ async function legacyTestGates(io: Io, options: LegacyOptions): Promise<number> 
           [VERIFIER_KEY_ENV]: undefined,
           [VERIFIER_KEY_FILE_ENV]: undefined,
           ...suiteEnv,
+          ...(witnessUrl === undefined ? {} : { NODE_OPTIONS: autoSessionNodeOptions(suiteEnv['NODE_OPTIONS'] ?? io.env['NODE_OPTIONS']) }),
         },
       });
       suiteFailed = suiteStatus !== 0;
@@ -6707,6 +6709,8 @@ function runExecutionSummaryOf(input: {
     scope: input.scope,
     mode: input.mode,
     testsPerformedThisInvocation: input.mode === 'executed' ? performed : 0,
+    executedTests: input.executionResult.executedTests ?? performed,
+    measuredTests: input.executionResult.measuredTests ?? input.executionResult.sessionTrace?.filter((test) => test.sessions.length > 0).length ?? 0,
     selectedTests: {
       selected,
       passed,

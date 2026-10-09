@@ -1,0 +1,92 @@
+import { createServer } from 'node:http';
+import { spawn } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
+import type { AddressInfo } from 'node:net';
+import { join } from 'node:path';
+import { describe, expect, it } from 'vitest';
+import { withTempRepo } from '@gate-forge/core';
+import { endpointResourceName } from '@gate-forge/http-contract';
+import { trustedPolicyDigestForConfig } from '../src/execution.js';
+import { loadConfigAt } from '../src/commands/common.js';
+import { cleanupWitnessedFixture, installStrictFixture, operatorEnvironment, ROOT, FINGERPRINT, GATEFORGE_YML } from './witnessed-run-fixture.js';
+
+const cases = [
+  ['plain.spec.ts', "import { test, expect } from '@playwright/test';", 'test'],
+  ['commonjs.spec.cjs', "const { test, expect } = require('@playwright/test');", 'test'],
+  ['esm.spec.mjs', "import { test, expect } from '@playwright/test';", 'test'],
+  ['module.spec.mts', "import { test, expect } from '@playwright/test';", 'test'],
+  ['extended.spec.ts', "import { test as base, expect } from '@playwright/test';\nconst test = base.extend({ own: async ({}, use) => { await use(7); } });\ntest.beforeEach(async ({ page }) => { await page.goto('/'); });", 'test'],
+  ['root.spec.ts', "import { test as base, expect } from '@playwright/test';\nconst test = base;", 'base.test'],
+  ['explicit.spec.ts', "import { test, expect } from '@gate-forge/pack-playwright/fixture';", 'test'],
+] as const;
+
+describe('automatic witnessed Playwright sessions', () => {
+  it('attributes every unchanged import shape, preserves extension hooks and direct API boundaries', async () => {
+    const app = createServer((req, res) => {
+      res.setHeader('x-gateforge-env-fingerprint', FINGERPRINT);
+      if (req.url === '/') {
+        res.setHeader('content-type', 'text/html');
+        res.end('<button>Load</button><div id="result"></div><script>document.querySelector("button").onclick=async()=>{await fetch("/api/items");document.querySelector("#result").textContent="Loaded"}</script>');
+      } else { res.setHeader('content-type', 'application/json'); res.end('{}'); }
+    });
+    await new Promise<void>((resolve) => app.listen(0, '127.0.0.1', resolve));
+    const url = `http://127.0.0.1:${(app.address() as AddressInfo).port}`;
+    try {
+      await withTempRepo({}, async (repo) => {
+        installStrictFixture(repo, {});
+        const specs: Record<string, string> = {};
+        for (const [file, imports, call] of cases) {
+          specs[`specs/${file}`] = `${imports}\n${call}('${file}', async ({ page }) => {\n${file === 'root.spec.ts' ? "const api = await test.request.newContext(); await api.get('/api/direct'); await api.dispose();" : ''}\nawait page.goto('/'); await page.getByRole('button', { name: 'Load' }).click(); await expect(page.getByText('Loaded')).toBeVisible();\n});\n`;
+        }
+        specs['specs/direct.spec.ts'] = "import { test, request, expect } from '@playwright/test';\ntest('direct only', async () => { const api = await request.newContext(); expect((await api.get('/api/direct')).status()).toBe(200); await api.dispose(); });\n";
+        repo.writeFiles({
+          ...specs,
+          '.gateforge.yml': `${GATEFORGE_YML.replace('adapters: .gateforge/adapters', 'adapters: .gateforge/adapters-api')}runtime: .gateforge/runtime.yml\n`,
+          '.gateforge/adapters-api/.gitkeep': '',
+          '.gateforge/runtime.yml': 'schemaVersion: 1\nenvAllowlist: [TEST_SERVICE_URL]\n',
+          '.gateforge/fixture-detector.mjs': "import { endpointResourceName } from '@gate-forge/http-contract';\nexport default { async discover() { const resourceName = endpointResourceName('GET', '/api/items'); return { resources: [{ schemaVersion: 1, id: 'items', kind: 'http.endpoint', source: 'src/accounts.js', location: { file: 'src/accounts.js', line: 1, col: 0 }, detectorVersion: '1.0.0', attributes: { resourceName, method: 'GET', canonicalPath: '/api/items', identity: 'GET /api/items' } }], unresolved: [], findings: [], classificationSignals: ['plane', 'identity'].map(dimension => ({ schemaVersion: 1, target: { resourceName }, dimension, assertion: dimension === 'plane' ? 'tenant' : ['GET', '/api/items'], basis: 'declaration', source: 'gateforge.fixture', location: { file: 'src/accounts.js', line: 1, col: 0 }, detector: { id: 'gateforge.fixture', version: '1.0.0' } })) }; } };\n",
+          '.gateforge/policies.yml': 'schemaVersion: 1\npolicies:\n  - id: observed\n    when: { kind: http.endpoint }\n    require: [http:request-observed, http:response-status-ok]\n',
+          'playwright.config.mjs': "export default { testDir: 'specs', workers: 1, retries: 0, projects: [{ name: 'chromium', use: { browserName: 'chromium' } }], use: { headless: true, baseURL: process.env.TEST_SERVICE_URL } };\n",
+          '.gateforge/test-map.yml': 'schemaVersion: 1\ntests:\n' + cases.map(([file]) => `  - key: playwright:chromium:specs/${file}:${file}\n    selector: { runner: playwright, project: chromium, file: specs/${file}, titlePath: ['${file}'] }\n    kind: observed-e2e\n    claims: ['tenant.${endpointResourceName('GET', '/api/items')}:http:request-observed', 'tenant.${endpointResourceName('GET', '/api/items')}:http:response-status-ok']\n    reason: Browser action loads items.\n`).join(''),
+        });
+        repo.git(['add', '-A']);
+        repo.git(['commit', '--no-gpg-sign', '--quiet', '-m', 'neutral automatic session fixture']);
+        repo.writeFiles({ 'src/accounts.js': '// changed endpoint source\n' });
+        repo.git(['add', 'src/accounts.js']);
+        const { env } = operatorEnvironment();
+        const child = spawn(process.execPath, [join(ROOT, 'packages/cli/bin/gateforge.js'), 'test-gates', '--changed', '--format', 'json'], {
+          cwd: repo.root,
+          env: { ...process.env, ...env, TEST_SERVICE_URL: url, GATEFORGE_APP_BASE_URL: url, GATEFORGE_TARGET_BASE_URL: url, GATEFORGE_TARGET_FINGERPRINT: FINGERPRINT, GATEFORGE_APPROVED_POLICY_DIGEST: trustedPolicyDigestForConfig(repo.root, loadConfigAt(repo.root)) },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        let stdout = ''; let stderr = '';
+        child.stdout.on('data', chunk => { stdout += String(chunk); });
+        child.stderr.on('data', chunk => { stderr += String(chunk); });
+        await new Promise<void>((resolve, reject) => { child.once('error', reject); child.once('close', () => resolve()); });
+        const report = JSON.parse(stdout);
+        expect(existsSync(repo.path('.gateforge/test-gates/records.json')), `${stdout}\n${stderr}`).toBe(true);
+        const records = JSON.parse(readFileSync(repo.path('.gateforge/test-gates/records.json'), 'utf8')) as Array<{ kind: string; testId?: string; payload?: { channel?: string; exchanges?: Array<{ url: string }> } }>;
+        const result = JSON.parse(readFileSync(repo.path('.gateforge/test-gates/execution-result.json'), 'utf8'));
+        const evidence = `${stdout}\n${stderr}`;
+        expect.soft(result.outcomes, evidence).toHaveLength(cases.length + 1);
+        expect.soft(result.outcomes.every((row: { status: string }) => row.status === 'passed'), evidence).toBe(true);
+        for (const [file] of cases) {
+          const outcome = result.outcomes.find((row: { titlePath: string[] }) => row.titlePath.includes(file));
+          expect.soft(outcome?.status, evidence).toBe('passed');
+          const observed = records.filter(row => row.kind === 'http.observed' && row.testId === outcome?.runnerTestId && row.payload?.channel !== 'direct');
+          expect.soft(observed.flatMap(row => row.payload?.exchanges ?? []).some(exchange => exchange.url.endsWith('/api/items')), file + evidence).toBe(true);
+          expect.soft(result.sessionTrace.find((row: { titlePath: string[] }) => row.titlePath.includes(file))?.sessions.length, file + evidence).toBe(1);
+        }
+        expect.soft(records.filter(row => row.kind === 'http.observed' && row.payload?.channel !== 'direct').flatMap(row => row.payload?.exchanges ?? []).some(exchange => exchange.url.endsWith('/api/direct')), evidence).toBe(false);
+        expect.soft(records.filter(row => row.kind === 'http.observed' && row.testId && row.payload?.channel === 'direct').flatMap(row => row.payload?.exchanges ?? []).some(exchange => exchange.url.endsWith('/api/direct')), evidence).toBe(true);
+        expect.soft(result.measuredTests, evidence).toBe(cases.length + 1);
+        expect.soft(result.executedTests, evidence).toBe(cases.length + 1);
+        expect.soft(report.execution.measuredTests, evidence).toBe(cases.length + 1);
+        expect.soft(report.execution.executedTests, evidence).toBe(cases.length + 1);
+      });
+    } finally {
+      await new Promise<void>((resolve, reject) => app.close(error => error ? reject(error) : resolve()));
+      cleanupWitnessedFixture();
+    }
+  }, 240_000);
+});

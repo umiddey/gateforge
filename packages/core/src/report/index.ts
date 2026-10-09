@@ -99,6 +99,8 @@ export interface RunExecutionSummary {
   scope: 'full' | 'changed' | 'named';
   mode: 'executed' | 'reused';
   testsPerformedThisInvocation: number;
+  executedTests?: number;
+  measuredTests?: number;
   selectedTests: { selected: number; passed: number; failed: number; skipped: number; expectedFailures: number };
   selectedClaims: { selected: number; satisfied: number; blocking: number; blockingEntries: number; waived: number };
   /**
@@ -817,6 +819,9 @@ function textReport(
         `(selected ${execution.selectedTests.selected}; ${execution.selectedTests.skipped} skipped; ` +
         `${execution.selectedTests.expectedFailures} expected failures)`,
     );
+    if (execution.measuredTests !== undefined && execution.executedTests !== undefined) {
+      lines.push(`measurement: ${execution.measuredTests} test(s) with witness sessions; ${execution.executedTests} executed`);
+    }
     // A local run has no progress stream (it is OFF unless CI or a flag
     // asks for it), so without these lines a red run states a count and
     // never a reason. At most three are named inline — enough to see

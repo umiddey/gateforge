@@ -1106,6 +1106,8 @@ export function sealExecutionResult(input: SealExecutionResultInput): SealedExec
     ...(input.claimInventory !== undefined ? { claimInventory: input.claimInventory } : {}),
     planned: input.plannedRows.map((row) => row.planned),
     outcomes: executed,
+    executedTests: new Set(executed.filter((outcome) => outcome.status !== 'skipped' && outcome.status !== 'fixme').map((outcome) => JSON.stringify([outcome.project, outcome.file, outcome.titlePath]))).size,
+    measuredTests: input.sessionTrace?.filter((test) => test.sessions.length > 0).length ?? 0,
     ...(input.enumerationDigest !== undefined ? { enumerationDigest: input.enumerationDigest } : {}),
     ...(input.sessionTrace !== undefined && input.sessionTrace !== null
       ? { sessionTrace: input.sessionTrace }
