@@ -20,3 +20,8 @@ export function canonicalOf(value: unknown): string {
 
 /** JSON-representable check for wire payloads before hashing. */
 export { isJsonValue };
+
+/** A JSON object (not an array, not null): narrows to a record whose fields stay `unknown`. */
+export function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}

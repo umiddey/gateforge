@@ -278,6 +278,15 @@ import {
   type RunOptions,
 } from './run-options.js';
 import { fetchOpenApiAtBind, openApiRecordPayload, type OpenApiAtBind } from './openapi-at-bind.js';
+import {
+  RESPONSE_BODY_CAP_BYTES,
+  buildResponseShapeIndex,
+  judgeResponseShape,
+  planResponseShape,
+  shapeRank,
+  type ResponseShape,
+  type ResponseShapeIndex,
+} from './response-shape.js';
 import type { FixtureLease } from './fixture-provider.js';
 import { validateScopeSnapshot } from './behavior.js';
 import { BEHAVIOR_BODY_LIMIT_BYTES, BehaviorDriverError, driveBehaviorRequest } from './behavior-request.js';
@@ -378,6 +387,8 @@ interface ObservedExchange {
   seq: number;
   /** sha256 hex of the bounded response-body snapshot. */
   bodySha256: string;
+  /** Response-shape verdict; present only when the run asked for shapes and this exchange had a plan. */
+  shape?: ResponseShape;
   /** TOTAL response body bytes observed (may exceed the snapshot). */
   bodyBytes: number;
   /**
@@ -662,6 +673,8 @@ interface WitnessState {
   responseShape: ResponseShapeOptions | null;
   /** The bind-time OpenAPI fetch result, or null until a response-shape plan binds. */
   openApi: OpenApiAtBind | null;
+  /** The per-route response index built from the bound document, or null when none was fetched. */
+  shapeIndex: ResponseShapeIndex | null;
   /**
    * The expected test set the supervisor registered BEFORE the run
    * (enforcement-review fix 2a), keyed by the identity join key
@@ -1138,6 +1151,15 @@ async function startObservedProxy(
         const collectionSnapshot: Buffer[] = [];
         let collectionBytes = 0;
         let totalBytes = 0;
+        // Response-shape plan (0.14 WP4): decided from the route, status and
+        // content type held before any byte is copied. Null when this run
+        // asked for no shapes; an exchange with no plan carries no verdict.
+        const shapePlan =
+          state.responseShape === null
+            ? null
+            : planResponseShape(state.shapeIndex, method, observedPath, status, upstream.headers['content-type']);
+        const shapeBody: Buffer[] = [];
+        let shapeBytes = 0;
         upstream.on('data', (chunk: Buffer) => {
           totalBytes += chunk.length;
           if (snapshotBytes < OBSERVED_BODY_SNAPSHOT_BYTES) {
@@ -1151,6 +1173,12 @@ async function startObservedProxy(
             const taken = chunk.length > room ? chunk.subarray(0, room) : chunk;
             collectionSnapshot.push(Buffer.from(taken));
             collectionBytes += taken.length;
+          }
+          if (shapePlan !== null && shapePlan.kind === 'validate' && shapeBytes < RESPONSE_BODY_CAP_BYTES) {
+            const room = RESPONSE_BODY_CAP_BYTES - shapeBytes;
+            const taken = chunk.length > room ? chunk.subarray(0, room) : chunk;
+            shapeBody.push(Buffer.from(taken));
+            shapeBytes += taken.length;
           }
         });
         upstream.on('end', () => {
@@ -1194,6 +1222,9 @@ async function startObservedProxy(
               : collectionConflict !== null
                 ? { collectionConflict }
                 : {}),
+            ...(shapePlan === null
+              ? {}
+              : { shape: judgeResponseShape(shapePlan, Buffer.concat(shapeBody), totalBytes) }),
           });
           // Response attribution (Observe channel): what the response
           // NAMED, kept even after the exchange is consumed, so a
@@ -1622,6 +1653,7 @@ export async function startWitness(options: WitnessOptions): Promise<WitnessHand
     twinShapes: options.twinShapes === undefined || options.twinShapes === null ? null : options.twinShapes,
     responseShape: null,
     openApi: null,
+    shapeIndex: null,
     expectedTests: new Map(),
     enumerationDigest: null,
     pageObservation: null,
@@ -5748,6 +5780,14 @@ function zeroTrafficCause(state: WitnessState, session: TestSession): string {
   return reported === '' ? FIXTURE_PAGE_CAUSE : reported;
 }
 
+interface TransportExchange {
+  method: string;
+  url: string;
+  status: number;
+  initiator?: 'test-code';
+  shape?: ResponseShape;
+}
+
 /**
  * The exchanges a transport claim for `session` will carry, computed
  * ONCE per finalize, before the claim loop (see
@@ -5762,29 +5802,39 @@ function zeroTrafficCause(state: WitnessState, session: TestSession): string {
  * is a typed `missing-traffic` note at the call site, never a record.
  */
 interface TransportSnapshot {
-  readonly exchanges: ReadonlyArray<{ method: string; url: string; status: number; initiator?: 'test-code' }>;
+  readonly exchanges: ReadonlyArray<TransportExchange>;
   readonly truncated: boolean;
 }
 
 function transportSnapshot(state: WitnessState, session: TestSession): TransportSnapshot {
   const watermark = state.runContext === null ? 0 : state.observedSeqAtBind;
-  const seen: Record<string, true> = Object.create(null) as Record<string, true>;
-  const exchanges: Array<{ method: string; url: string; status: number; initiator?: 'test-code' }> = [];
+  // key -> position in `exchanges`, so a repeat can upgrade its shape in place.
+  const seen = new Map<string, number>();
+  const exchanges: TransportExchange[] = [];
   let truncated = false;
   for (const exchange of state.observed) {
     if (exchange.sessionId !== session.sessionId || exchange.seq <= watermark) continue;
     const key = `${exchange.method} ${exchange.path} ${String(exchange.status)} ${exchange.initiator ?? 'page'}`;
-    if (key in seen) continue;
-    seen[key] = true;
+    const at = seen.get(key);
+    if (at !== undefined) {
+      // A repeat keeps the WORST shape verdict, so a mismatch on any repeat survives the dedup.
+      const kept = exchanges[at];
+      if (kept !== undefined && exchange.shape !== undefined && (kept.shape === undefined || shapeRank(exchange.shape) > shapeRank(kept.shape))) {
+        exchanges[at] = { ...kept, shape: exchange.shape };
+      }
+      continue;
+    }
     if (exchanges.length >= OBSERVED_EXCHANGES_CAP) {
       truncated = true;
       continue;
     }
+    seen.set(key, exchanges.length);
     exchanges.push({
       method: exchange.method,
       url: exchange.path,
       status: exchange.status,
       ...(exchange.initiator === 'test-code' ? { initiator: exchange.initiator } : {}),
+      ...(exchange.shape === undefined ? {} : { shape: exchange.shape }),
     });
   }
   return { exchanges, truncated };
@@ -6740,6 +6790,7 @@ async function handleRunContext(
       boundOptions.responseShape.openapiPath,
       state.options.requestTimeoutMs,
     );
+    state.shapeIndex = state.openApi.status === 'fetched' ? buildResponseShapeIndex(state.openApi.document) : null;
     issueRecord(
       state,
       state.options.runId,
