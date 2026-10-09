@@ -21,6 +21,8 @@
   cause, and stop the child rather than continuing without witnessed fixtures.
 - Shared CLI stub installs include Playwright's public `test` entry alongside
   the CLI, so automatic fixture loading exercises the same install shape.
+- Strict supervised result-contract tests pin both `executedTests` and
+  `measuredTests` in the sealed execution result's exact key set.
 
 ## 0.14.0
 
