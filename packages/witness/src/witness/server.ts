@@ -176,6 +176,7 @@ import {
 import { canonicalOf } from '../json.js';
 import {
   DEFAULT_REQUEST_TIMEOUT_MS,
+  HTTP_EXCHANGES_KIND,
   HTTP_OBSERVED_KIND,
   KNOWN_RECORD_KINDS,
   LOOPBACK_HOSTNAME,
@@ -1358,6 +1359,36 @@ function sealPageObservationRecords(state: WitnessState, sessionId: string, outc
   state.pageObservationRecords.delete(sessionId);
 }
 
+/**
+ * Issues the session's ONE claim-free `http.exchanges` record (0.14
+ * WP2): the same transport snapshot the per-claim `http.observed`
+ * records carry (watermark, dedup, cap, `truncated`), bound to the
+ * SESSION identity instead of an obligation so no claim can ever select
+ * it. Only a session that sealed as PASSED retains its exchanges — the
+ * same non-passing rule {@link sealPageObservationRecords} applies to
+ * page observations — and a session that proxied nothing issues
+ * nothing. The record is ledger evidence for the verdict-time
+ * `httpLedger`; it never satisfies a claim.
+ */
+function issueSessionExchangesRecord(state: WitnessState, session: TestSession): void {
+  if (session.outcome !== 'passed') return;
+  const { exchanges, truncated } = transportSnapshot(state, session);
+  if (exchanges.length === 0) return;
+  issueRecord(
+    state,
+    session.sessionId,
+    HTTP_EXCHANGES_KIND,
+    session.testId,
+    {
+      channel: OBSERVE_CHANNEL,
+      sessionId: session.sessionId,
+      exchanges,
+      ...(truncated ? { truncated: true } : {}),
+    },
+    'engine-observed',
+  );
+}
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -2340,9 +2371,10 @@ async function handleRequest(
         throw new HttpError(400, 'page sweep configuration is invalid');
       }
       if (state.engineBrowser === null) throw new HttpError(503, 'page sweep needs the engine browser');
+      const sweepSessionId = `page-sweep-${state.options.runId}-${body.audience}`;
       const sweep = await sweepPageVisits({
         browser: state.engineBrowser,
-        sessionId: `page-sweep-${state.options.runId}-${body.audience}`,
+        sessionId: sweepSessionId,
         testId: 'page-sweep',
         appBase: requireTrustedUiBase(state),
         audience: body.audience,
@@ -2357,6 +2389,30 @@ async function handleRequest(
         issueRecord: (obligationId, testId, payload) =>
           issueRecord(state, obligationId, 'page.observed', testId, payload, 'engine-observed').recordId,
       });
+      // ONE claim-free `http.exchanges` record for the sweep session
+      // (0.14 WP2): the same snapshot discipline as a test session
+      // (dedup, cap, `truncated`). A REJECTED sweep session retains no
+      // evidence — the same non-passing rule `sealPageObservationRecords`
+      // applies to page observations — and a sweep that saw no API
+      // exchange issues nothing.
+      if (sweep.sessionRejected === null) {
+        const { exchanges, truncated } = cappedExchangeSnapshot(sweep.exchanges);
+        if (exchanges.length > 0) {
+          issueRecord(
+            state,
+            sweepSessionId,
+            HTTP_EXCHANGES_KIND,
+            'page-sweep',
+            {
+              channel: 'swept',
+              sessionId: sweepSessionId,
+              exchanges,
+              ...(truncated ? { truncated: true } : {}),
+            },
+            'engine-observed',
+          );
+        }
+      }
       sendJson(res, 200, { visits: sweep.visits, sessionRejected: sweep.sessionRejected });
       return;
     }
@@ -4001,6 +4057,7 @@ async function handleSessionClose(
       session.outcome = outcome;
     }
     sealPageObservationRecords(state, sessionId, session.outcome);
+    issueSessionExchangesRecord(state, session);
     // The session's own evidence died with its proxy at release; the
     // observe snapshots are dropped HERE, at the moment the outcome is
     // finally recorded, so an unreleased session's before-state can
@@ -4018,6 +4075,7 @@ async function handleSessionClose(
     session.sealedTick = (state.tick += 1);
     session.outcome = typeof outcome === 'string' ? outcome : null;
     sealPageObservationRecords(state, sessionId, session.outcome);
+    issueSessionExchangesRecord(state, session);
     state.workerSessions.delete(session.workerIndex);
     // Observe snapshots die with the session: finalize runs BEFORE seal
     // (the drain finalizes a passed test, then seals), so anything left
@@ -5721,6 +5779,31 @@ function transportSnapshot(state: WitnessState, session: TestSession): Transport
     });
   }
   return { exchanges, truncated };
+}
+
+/**
+ * Applies the SAME snapshot discipline `transportSnapshot` enforces —
+ * dedup by `(method, url, status)`, cap at {@link OBSERVED_EXCHANGES_CAP}
+ * with `truncated: true` past the cap — to an already-captured exchange
+ * list (the page sweep's visits).
+ */
+function cappedExchangeSnapshot(
+  exchanges: ReadonlyArray<{ method: string; url: string; status: number }>,
+): TransportSnapshot {
+  const seen: Record<string, true> = Object.create(null) as Record<string, true>;
+  const kept: Array<{ method: string; url: string; status: number }> = [];
+  let truncated = false;
+  for (const exchange of exchanges) {
+    const key = `${exchange.method} ${exchange.url} ${String(exchange.status)}`;
+    if (key in seen) continue;
+    seen[key] = true;
+    if (kept.length >= OBSERVED_EXCHANGES_CAP) {
+      truncated = true;
+      continue;
+    }
+    kept.push({ method: exchange.method, url: exchange.url, status: exchange.status });
+  }
+  return { exchanges: kept, truncated };
 }
 
 

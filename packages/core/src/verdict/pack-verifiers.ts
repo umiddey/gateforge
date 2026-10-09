@@ -88,6 +88,18 @@ const HTTP_REQUEST_KIND = 'http.request';
 const HTTP_OBSERVED_KIND = 'http.observed';
 
 /**
+ * Session-wide transport-snapshot kind (0.14 WP2): the witness issues
+ * ONE claim-free record per PASSED test session (and per completed
+ * page-sweep session) carrying every exchange the session proxied —
+ * the input the verdict-time `httpLedger` is built from. It NEVER
+ * satisfies an obligation: claim grading reads only `http.request` and
+ * Observe-channel `http.observed` records, and the ledger itself is
+ * report-only. Mirrors `HTTP_EXCHANGES_KIND` in `@gate-forge/witness`'s
+ * `src/constants.ts` — keep in lockstep.
+ */
+const HTTP_EXCHANGES_KIND = 'http.exchanges';
+
+/**
  * Payload discriminant the witness stamps on every observe-finalized
  * record. Mirrors `OBSERVE_CHANNEL` in `@gate-forge/pack-playwright`
  * (and `evaluate.ts`'s local constant) — keep the three in lockstep.

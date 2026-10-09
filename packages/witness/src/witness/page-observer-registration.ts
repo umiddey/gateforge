@@ -260,6 +260,13 @@ export interface PageSweepResult {
    * refused WITHOUT visiting, with PAGE_AUDIENCE_SESSION_INVALID.
    */
   sessionRejected: { path: string; login: string; notVisited: number } | null;
+  /**
+   * Every API exchange the sweep's visited pages produced, in visit
+   * order — the raw material for the session-wide `http.exchanges`
+   * record (the caller deduplicates and caps it). A rejected session
+   * that visited nothing contributes none.
+   */
+  exchanges: Array<{ method: string; url: string; status: number }>;
 }
 
 export async function sweepPageVisits(input: {
@@ -281,6 +288,7 @@ export async function sweepPageVisits(input: {
 }): Promise<PageSweepResult> {
   const page = await input.browser.pageFor(input.sessionId, normalizePageStorageState(input.storageState));
   const visits: SweptPageVisit[] = [];
+  const exchanges: Array<{ method: string; url: string; status: number }> = [];
   let observationSequence = 0;
   // A session the app rejects (e.g. a rotating refresh token the suite's
   // own storage-state file already consumed) bounces the FIRST visited
@@ -349,6 +357,9 @@ export async function sweepPageVisits(input: {
     input.issueRecord(`${verdict.pageId}:page:loads`, input.testId, payload);
     input.issueRecord(`${verdict.pageId}:page:data-ok`, input.testId, payload);
     visits.push({ routeId: verdict.pageId, verdict, visited: true });
+    for (const response of visit.apiResponses) {
+      exchanges.push({ method: response.method, url: response.url, status: response.status });
+    }
     input.onProgress?.(formatSweepProgress({
       index: index + 1,
       total: input.routes.length,
@@ -370,5 +381,5 @@ export async function sweepPageVisits(input: {
       }
     }
   }
-  return { visits, sessionRejected };
+  return { visits, sessionRejected, exchanges };
 }

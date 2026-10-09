@@ -56,6 +56,20 @@ export const OBSERVED_KIND = 'persistence.observed';
 export const HTTP_OBSERVED_KIND = 'http.observed';
 
 /**
+ * Session-wide transport-snapshot kind (0.14 WP2): issued ONLY by the
+ * witness, ONE record per session that sealed as PASSED (and per
+ * completed page-sweep session), carrying EVERY exchange the session's
+ * observation proxy saw under a claim-free identity — evidence for the
+ * verdict-time `httpLedger`, never an obligation record. It can never
+ * satisfy a claim (core's verifiers read only `http.request` and
+ * Observe-channel `http.observed`), and it is never suite-submittable
+ * (`/records` accepts only `ui.action` / `ui.visible-result`). Mirrors
+ * `HTTP_EXCHANGES_KIND` in `@gate-forge/core`'s `verdict/pack-verifiers.ts`
+ * — keep in lockstep.
+ */
+export const HTTP_EXCHANGES_KIND = 'http.exchanges';
+
+/**
  * Upper bound on the exchanges one `http.observed` record carries. A
  * session that drove more gets the first CAP exchanges in observation
  * order plus `truncated: true` in the payload: the cap can only hide

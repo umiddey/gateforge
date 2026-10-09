@@ -597,6 +597,28 @@ describe('http contract grading', () => {
     expect(outcome.reason).toContain('suite-claimed');
   });
 
+  it('an http.exchanges record alone leaves an http obligation missing (never satisfies)', () => {
+    // The session-wide ledger kind (0.14 WP2) feeds the REPORT-ONLY
+    // httpLedger. Even witnessed, provenance-valid, and carrying an
+    // exchange that WOULD attribute to the obligation's own endpoint,
+    // it can never satisfy a claim — only `http.request` and
+    // Observe-channel `http.observed` records grade.
+    const sessionExchanges = record(transportObligation.id, {
+      kind: 'http.exchanges',
+      payload: {
+        channel: 'observe',
+        sessionId: 'sess-1',
+        exchanges: [{ method: 'POST', url: '/api/accounts', status: 200 }],
+      },
+    });
+    const outcome = httpOutcome(transportObligation, [anchor, sessionExchanges], undefined, 'test-1', routes({
+      method: 'POST',
+      canonicalPath: '/api/accounts',
+    }));
+    expect(outcome.verdict).toBe('missing');
+    expect(outcome.reason).toContain('witness observed no matching HTTP exchange');
+  });
+
   it('a witnessed observation from a different endpoint can never satisfy a bound obligation', () => {
     const observed = record(transportObligation.id, {
       kind: 'http.request',
