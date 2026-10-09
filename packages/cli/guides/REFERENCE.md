@@ -1310,6 +1310,20 @@ Enforcement-relevant sections:
   prints and serializes them on the advisory channel and leaves the exit
   code alone; `block` fails the check on them. See "The HTTP call rules
   and the coverage summary" below.
+- `http.responseShape:` — `off` (default), `report`, or `block`: whether the
+  witness checks each proxied JSON response body against the app's OpenAPI
+  response schema. The document is read from `http.openapiPath:` (default
+  `/openapi.json`) at run bind. `report` prints mismatches as advisories;
+  `block` makes every consumed endpoint owe `http:response-matches-model`,
+  so a wrong field type fails with `HTTP_RESPONSE_SHAPE_MISMATCH`. A route
+  with no schema, or a run with no reachable document, is `unchecked` and
+  never fails. A body over 1 MiB is refused as `HTTP_BODY_TOO_LARGE` for
+  that obligation only. The light and normal presets write `report`, the
+  strict preset writes `block`.
+- Read and write these settings with `gateforge config get <key>`,
+  `gateforge config set <key> <value>`, and `gateforge config list`.
+  `set` refuses a key the schema does not know or a value it rejects, and
+  leaves `.gateforge.yml` untouched.
 
 - `enforcement:` — `mode: standard | managed` (default `standard`),
   `strictE2E: boolean` (default `false`), and optional

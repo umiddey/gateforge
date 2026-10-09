@@ -61,6 +61,27 @@
   dropped, and never a served-ness input: its router is mounted either
   way, so the route keeps its mount proof and its registration (which is
   right whenever the route does register).
+- Check the response BODY against the declared model. The witness fetches
+  the app's OpenAPI document (`http.openapiPath`, default `/openapi.json`)
+  once at run bind and seals it as an `http.openapi` record. Each proxied
+  JSON response body is validated against its route's declared response
+  schema (OpenAPI/JSON-Schema semantics: `nullable`, `oneOf`/`anyOf`,
+  `$ref`, `additionalProperties` allowed by default). A route with no
+  schema, or a run with no reachable document, is `unchecked` and never
+  fails the run.
+- The contract is `http:response-matches-model`, and the owner sets it with
+  `http.responseShape: off | report | block` (default `off`; the light and
+  normal presets set `report`, strict sets `block`). `report` prints shape
+  mismatches as advisories. `block` makes every consumed endpoint owe the
+  contract: a wrong field type fails with `HTTP_RESPONSE_SHAPE_MISMATCH`.
+  A body over 1 MiB is refused with `HTTP_BODY_TOO_LARGE` for that
+  obligation only. `off` changes no verdict and no golden.
+- `gateforge config get <key>`, `gateforge config set <key> <value>` and
+  `gateforge config list` read and write `.gateforge.yml` by dotted key
+  (owner decision 2026-10-06). `get` and `list` report the effective value,
+  defaults included. `set` parses the whole edited file against the pinned
+  schema, refuses unknown keys and invalid values, and leaves the file
+  untouched on any refusal.
 
 ## 0.13.10
 
