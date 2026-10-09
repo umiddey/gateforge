@@ -1,6 +1,13 @@
 # Changelog
 
 ## 0.14.0 (unreleased)
+- Record each observed exchange's lowercased `Sec-Fetch-Dest` as `fetchDest`.
+  Only `empty` (fetch/XHR) is an API call for `HTTP_CALL_UNMATCHED` and
+  `HTTP_CALL_AMBIGUOUS`; documents and other assets stay visible in the
+  ledger but do not produce API-call or response-shape findings. Missing
+  destination metadata is `unknown` and never blocks. An absent, empty, or
+  incomplete route inventory cannot prove a call unmatched; reports identify
+  the inventory as unavailable or incomplete instead.
 
 - Add a pure OpenAPI path/method route table and merge it with detector
   inventory using `http.routeSource` (`both` by default). Source-only routes

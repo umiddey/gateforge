@@ -1364,11 +1364,13 @@ not only the sessions that carry claims. When a session that PASSED
 closes (and when a page sweep completes), the witness issues ONE
 claim-free record of kind `http.exchanges` carrying the same transport
 snapshot the per-claim `http.observed` records carry: the deduplicated,
-capped exchange list (method, url, status), its watermark, and
-`truncated` when the cap cut the list. A session whose test did not
-pass drops its record, and a session that proxied nothing issues none.
-The kind can never satisfy an obligation — it is not selectable by any
-obligation, and it only reaches the report.
+capped exchange list (`method`, `url`, `status`, `fetchDest`), its
+watermark, and `truncated` when the cap cut the list. `fetchDest` is the
+lowercased `Sec-Fetch-Dest` request header, or `null` when the client
+did not send it. A session whose test did not pass drops its record, and
+a session that proxied nothing issues none. The kind can never satisfy an
+obligation — it is not selectable by any obligation, and it only reaches
+the report.
 
 At verdict time the report JSON carries `httpLedger` for a run that
 witnessed at least one such record:
@@ -1382,6 +1384,8 @@ witnessed at least one such record:
         "method": "GET",
         "path": "/items/apples",
         "status": 200,
+        "fetchDest": "empty",
+        "kind": "api",
         "route": "http.endpoint:GET /items/{}",
         "resolution": "match"
       }
@@ -1392,35 +1396,46 @@ witnessed at least one such record:
 ```
 
 One row per witnessed exchange, sorted by test id, method, path, and
-status. `path` is the query-stripped observed path; `route` is the
-resource id the ONE route matcher attributed it to, or `null`.
+status. `path` is the query-stripped observed path; `fetchDest` is the
+lowercased `Sec-Fetch-Dest` value (or `null`); `route` is the resource id
+the ONE route matcher attributed it to, or `null`. `kind` is `api` only
+when `fetchDest` is exactly `empty`; `document` and `iframe` are `page`,
+other non-empty destinations (for example `script`, `style`, `image`, or
+`font`) are `asset`, and an absent/null destination is `unknown`.
 `resolution` is that matcher's answer — `match`, `nomatch`,
 `ambiguous` (with the equal candidates in `candidates`), or
-`incomplete` (an inventory entry cannot be attributed). The ledger is
-report-only: it changes no verdict and no exit code, and the key is
-absent from runs that witnessed no session exchanges.
+`incomplete` (an inventory entry cannot be attributed). If the route
+inventory is empty or unavailable, resolution is `incomplete` rather
+than `nomatch` and the summary reports `inventory: "unavailable"`; an
+unattributable route candidate reports `inventory: "incomplete"`. The
+ledger is report-only: it changes no verdict and no exit code, and the
+key is absent from runs that witnessed no session exchanges.
+`fetchDest: "empty"` alone identifies API traffic for R2/R3 findings.
 
 ### The HTTP call rules and the coverage summary (`http.callFindings`)
 
 The ledger is not decoration: five rules run over it at verdict time.
 
-- **R1 — used means used.** A route is USED when a witnessed exchange
-  matched it (a ledger row with `resolution: "match"`) OR the static join
-  consumed it (the endpoint carries `frontendConsumed: true`). A used
-  route already owes `http:request-observed` + `http:response-status-ok`:
-  those obligations are generated BEFORE the run by the `consumed: true`
-  policy against the same join (or by every endpoint under
+- **R1 — API use means API use.** A route is USED when an API exchange
+  (`fetchDest: "empty"`) matched it (a ledger row with `kind: "api"` and
+  `resolution: "match"`) OR the static join consumed it (the endpoint
+  carries `frontendConsumed: true`). Page, asset, and unknown traffic do
+  not count as API calls or used API routes. A used route already owes
+  `http:request-observed` + `http:response-status-ok`: those obligations
+  are generated BEFORE the run by the `consumed: true` policy against the
+  same join (or by every endpoint under
   `http.endpoint.requireObservation: all`), so no rule here invents an
   obligation.
-- **R2 — an unmatched call is a defect.** A ledger row the matcher could
-  not place reports `HTTP_CALL_UNMATCHED` naming the test, method, path
-  and every status observed. Repeats of the same call by one test are
-  ONE finding listing those statuses.
-- **R3 — an ambiguous call is a defect.** A row matching several routes
-  at equal specificity reports `HTTP_CALL_AMBIGUOUS` with the candidates.
-  An `incomplete` placement (an inventory entry that cannot be
-  attributed) stays unknown: it is counted in the ledger, never reported
-  as a defect.
+- **R2 — an unmatched API call is a defect only with a complete inventory.**
+  Only `kind: "api"` rows with `resolution: "nomatch"` report
+  `HTTP_CALL_UNMATCHED`, naming the test, method, path and every status
+  observed. Repeats of the same call by one test are ONE finding. An empty
+  route inventory or `incomplete` matcher result cannot prove a call
+  unmatched and produces no R2 finding.
+- **R3 — an ambiguous API call is a defect.** Only API rows matching
+  several routes at equal specificity report `HTTP_CALL_AMBIGUOUS` with
+  the candidates. Incomplete inventory placements and page/asset/unknown
+  rows never produce R2/R3 findings.
 - **R4 — an unresolvable call site is never dropped.** A static call
   whose target the join cannot compute reports `HTTP_CALL_UNRESOLVED`
   with its `file:line`. It reads the unresolved call-site facts the graph
@@ -1441,11 +1456,13 @@ Which channel these findings use is the owner's:
 Every run also carries the summary line — in the human report as
 
 ```
-HTTP: 782 served, 367 used, 340 proven, 27 missing, 12 unmatched, 0 ambiguous
+HTTP: 782 served, 367 used, 340 proven, 27 missing, 12 unmatched, 0 ambiguous (complete route inventory)
 ```
 
 and in the json report under `httpCoverage` (absent from reports that do
-not compute it). `served` is the route table minus routes the detector
+not compute it). When the route inventory is unavailable or incomplete,
+the summary names that status instead of treating unmatched traffic as a
+proven defect. `served` is the route table minus routes the detector
 PROVES unmounted: until a detector emits mount provenance, nothing is
 subtracted, because an absent proof is unknown served-ness rather than
 proof of dead code. `used` counts served routes with a caller, `proven`
