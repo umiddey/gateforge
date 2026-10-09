@@ -5869,6 +5869,7 @@ function transportSnapshot(state: WitnessState, session: TestSession): Transport
       url: exchange.path,
       status: exchange.status,
       fetchDest: exchange.fetchDest,
+      ...(exchange.initiator === 'test-code' ? { initiator: exchange.initiator } : {}),
       resourceType: exchange.resourceType,
       ...(exchange.resourceTypeConflict ? { resourceTypeConflict: true } : {}),
       ...(exchange.shape === undefined ? {} : { shape: exchange.shape }),

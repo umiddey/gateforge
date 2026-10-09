@@ -92,7 +92,7 @@ function stubPage(): StubPage {
       const handler = handlers[0];
       if (handler === undefined) throw new Error('no route handler was installed');
       await handler({
-        request: () => ({ url: () => url }),
+        request: () => ({ url: () => url, method: () => 'GET', headers: () => ({}), resourceType: () => 'document' }),
         continue: async (options?: { url: string }) => {
           continued.push({ url: options?.url });
         },
