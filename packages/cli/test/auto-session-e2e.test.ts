@@ -19,6 +19,9 @@ const cases = [
   ['extended.spec.ts', "import { test as base, expect } from '@playwright/test';\nconst test = base.extend({ own: async ({}, use) => { await use(7); } });\ntest.beforeEach(async ({ page }) => { await page.goto('/'); });", 'test'],
   ['root.spec.ts', "import { test as base, expect } from '@playwright/test';\nconst test = base;", 'base.test'],
   ['explicit.spec.ts', "import { test as plain } from '@playwright/test';\nimport { test, expect } from '@gate-forge/pack-playwright/fixture';", 'test'],
+  ['alias-commonjs.spec.cjs', "const { test, expect } = require('playwright/test');\ntest.describe.configure({ mode: 'serial' });", 'test'],
+  ['alias-esm.spec.mjs', "import { test as base, expect } from 'playwright/test';\nconst test = base.extend({ own: async ({}, use) => { await use(7); } });\ntest.beforeEach(async ({ own }) => { expect(own).toBe(7); });\ntest.describe.configure({ mode: 'serial' });", 'test'],
+  ['alias-helper.spec.cjs', "const { test: base, expect } = require('../playwright-runtime.cjs');\nconst test = base;\ntest.describe.configure({ mode: 'serial' });", 'base.test'],
 ] as const;
 
 const ROUTE_SPEC = `import { test, expect } from '@playwright/test';
@@ -101,6 +104,7 @@ test('inherited hook stays out of application processes', async ({ page }) => {
 `;
         repo.writeFiles({
           ...specs,
+          'playwright-runtime.cjs': "const { test, expect } = require('playwright/test');\nmodule.exports = { test, expect };\n",
           'probe-server.cjs': `const { createServer } = require('node:http');
 const { writeFileSync } = require('node:fs');
 const probe = ${PROCESS_PROBE};
@@ -180,6 +184,7 @@ createServer((req, res) => { res.setHeader('content-type', 'application/json'); 
         expect.soft(result.measuredTests, evidence).toBe(result.executedTests);
         expect.soft(report.execution.measuredTests, evidence).toBe(cases.length + 5);
         expect.soft(report.execution.executedTests, evidence).toBe(cases.length + 5);
+        console.log(`auto-session evidence: measured=${result.measuredTests}, executed=${result.executedTests}, aliasCases=${cases.filter(([file]) => file.startsWith('alias-')).length}`);
       });
     } finally {
       await new Promise<void>((resolve, reject) => app.close(error => error ? reject(error) : resolve()));

@@ -23,6 +23,9 @@
   the CLI, so automatic fixture loading exercises the same install shape.
 - Strict supervised result-contract tests pin both `executedTests` and
   `measuredTests` in the sealed execution result's exact key set.
+- Automatic witnessed sessions also cover the equivalent `playwright/test`
+  entry in CommonJS, ESM and project re-exporting helpers, preserving root
+  test properties and extension hooks without redirecting the plain library.
 
 ## 0.14.0
 

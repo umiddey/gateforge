@@ -26,7 +26,7 @@ if (!require('node:worker_threads').isInternalThread) {
 }
 const resolveFilename = Module._resolveFilename;
 Module._resolveFilename = function (specifier, parent, ...args) {
-  if (specifier === '@playwright/test' && parent?.filename &&
+  if ((specifier === '@playwright/test' || specifier === 'playwright/test') && parent?.filename &&
       parent.filename !== wrapper && !parent.filename.replaceAll('\\', '/').includes('/node_modules/')) {
     return wrapper;
   }
