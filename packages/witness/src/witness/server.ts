@@ -282,6 +282,7 @@ import {
   RESPONSE_BODY_CAP_BYTES,
   buildResponseShapeIndex,
   judgeResponseShape,
+  judgeEngineExchange,
   planResponseShape,
   shapeRank,
   type ResponseShape,
@@ -1923,6 +1924,7 @@ async function handleHttpObservation(
     bodySha256: observedRequest.bodySha256,
     bodyBytes: observedRequest.bodyBytes,
     sessionId: session.sessionId,
+    ...(observedRequest.shape === undefined ? {} : { shape: observedRequest.shape }),
   };
   const issued = claimIds.map((claimId) =>
     issueRecord(state, claimId, 'http.request', session.testId, payload, 'engine-observed'),
@@ -2164,6 +2166,9 @@ async function handleBrowserAction(
     // INSIDE the engine interval (ticks between open and close), so the
     // existing single-use http-observation consume path binds them.
     for (const exchange of observation.exchanges) {
+      // Judged with the proxy's plan and judge, so a UI-driven body gets the
+      // same shape verdict as a proxied one (block mode never grades it missing).
+      const shape = state.responseShape === null ? undefined : judgeEngineExchange(state.shapeIndex, exchange);
       state.observed.push({
         method: exchange.method,
         path: exchange.path,
@@ -2181,6 +2186,7 @@ async function handleBrowserAction(
         requestContentType: null,
         sessionId: session.sessionId,
         tick: (state.tick += 1),
+        ...(shape === undefined ? {} : { shape }),
       });
     }
     // Suite-submittable intervals/records stay open-submission; the

@@ -50,6 +50,7 @@ import {
   ENGINE_PAGE_VISIT_SETTLE_MS,
   ENGINE_PAGE_VISIT_API_SETTLE_TIMEOUT_MS,
 } from '../constants.js';
+import { RESPONSE_BODY_CAP_BYTES } from './response-shape.js';
 import {
   declaredSurfaceFields,
   renderSurfaceTemplate,
@@ -276,6 +277,12 @@ export interface EngineCapturedExchange {
   status: number;
   /** Response body bytes (bounded snapshot for hashing). */
   body: Buffer;
+  /** Response media type (the raw header), or null when absent. */
+  contentType: string | null;
+  /** TOTAL response body bytes, or null when the body could not be read. */
+  totalBytes: number | null;
+  /** The full body when within the shape cap; empty otherwise (refused before parsing). */
+  shapeBody: Buffer;
 }
 
 /** What the engine observed performing one action. */
@@ -566,17 +573,26 @@ async function captureExchanges(
       return;
     }
     if (url.origin !== appOrigin) return;
-    const chunks: Buffer[] = [];
+    const contentType = response.headers()['content-type'] ?? null;
+    // Playwright buffers the whole body: keep it for the shape judge, hash
+    // only the bounded snapshot exactly as before.
+    const full: { body: Buffer | null } = { body: null };
     void response
       .body()
-      .then((body) => chunks.push(body))
+      .then((body) => {
+        full.body = body;
+      })
       .catch(() => undefined)
       .finally(() => {
+        const body = full.body;
         captured.push({
           method: response.request().method().toUpperCase(),
           path: canonicalExchangePath(url.pathname),
           status: response.status(),
-          body: Buffer.concat(chunks).slice(0, 16384),
+          body: (body ?? Buffer.alloc(0)).slice(0, 16384),
+          contentType,
+          totalBytes: body === null ? null : body.length,
+          shapeBody: body !== null && body.length <= RESPONSE_BODY_CAP_BYTES ? body : Buffer.alloc(0),
         });
       });
   };

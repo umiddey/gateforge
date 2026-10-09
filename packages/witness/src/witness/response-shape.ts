@@ -10,7 +10,7 @@
  * Route matching uses core's `interpretObservedPath` + `matchHttpRoute`,
  * the same resolver the engine's route attribution already uses.
  */
-import Ajv, { type ValidateFunction } from 'ajv';
+import { Ajv, type ValidateFunction } from 'ajv';
 import { interpretObservedPath, matchHttpRoute, type HttpRouteCandidate } from '@gate-forge/core';
 import { routeTableFromOpenApi } from '@gate-forge/http-contract';
 import { isJsonObject } from '../json.js';
@@ -116,6 +116,33 @@ export function judgeResponseShape(plan: ResponsePlan, body: Buffer, totalBytes:
     message: error.message ?? 'does not match the response schema',
   }));
   return { verdict: 'mismatch', errors };
+}
+
+/**
+ * What the engine kept of one captured app exchange. `totalBytes` is the
+ * TOTAL response body size, or null when Playwright could not read the body;
+ * `shapeBody` is the full body when it is within the cap (empty otherwise —
+ * an over-cap body is refused before it is parsed).
+ */
+export interface EngineExchange {
+  method: string;
+  path: string;
+  status: number;
+  contentType: string | null;
+  totalBytes: number | null;
+  shapeBody: Buffer;
+}
+
+/**
+ * Judges one engine-captured exchange with exactly the proxy's plan and
+ * judge, so a UI-driven exchange and a proxied one never disagree about the
+ * same body. A body the engine could not read is unchecked, never a failure.
+ */
+export function judgeEngineExchange(index: ResponseShapeIndex | null, exchange: EngineExchange): ResponseShape {
+  const plan = planResponseShape(index, exchange.method, exchange.path, exchange.status, exchange.contentType ?? undefined);
+  if (plan.kind === 'unchecked') return { verdict: 'unchecked', why: plan.why };
+  if (exchange.totalBytes === null) return { verdict: 'unchecked', why: 'body-unavailable' };
+  return judgeResponseShape(plan, exchange.shapeBody, exchange.totalBytes);
 }
 
 /**

@@ -16,6 +16,7 @@ import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { HTTP_EXCHANGES_KIND, RUN_HEADER, VERIFIER_HEADER } from '../src/constants.js';
 import { startWitness, type WitnessHandle } from '../src/witness/server.js';
+import { buildResponseShapeIndex, judgeEngineExchange } from '../src/witness/response-shape.js';
 import type { SessionCredential } from '../src/witness/types.js';
 
 const RUN_ID = 'd4e5f6a7-0000-4000-8000-000000000005';
@@ -326,5 +327,110 @@ describe('proxied exchanges — each body checked against its declared response 
     expect(await proxiedGet(session, '/items/1')).toBe(200);
     const exchanges = await closedExchanges(session);
     expect(exchanges).toEqual([{ method: 'GET', url: '/items/1', status: 200 }]);
+  });
+});
+
+const HTTP_REQUEST_KIND = 'http.request';
+/** Opens a UI-action observation interval on the session (witness clock). */
+async function openInterval(session: SessionCredential): Promise<string> {
+  const response = await fetch(`${witness.url}/sessions/intervals/open`, {
+    method: 'POST',
+    headers: { [RUN_HEADER]: RUN_TOKEN, 'content-type': 'application/json' },
+    body: JSON.stringify({ sessionId: session.sessionId, sessionToken: session.sessionToken, operation: 'read' }),
+  });
+  expect(response.status).toBe(200);
+  const answer = (await response.json()) as { intervalId: string };
+  return answer.intervalId;
+}
+
+/** Seals the UI-action observation interval. */
+async function closeInterval(session: SessionCredential, intervalId: string): Promise<void> {
+  const response = await fetch(`${witness.url}/sessions/intervals/close`, {
+    method: 'POST',
+    headers: { [RUN_HEADER]: RUN_TOKEN, 'content-type': 'application/json' },
+    body: JSON.stringify({ sessionId: session.sessionId, sessionToken: session.sessionToken, intervalId }),
+  });
+  expect(response.status).toBe(200);
+}
+
+describe('engine-observed http.request records carry the exchange response shape', () => {
+  it('a claimed exchange whose body mismatches its schema issues an http.request record carrying the mismatch', async () => {
+    expect(await bind(SHAPED)).toBe(200);
+    itemReply = { status: 200, contentType: 'application/json', body: '{"count":"one"}' };
+    const session = await openSession();
+    const intervalId = await openInterval(session);
+    expect(await proxiedGet(session, '/items/1')).toBe(200);
+    await closeInterval(session, intervalId);
+    const consumed = await post('/witness/http-observation', {
+      claimIds: ['http:response-matches-model:items'],
+      testId: TEST_ID,
+      method: 'GET',
+      path: '/items/1',
+      sessionId: session.sessionId,
+      sessionToken: session.sessionToken,
+    });
+    expect(consumed.status).toBe(200);
+    const response = await fetch(`${witness.url}/records`, { headers: { [RUN_HEADER]: RUN_TOKEN } });
+    const body = (await response.json()) as { records?: Array<Record<string, unknown>> };
+    const records = (body.records ?? []).filter((record) => record['kind'] === HTTP_REQUEST_KIND);
+    expect(records).toHaveLength(1);
+    const payload = records[0]?.['payload'] as Record<string, unknown>;
+    const shape = payload['shape'] as Record<string, unknown>;
+    expect(shape['verdict']).toBe('mismatch');
+    const errors = shape['errors'] as Array<{ pointer: string }>;
+    expect(errors[0]?.pointer).toBe('/count');
+  });
+});
+
+describe('engine-captured exchanges are judged exactly like proxied ones', () => {
+  const index = buildResponseShapeIndex(JSON.parse(OPENAPI_DOCUMENT) as unknown);
+  const json = 'application/json';
+
+  it('a body that mismatches the declared schema is a mismatch naming the JSON pointer', () => {
+    const body = Buffer.from('{"count":"one"}');
+    const shape = judgeEngineExchange(index, {
+      method: 'GET',
+      path: '/items/1',
+      status: 200,
+      contentType: json,
+      totalBytes: body.length,
+      shapeBody: body,
+    });
+    expect(shape.verdict).toBe('mismatch');
+    expect(shape.verdict === 'mismatch' && shape.errors[0]?.pointer).toBe('/count');
+  });
+
+  it('a body that matches the declared schema is ok', () => {
+    const body = Buffer.from('{"count":1}');
+    expect(
+      judgeEngineExchange(index, { method: 'GET', path: '/items/1', status: 200, contentType: json, totalBytes: body.length, shapeBody: body }),
+    ).toEqual({ verdict: 'ok' });
+  });
+
+  it('a body the engine could not read is unchecked, never a failure', () => {
+    expect(
+      judgeEngineExchange(index, { method: 'GET', path: '/items/1', status: 200, contentType: json, totalBytes: null, shapeBody: Buffer.alloc(0) }),
+    ).toEqual({ verdict: 'unchecked', why: 'body-unavailable' });
+  });
+
+  it('a body over the 1 MiB cap is refused for that exchange', () => {
+    const total = 1024 * 1024 + 1;
+    expect(
+      judgeEngineExchange(index, { method: 'GET', path: '/items/1', status: 200, contentType: json, totalBytes: total, shapeBody: Buffer.alloc(0) }),
+    ).toEqual({ verdict: 'refused', why: 'HTTP_BODY_TOO_LARGE' });
+  });
+
+  it('a non-JSON response on a JSON route is unchecked, never a mismatch', () => {
+    const body = Buffer.from('<html/>');
+    expect(
+      judgeEngineExchange(index, { method: 'GET', path: '/items/1', status: 200, contentType: 'text/html', totalBytes: body.length, shapeBody: body }),
+    ).toEqual({ verdict: 'unchecked', why: 'non-json-response' });
+  });
+
+  it('no OpenAPI document leaves the exchange unchecked with openapi-unavailable', () => {
+    const body = Buffer.from('{"count":"one"}');
+    expect(
+      judgeEngineExchange(null, { method: 'GET', path: '/items/1', status: 200, contentType: json, totalBytes: body.length, shapeBody: body }),
+    ).toEqual({ verdict: 'unchecked', why: 'openapi-unavailable' });
   });
 });
