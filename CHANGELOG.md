@@ -1,6 +1,11 @@
 # Changelog
 
-## 0.13.10 (unreleased)
+## 0.13.10
+
+Theme: Gateforge reads a test's type from what its fixtures are really made
+of, so an API-only test behind a custom fixture is named as one, and a real
+UI test is never demoted. Measured on a foreign app (169 tests): 28 tests
+Gateforge could not type before now have their type, 0 left `unknown`.
 
 - **Playwright kinds follow custom fixture definitions.** Fixture parameters
   are classified from the browser and API building blocks their definitions
@@ -9,10 +14,12 @@
   fixtures remain `unknown`; runtime proof rules are unchanged.
 
 - **HTTP-client kind signals follow reached helpers and Playwright API
-  requests (F4).** Discovery recognizes `page.request` and `context.request`
+  requests.** Discovery recognizes `page.request` and `context.request`
   calls through imports, attributed only to tests that call a reachable test
   helper. `fetch`/`axios` calls are detected in the test file; calls in
-  imported product modules do not count as Playwright API evidence.
+  imported product modules do not count as Playwright API evidence. A test
+  that drives the page AND calls an API client (e.g. for setup) stays a
+  browser test; the runtime rule still never credits its API traffic.
 
 - **Setup-project tests never carry claims.** Discovery marks rows in projects
   the Playwright runner resolved as dependencies of other projects. A claim
