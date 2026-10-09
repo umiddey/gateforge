@@ -105,7 +105,7 @@ function grade(obligation: Obligation, records: readonly Record<string, unknown>
   });
 }
 
-const GET_456 = { method: 'GET', url: '/accounts/456', status: 200 };
+const GET_456 = { method: 'GET', url: '/accounts/456', status: 200, fetchDest: 'empty' };
 
 describe('http:response-matches-model grades the witnessed body verdict', () => {
   it('a mismatched body fails the claim and names the first pointer', () => {

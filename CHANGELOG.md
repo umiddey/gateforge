@@ -8,6 +8,10 @@
   destination metadata is `unknown` and never blocks. An absent, empty, or
   incomplete route inventory cannot prove a call unmatched; reports identify
   the inventory as unavailable or incomplete instead.
+- Only a missing-route response (HTTP 404 or 405) is `HTTP_CALL_UNMATCHED`
+  and eligible to block or be adopted. Other statuses show
+  `HTTP_ROUTE_NOT_INVENTORIED` as a report-only advisory: the app answered,
+  but its route inventory may be incomplete.
 
 - Add a pure OpenAPI path/method route table and merge it with detector
   inventory using `http.routeSource` (`both` by default). Source-only routes

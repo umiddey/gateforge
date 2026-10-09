@@ -150,7 +150,9 @@ export async function sealRunWithCalls(repo: TempRepo, paths: readonly string[])
     const session = (await opened.json()) as { sessionId: string; proxyUrl: string | null };
     expect(session.proxyUrl).not.toBeNull();
     for (const path of paths) {
-      const response = await fetch(`${session.proxyUrl as string}${path}`);
+      const response = await fetch(`${session.proxyUrl as string}${path}`, {
+        headers: { 'sec-fetch-dest': 'empty' },
+      });
       await response.text();
       // The target serves only SERVED_PATH with 200; every other path is a 404.
       expect(response.status).toBe(path === SERVED_PATH ? 200 : 404);

@@ -211,6 +211,24 @@ describe('R2/R3 — an unmatched or ambiguous witnessed call is a finding', () =
       },
     ]);
   });
+  it('does not classify a served response as an unmatched route', () => {
+    const result = evaluateHttpCoverage({
+      routes: SERVED,
+      ledger: ledger([
+        row({ testId: 'tests/a#one', method: 'GET', path: '/api/items', status: 200 }),
+      ]),
+      verdicts: [],
+      unresolvedCallSites: [],
+      mode: 'report',
+    });
+    expect(result.summary.unmatched).toBe(0);
+    expect(result.findings).toEqual([
+      expect.objectContaining({
+        code: 'HTTP_ROUTE_NOT_INVENTORIED',
+        detail: expect.stringContaining('HTTP 200'),
+      }),
+    ]);
+  });
 
   it('collapses repeated identical calls into one finding listing every status', () => {
     const result = evaluateHttpCoverage({
@@ -223,8 +241,13 @@ describe('R2/R3 — an unmatched or ambiguous witnessed call is a finding', () =
       unresolvedCallSites: [],
       mode: 'report',
     });
-    expect(result.findings).toHaveLength(1);
-    expect(result.findings[0]?.detail).toContain('HTTP 404, 500');
+    expect(result.findings).toHaveLength(2);
+    expect(result.findings.find((finding) => finding.code === 'HTTP_CALL_UNMATCHED')?.detail).toContain(
+      'HTTP 404',
+    );
+    expect(
+      result.findings.find((finding) => finding.code === 'HTTP_ROUTE_NOT_INVENTORIED')?.detail,
+    ).toContain('HTTP 500');
   });
 
   it('names the candidates of an ambiguous call', () => {

@@ -161,7 +161,7 @@ async function proxyExchange(
 ): Promise<{ status: number; text: string }> {
   const response = await fetch(`${proxyUrl}${path}`, {
     method,
-    headers: body === null ? {} : { 'content-type': contentType, 'content-length': String(Buffer.byteLength(body)) },
+    headers: { 'sec-fetch-dest': 'empty', ...(body === null ? {} : { 'content-type': contentType, 'content-length': String(Buffer.byteLength(body)) }) },
     body,
   });
   return { status: response.status, text: await response.text() };
@@ -621,10 +621,9 @@ describe('observe finalize (transport obligations)', () => {
       expect(payload['sessionId']).toBe(session.sessionId);
       expect(payload['truncated']).toBeUndefined();
       expect(payload['exchanges']).toEqual([
-        { method: 'GET', url: '/api/accounts', status: 200 },
-        { method: 'GET', url: '/api/accounts/acc-1', status: 200 },
+        { method: 'GET', url: '/api/accounts', status: 200, fetchDest: 'empty' },
+        { method: 'GET', url: '/api/accounts/acc-1', status: 200, fetchDest: 'empty' },
       ]);
-      await closeSupervisorSession(fixture.witness.url, TOKEN, session.sessionId, 'passed', VERIFIER_KEY);
     } finally {
       await fixture.witness.stop();
       await fixture.target.stop();
@@ -676,7 +675,7 @@ describe('observe finalize (transport obligations)', () => {
       const observed = await observedRecords(fixture.witness.url);
       expect(observed).toHaveLength(1);
       const payload = observed[0]?.['payload'] as Record<string, unknown>;
-      expect(payload['exchanges']).toEqual([{ method: 'GET', url: '/api/accounts', status: 200 }]);
+      expect(payload['exchanges']).toEqual([{ method: 'GET', url: '/api/accounts', status: 200, fetchDest: 'empty' }]);
       await closeSupervisorSession(fixture.witness.url, TOKEN, session.sessionId, 'passed', VERIFIER_KEY);
       await closeSupervisorSession(fixture.witness.url, TOKEN, other.sessionId, 'passed', VERIFIER_KEY);
     } finally {
@@ -738,7 +737,7 @@ describe('observe finalize (transport records are order-independent)', () => {
   const LATE_HTTP_CLAIM = 'tenant.orders:http:request-observed';
   /** Sorts before `tenant.accounts`, so its claim walks before the create. */
   const EARLY_HTTP_CLAIM = 'tenant.admins:http:request-observed';
-  const EXPECTED_EXCHANGE = [{ method: 'POST', url: '/api/accounts', status: 200 }];
+  const EXPECTED_EXCHANGE = [{ method: 'POST', url: '/api/accounts', status: 200, fetchDest: 'empty' }];
 
   /** What one claim set produced, reduced to order-free facts. */
   async function runWithClaims(claims: string[]): Promise<{
@@ -820,9 +819,8 @@ describe('observe finalize (transport records are order-independent)', () => {
       // claim consumed — the snapshot predates the consumption.
       const transport = records.find((entry) => entry['kind'] === 'http.observed');
       expect((transport?.['payload'] as Record<string, unknown>)['exchanges']).toEqual([
-        { method: 'GET', url: '/api/accounts', status: 200 },
+        { method: 'GET', url: '/api/accounts', status: 200, fetchDest: 'empty' },
       ]);
-      await closeSupervisorSession(fixture.witness.url, TOKEN, session.sessionId, 'passed', VERIFIER_KEY);
     } finally {
       await fixture.witness.stop();
       await fixture.target.stop();

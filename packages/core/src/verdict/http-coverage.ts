@@ -36,6 +36,8 @@ import { HTTP_REQUEST_OBSERVED, HTTP_RESPONSE_STATUS_OK } from '../schemas/behav
 
 /** A witnessed call that matches no route in the run's inventory. */
 export const HTTP_CALL_UNMATCHED = 'HTTP_CALL_UNMATCHED';
+/** A witnessed response proves the app answered, but not that inventory is complete. */
+export const HTTP_ROUTE_NOT_INVENTORIED = 'HTTP_ROUTE_NOT_INVENTORIED';
 
 /** A witnessed call that matches several routes at equal specificity. */
 export const HTTP_CALL_AMBIGUOUS = 'HTTP_CALL_AMBIGUOUS';
@@ -56,7 +58,8 @@ const FRONTEND_CALL_TARGET_UNRESOLVED = 'FRONTEND_CALL_TARGET_UNRESOLVED';
 export type HttpCallFindingCode =
   | typeof HTTP_CALL_UNMATCHED
   | typeof HTTP_CALL_AMBIGUOUS
-  | typeof HTTP_CALL_UNRESOLVED;
+  | typeof HTTP_CALL_UNRESOLVED
+  | typeof HTTP_ROUTE_NOT_INVENTORIED;
 
 /** Which channel the call findings block on (owner-declared). */
 export type HttpCallFindingsMode = 'report' | 'block';
@@ -266,7 +269,7 @@ function pathShape(path: string): string {
  */
 function rowFinding(
   rows: readonly HttpLedger['rows'][number][],
-  code: typeof HTTP_CALL_UNMATCHED | typeof HTTP_CALL_AMBIGUOUS,
+  code: typeof HTTP_CALL_UNMATCHED | typeof HTTP_CALL_AMBIGUOUS | typeof HTTP_ROUTE_NOT_INVENTORIED,
 ): HttpCallFinding | null {
   const first = rows[0];
   if (first === undefined) return null;
@@ -284,15 +287,16 @@ function rowFinding(
     key: `${code} ${first.method} ${shape} (test ${first.testId})`,
     fingerprint: sha256Canonical(identity),
   };
-  if (code === HTTP_CALL_UNMATCHED) {
+  if (code === HTTP_CALL_UNMATCHED || code === HTTP_ROUTE_NOT_INVENTORIED) {
     return {
       code,
       resourceId: null,
       location: null,
       ...named,
       detail:
-        `test '${first.testId}' called ${call} which matched no route in the run's inventory ` +
-        `(HTTP ${statuses.join(', ')})`,
+        code === HTTP_CALL_UNMATCHED
+          ? `test '${first.testId}' called ${call} which matched no route in the run's inventory (HTTP ${statuses.join(', ')})`
+          : `the app served ${first.method} ${first.path} (HTTP ${statuses.join(', ')}) but the route inventory has no such route — the inventory is incomplete; check the detector for this framework`,
     };
   }
   const candidates = [
@@ -328,13 +332,22 @@ function callFindings(
   const grouped = new Map<string, HttpLedger['rows'][number][]>();
   for (const entry of ledger?.rows ?? []) {
     if (entry.kind !== 'api' || (entry.resolution !== 'nomatch' && entry.resolution !== 'ambiguous')) continue;
-    const key = `${entry.resolution}\u0000${entry.testId}\u0000${entry.method}\u0000${pathShape(entry.path)}`;
+    const code =
+      entry.resolution === 'ambiguous'
+        ? HTTP_CALL_AMBIGUOUS
+        : entry.status === 404 || entry.status === 405
+          ? HTTP_CALL_UNMATCHED
+          : HTTP_ROUTE_NOT_INVENTORIED;
+    const key = `${code}\u0000${entry.testId}\u0000${entry.method}\u0000${pathShape(entry.path)}`;
     const bucket = grouped.get(key);
     if (bucket === undefined) grouped.set(key, [entry]);
     else bucket.push(entry);
   }
   for (const [key, rows] of grouped) {
-    const code = key.startsWith('nomatch') ? HTTP_CALL_UNMATCHED : HTTP_CALL_AMBIGUOUS;
+    const code = key.slice(0, key.indexOf('\u0000')) as
+      | typeof HTTP_CALL_UNMATCHED
+      | typeof HTTP_CALL_AMBIGUOUS
+      | typeof HTTP_ROUTE_NOT_INVENTORIED;
     const finding = rowFinding(rows, code);
     if (finding !== null) findings.push(finding);
   }
@@ -407,7 +420,12 @@ export function evaluateHttpCoverage(input: HttpCoverageInput): HttpCoverageResu
       used: used.size,
       proven: proven.size,
       missing: missingRoutes.length,
-      unmatched: rows.filter((entry) => entry.kind === 'api' && entry.resolution === 'nomatch').length,
+      unmatched: rows.filter(
+        (entry) =>
+          entry.kind === 'api' &&
+          entry.resolution === 'nomatch' &&
+          (entry.status === 404 || entry.status === 405),
+      ).length,
       ambiguous: rows.filter((entry) => entry.kind === 'api' && entry.resolution === 'ambiguous').length,
       ...((ledger?.summary.inventory ?? (routes.length === 0 ? 'unavailable' : 'complete')) === 'complete'
         ? {}

@@ -783,17 +783,22 @@ export function evaluateRun(input: EvaluateInput): EvaluateResult {
   // counted in `httpCallsBaselined` and never graded. Only a NEW finding is
   // graded by the channel above (`block` blocks it, `report` advises it).
   const adoptedCallFingerprints = input.baseline?.fingerprints;
-  const newCallFindings = httpCoverage.findings.filter(
+  const adoptableCallFindings = httpCoverage.findings.filter(
+    (finding) => finding.code !== 'HTTP_ROUTE_NOT_INVENTORIED',
+  );
+  const newCallFindings = adoptableCallFindings.filter(
     (finding) => adoptedCallFingerprints?.has(finding.fingerprint) !== true,
   );
-  const httpCallsBaselined = httpCoverage.findings.length - newCallFindings.length;
+  const httpCallsBaselined = adoptableCallFindings.length - newCallFindings.length;
   const callEntries = httpCallFindingEntries(newCallFindings);
+  const inventoryAdvisories = httpCallFindingEntries(
+    httpCoverage.findings.filter((finding) => finding.code === 'HTTP_ROUTE_NOT_INVENTORIED'),
+  );
   const callBlocking = config.http.callFindings === 'block' ? callEntries : [];
-  // `report` shows response-shape mismatches as advisories; `block` grades
-  // them through the claim obligation instead (never twice).
   const responseShapeAdvisories =
     config.http.responseShape === 'report' ? httpResponseShapeEntries(ledger.rows) : [];
   const httpCallAdvisories = [
+    ...inventoryAdvisories,
     ...(config.http.callFindings === 'block' ? [] : callEntries),
     ...responseShapeAdvisories,
   ];

@@ -188,10 +188,14 @@ async function openSession(): Promise<SessionCredential> {
 /** Drives one proxied GET through the session's dedicated observation proxy. */
 async function proxiedGet(session: SessionCredential, path: string): Promise<number> {
   const { promise, resolve, reject } = withResolvers<number>();
-  get(`${session.proxyUrl as string}${path}`, (response) => {
-    response.resume();
-    response.on('end', () => resolve(response.statusCode ?? 0));
-  }).on('error', reject);
+  get(
+    `${session.proxyUrl as string}${path}`,
+    { headers: { 'sec-fetch-dest': 'empty' } },
+    (response) => {
+      response.resume();
+      response.on('end', () => resolve(response.statusCode ?? 0));
+    },
+  ).on('error', reject);
   return promise;
 }
 
@@ -326,7 +330,7 @@ describe('proxied exchanges — each body checked against its declared response 
     const session = await openSession();
     expect(await proxiedGet(session, '/items/1')).toBe(200);
     const exchanges = await closedExchanges(session);
-    expect(exchanges).toEqual([{ method: 'GET', url: '/items/1', status: 200 }]);
+    expect(exchanges).toEqual([{ method: 'GET', url: '/items/1', status: 200, fetchDest: 'empty' }]);
   });
 });
 

@@ -1427,11 +1427,13 @@ The ledger is not decoration: five rules run over it at verdict time.
   `http.endpoint.requireObservation: all`), so no rule here invents an
   obligation.
 - **R2 — an unmatched API call is a defect only with a complete inventory.**
-  Only `kind: "api"` rows with `resolution: "nomatch"` report
-  `HTTP_CALL_UNMATCHED`, naming the test, method, path and every status
-  observed. Repeats of the same call by one test are ONE finding. An empty
-  route inventory or `incomplete` matcher result cannot prove a call
-  unmatched and produces no R2 finding.
+  Only `kind: "api"` rows with `resolution: "nomatch"` and status 404 or
+  405 report `HTTP_CALL_UNMATCHED`, naming the test, method, path and
+  missing-route statuses. Repeats are one finding. A nomatch with every
+  other status reports `HTTP_ROUTE_NOT_INVENTORIED` as a report-only
+  advisory: the app answered, so the detector inventory may be incomplete.
+  This advisory is never blocking or adoptable debt. An empty route
+  inventory or `incomplete` matcher result cannot prove a call unmatched.
 - **R3 — an ambiguous API call is a defect.** Only API rows matching
   several routes at equal specificity report `HTTP_CALL_AMBIGUOUS` with
   the candidates. Incomplete inventory placements and page/asset/unknown
@@ -1473,8 +1475,10 @@ and `missing` is `used` minus `proven`.
 
 ### Adopting call findings (`http.callFindings`, debt, then new blocks)
 
-Existing `HTTP_CALL_UNMATCHED`, `HTTP_CALL_AMBIGUOUS` and `HTTP_CALL_UNRESOLVED`
-findings are recorded as debt. A NEW one blocks in `block` mode.
+Only blocking-eligible `HTTP_CALL_UNMATCHED` (404/405), `HTTP_CALL_AMBIGUOUS`
+and `HTTP_CALL_UNRESOLVED` findings are recorded as debt. `HTTP_ROUTE_NOT_INVENTORIED`
+is always advisory: it is never adopted and can never block. A NEW eligible finding
+blocks in `block` mode.
 
 - **Identity.** Each finding has a fingerprint: a sha256 over a canonical
   description of the call. For UNMATCHED and AMBIGUOUS the description is the

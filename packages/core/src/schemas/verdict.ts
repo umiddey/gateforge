@@ -105,6 +105,7 @@ export const CauseCodeSchema = z.enum([
   'HTTP_CALL_UNMATCHED',
   'HTTP_CALL_AMBIGUOUS',
   'HTTP_CALL_UNRESOLVED',
+  'HTTP_ROUTE_NOT_INVENTORIED',
   // 0.14 WP4: the witness's body-vs-model check. A mismatch is a finding
   // (report-only under `http.responseShape: report`); an over-cap body is
   // refused, never silently passed.
@@ -214,6 +215,8 @@ export const CAUSE_NEXT_ACTIONS: Readonly<Record<CauseCode, string>> = Object.fr
   BUSINESS_RULE_TEST_FAILING:
     'Fix the mapped test or the behaviour it proves: every mapped test of a case must pass (a green ' +
     'sibling never forgives a red one).',
+  HTTP_ROUTE_NOT_INVENTORIED:
+    'The app answered but the route inventory is incomplete; check the detector for this framework',
   HTTP_CALL_UNMATCHED:
     'A witnessed call matches no served route: fix the caller URL or serve the route it means; ' +
     'an unresolvable call is an application bug, not a missing test',
