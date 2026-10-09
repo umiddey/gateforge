@@ -26,6 +26,12 @@
 - Automatic witnessed sessions also cover the equivalent `playwright/test`
   entry in CommonJS, ESM and project re-exporting helpers, preserving root
   test properties and extension hooks without redirecting the plain library.
+- Page-observation diagnostics now describe session-backed observation instead
+  of claiming plain-import tests require an explicit fixture. Clean passing
+  auto-session tests retain their page records under the same witness rules.
+  Twin comparison advice accepts both supported Playwright package imports
+  and the explicit fixture; uninstrumented or zero-traffic twins remain
+  explicitly not compared.
 
 ## 0.14.0
 

@@ -10,9 +10,9 @@
  * API. Tests that use engine-driven UI must extend this runner with a
  * declarative `surface` descriptor (`test.extend({ surface })`) — the
  * pack carries no application-specific selectors. Tests must
- * import `{ test, expect }` FROM A RUNNER EXTENDED LIKE THIS — importing
- * raw `playwright/test` bypasses the fixture and produces claims with no
- * records (the engine grades the obligation `missing`; GF-24).
+ * import `{ test, expect }` FROM A RUNNER EXTENDED LIKE THIS. Witnessed
+ * runs automatically redirect consumer `@playwright/test` and `playwright/test`
+ * imports here too; an uninstrumented test produces no browser records.
  *
  * API requests made directly from test code are never E2E evidence. The
  * `request` fixture, owned `page.request`/`context.request`, and exported

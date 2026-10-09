@@ -127,7 +127,14 @@ test('customers visit fails after loading', async ({ page }) => {
 `,
   'specs/plain.spec.ts': `import { expect, test } from 'playwright/test';
 const app = process.env.GATEFORGE_APP_BASE_URL!;
-test('opens a page without the Gateforge fixture', async ({ page }) => {
+test('opens a page through the auto-session fixture', async ({ page }) => {
+  await page.goto(app + '/orders/42');
+  await expect(page.locator('main')).toHaveText('Orders ready');
+});
+`,
+  'specs/uninstrumented.spec.ts': `import { expect, test } from '../node_modules/playwright/test.mjs';
+const app = process.env.GATEFORGE_APP_BASE_URL!;
+test('opens a page through an unhooked module path', async ({ page }) => {
   await page.goto(app + '/orders/42');
   await expect(page.locator('main')).toHaveText('Orders ready');
 });
@@ -138,6 +145,7 @@ const SEALED_PAGE_SPECS: Record<string, string> = {
   'specs/orders.spec.ts': PAGE_SPECS['specs/orders.spec.ts']!,
   'specs/tamper.spec.ts': PAGE_SPECS['specs/tamper.spec.ts']!,
   'specs/plain.spec.ts': PAGE_SPECS['specs/plain.spec.ts']!,
+  'specs/uninstrumented.spec.ts': PAGE_SPECS['specs/uninstrumented.spec.ts']!,
 };
 
 interface Verdict {
@@ -303,7 +311,7 @@ function verdictFor(report: GateReport, prefix: string, contract: string): Verdi
 afterAll(() => cleanupWitnessedFixture());
 
 describe('page observations through a sealed test-gates run', () => {
-  it('seals clean dynamic-route proof and refuses tampered and non-fixture tests', async () => {
+  it('seals explicit and auto-session page proof but refuses tampered and uninstrumented tests', async () => {
     await withTempRepo({}, async (repo) => {
       installPagesRepo(repo, ORDER_ROUTES, SEALED_PAGE_SPECS);
       repo.git(['add', '-A']);
@@ -325,7 +333,8 @@ describe('page observations through a sealed test-gates run', () => {
           env,
         );
         const runReport = parseReport(run.stdout, run);
-        expect(run.stderr, run.stdout).toContain('PAGE_OBSERVATION_FIXTURE_REQUIRED');
+        expect(run.stderr, run.stdout).not.toContain('PAGE_OBSERVATION_FIXTURE_REQUIRED');
+        expect(run.stderr, run.stdout).toContain('PAGE_OBSERVATION_ENABLED');
         expect(run.stderr, run.stdout).toContain('PAGE_OBSERVATION_TAMPER_RISK');
         expect(run.stderr, run.stdout).toContain('specs/tamper.spec.ts:4');
         expect(runReport.verdicts?.length, run.stdout).toBeGreaterThan(0);
@@ -337,12 +346,28 @@ describe('page observations through a sealed test-gates run', () => {
           trust?: string;
           obligationId?: string;
           payload?: unknown;
+          testId?: string;
         }>;
         const pageRecords = records.filter((record) => record.kind === 'page.observed');
-        expect(pageRecords).toHaveLength(2);
+        expect(pageRecords).toHaveLength(4);
+        const execution = JSON.parse(readFileSync(repo.path('.gateforge/test-gates/execution-result.json'), 'utf8')) as {
+          outcomes: Array<{ runnerTestId: string; titlePath: string[]; status: string }>;
+        };
+        for (const [title, count] of [
+          ['loads an order detail page', 2],
+          ['opens a page through the auto-session fixture', 2],
+          ['opens a page through an unhooked module path', 0],
+          ['does not trust a locally fulfilled API response', 0],
+        ] as const) {
+          const outcome = execution.outcomes.find((entry) => entry.titlePath.includes(title));
+          expect(outcome?.status, title + run.stdout + run.stderr).toBe('passed');
+          expect(pageRecords.filter((record) => record.testId === outcome?.runnerTestId), title).toHaveLength(count);
+        }
         expect(pageRecords.every((record) => record.origin === 'engine-observed' && record.trust === 'witnessed')).toBe(true);
         expect(pageRecords.map((record) => record.obligationId?.split(':').slice(-2).join(':')).sort()).toEqual([
           'page:data-ok',
+          'page:data-ok',
+          'page:loads',
           'page:loads',
         ]);
         // Additive 0.13: every recorded API exchange carries its method.
@@ -456,7 +481,7 @@ test('visits customers instead of the promised orders page', async ({ page }) =>
           'order page handles the failed API response',
           'does not trust a locally fulfilled API response',
           'customers visit fails after loading',
-          'opens a page without the Gateforge fixture',
+          'opens a page through the auto-session fixture',
         ];
         const args = [
           'test-gates',
@@ -467,7 +492,8 @@ test('visits customers instead of the promised orders page', async ({ page }) =>
         ];
         const run = await runCliProcess(repo.root, args, env);
         const report = parseReport(run.stdout, run);
-        expect(run.stderr, run.stdout).toContain('PAGE_OBSERVATION_FIXTURE_REQUIRED');
+        expect(run.stderr, run.stdout).not.toContain('PAGE_OBSERVATION_FIXTURE_REQUIRED');
+        expect(run.stderr, run.stdout).toContain('PAGE_OBSERVATION_ENABLED');
         expect(report.execution?.selectedTests).toMatchObject({ selected: 7, expectedFailures: 1 });
         const bounced = verdictFor(report, 'tenant.page-secret-', 'page:loads');
         expect(bounced.verdict).not.toBe('satisfied');

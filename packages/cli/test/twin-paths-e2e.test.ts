@@ -53,14 +53,14 @@ const UNLINKED_TITLE = 'lists open items fast';
  * to link the pair, and a title built from an environment variable is
  * not a title any enumeration can see.
  */
-function twinSpec(witnessedTitle: string, rawTitle: string, rawPath: string, rawPlain = false): string {
+function twinSpec(witnessedTitle: string, rawTitle: string, rawPath: string, rawPlain = false, rawUnhooked = false): string {
   return `import { test as gateforgeTest, expect } from '@gate-forge/pack-playwright';
-import { test as plainTest } from 'playwright/test';
+import { test as plainTest } from '${rawUnhooked ? '../node_modules/playwright/test.mjs' : 'playwright/test'}';
 
 const test = gateforgeTest;
-// A plain Playwright test opens no witness session: the common way a
-// repository writes its raw twin.
-const rawTest = ${rawPlain ? 'plainTest' : 'gateforgeTest'};
+// Plain package imports are auto-session witnessed; a direct module path
+// bypasses specifier interception and retains the uninstrumented case.
+const rawTest = ${rawPlain || rawUnhooked ? 'plainTest' : 'gateforgeTest'};
 const appBase = process.env.GATEFORGE_APP_BASE_URL;
 const rawPath = '${rawPath}';
 
@@ -209,8 +209,10 @@ interface RunShape {
   rawTitle: string;
   /** The witnessed twin's own title. */
   witnessedTitle: string;
-  /** Whether the raw twin is a plain Playwright test (no Gateforge fixture). */
+  /** Whether the raw twin uses a plain package import (auto-session witnessed). */
   rawPlain?: boolean;
+  /** Whether the raw twin bypasses interception with a direct module path. */
+  rawUnhooked?: boolean;
 }
 
 /** `advisory` twin coverage: the reported finding, exit code untouched. */
@@ -252,7 +254,7 @@ ${enforcement === null ? '' : `enforcement:\n${enforcement}\n`}`;
 function installRepo(repo: TempRepo, shape: RunShape): void {
   installStrictFixture(repo, {
     'specs/crud.spec.js': CRUD_SPEC,
-    'specs/items.spec.js': twinSpec(shape.witnessedTitle, shape.rawTitle, shape.rawPath, shape.rawPlain),
+    'specs/items.spec.js': twinSpec(shape.witnessedTitle, shape.rawTitle, shape.rawPath, shape.rawPlain, shape.rawUnhooked),
   });
   repo.git(['add', '-A']);
   repo.git(['commit', '--no-gpg-sign', '--quiet', '-m', 'twin path fixture']);
@@ -269,7 +271,7 @@ function installRepo(repo: TempRepo, shape: RunShape): void {
 function reshapeRepo(repo: TempRepo, shape: RunShape): void {
   repo.writeFiles({
     '.gateforge.yml': configYaml(shape.enforcement),
-    'specs/items.spec.js': twinSpec(shape.witnessedTitle, shape.rawTitle, shape.rawPath, shape.rawPlain),
+    'specs/items.spec.js': twinSpec(shape.witnessedTitle, shape.rawTitle, shape.rawPath, shape.rawPlain, shape.rawUnhooked),
   });
 }
 
@@ -384,8 +386,32 @@ describe('twin path coverage (E64): a green run that covered a different path', 
     });
   }, 600_000);
 
-  it('says a pair was not compared when its raw twin is a plain Playwright test', async () => {
+  it('compares a plain-import raw twin and finds its divergent path', async () => {
     const plain: RunShape = { ...DIVERGENT, rawPlain: true };
+    await withTempRepo({}, async (repo) => {
+      installRepo(repo, plain);
+      const app = await startTwinApp();
+      const proxy = await startAttestationProxy(app.url, FINGERPRINT);
+      try {
+        const run = await runFixture(repo, proxy.url, plain);
+        const report = parseReport(run);
+        expect(run.code, `${run.stdout}\n${run.stderr}`).toBe(0);
+        expect(divergences(report)).toHaveLength(2);
+        expect(run.stderr).not.toContain('twin pair not compared');
+        const shapes = JSON.parse(readFileSync(join(stateDir(repo), 'twin-shapes.json'), 'utf8')) as TwinShapesDocument;
+        expect(shapes.twins.find((twin) => twin.logicalKey.endsWith(`:${RAW_TITLE}`))).toMatchObject({
+          observationOnly: true,
+          shapes: expect.arrayContaining([{ method: 'GET', route: '/api/items', query: { tab: 'all' } }]),
+        });
+      } finally {
+        await proxy.stop();
+        await app.stop();
+      }
+    });
+  }, 600_000);
+
+  it('says a pair was not compared when its raw twin bypasses auto-session interception', async () => {
+    const plain: RunShape = { ...DIVERGENT, rawUnhooked: true };
     await withTempRepo({}, async (repo) => {
       installRepo(repo, plain);
       const app = await startTwinApp();
@@ -400,7 +426,10 @@ describe('twin path coverage (E64): a green run that covered a different path', 
         expect(run.stderr).toContain(
           `test-gates: twin pair not compared: the raw test 'playwright:chromium:specs/items.spec.js:${RAW_TITLE}' sent no request through the witness`,
         );
-        expect(run.stderr).toContain('runs with the Gateforge test fixture');
+        expect(run.stderr).toContain('use a supported Playwright test import');
+        const shapes = JSON.parse(readFileSync(join(stateDir(repo), 'twin-shapes.json'), 'utf8')) as TwinShapesDocument;
+        expect(shapes.twins.some((twin) => twin.logicalKey.endsWith(`:${RAW_TITLE}`))).toBe(false);
+        expect(shapes.twins.some((twin) => twin.logicalKey.endsWith(`:${WITNESSED_TITLE}`) && twin.shapes.length > 0)).toBe(true);
       } finally {
         await proxy.stop();
         await app.stop();

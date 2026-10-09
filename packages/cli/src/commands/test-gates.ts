@@ -1314,7 +1314,7 @@ export function twinPairNotComparedLine(link: TwinLink, witnessedObserved: boole
   ].join(' and ');
   const fix = rawObserved
     ? ''
-    : ' — a raw twin is observed only when it runs with the Gateforge test fixture, which opens an observation-only session for it (it issues no evidence)';
+    : ' — use a supported Playwright test import (@playwright/test or playwright/test) for automatic sessions, or the explicit Gateforge test fixture, and send browser requests through the session proxy; linked raw twins are observation-only (they issue no evidence)';
   return `test-gates: twin pair not compared: ${unobserved} sent no request through the witness${fix}`;
 }
 
@@ -4507,7 +4507,7 @@ async function runSupervisedTestGatesInner(
   if (pageObservation !== null) {
     writeLine(
       io.stderr,
-      'PAGE_OBSERVATION_FIXTURE_REQUIRED: page records are issued only for tests using the Gateforge Playwright fixture; other tests produce no page-observation records.',
+      'PAGE_OBSERVATION_ENABLED: page records are retained for passing tests with session-backed observation, including automatic Playwright sessions; uninstrumented tests produce no page-observation records.',
     );
     const reportedTamperLocations = new Set<string>();
     for (const risk of pageObservation.tamperRisks) {
