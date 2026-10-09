@@ -162,9 +162,14 @@ describe('the declaration is owner-pinned: it lives in the approved policy diges
   it('absent means the pre-existing revision, byte for byte', async () => {
     await withTempRepo({}, async (repo) => {
       installFixture(repo);
-      expect(trustedPolicyDigestForConfig(repo.root, loadConfig(repo.path('.gateforge.yml')))).toBe(
-        DIGEST_WITHOUT_TEST_TOOLING,
-      );
+      const digest = trustedPolicyDigestForConfig(repo.root, loadConfig(repo.path('.gateforge.yml')));
+      expect(digest).toBe(DIGEST_WITHOUT_TEST_TOOLING);
+      for (const key of ['routeSource', 'callFindings', 'responseShape', 'openapiPath'] as const) {
+        const absentKeyConfig = configYml({ http: { [key]: undefined } });
+        expect(absentKeyConfig).toBe(configYml());
+        repo.writeFiles({ '.gateforge.yml': absentKeyConfig });
+        expect(trustedPolicyDigestForConfig(repo.root, loadConfig(repo.path('.gateforge.yml')))).toBe(digest);
+      }
     });
   });
 });

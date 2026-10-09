@@ -232,7 +232,12 @@ export function configYml(options: {
    * rule as every other optional section: a fixture that declares nothing
    * keeps byte-identical `.gateforge.yml` text.
    */
-  http?: { callFindings?: 'report' | 'block' };
+  http?: {
+    routeSource?: 'openapi' | 'detectors' | 'both';
+    callFindings?: 'report' | 'block';
+    responseShape?: 'off' | 'report' | 'block';
+    openapiPath?: string;
+  };
 } = {}): string {
   const include = options.include ?? "['src/**/*.txt']";
   const plugins =
@@ -300,10 +305,11 @@ export function configYml(options: {
           .join('')}`;
   // HTTP settings (0.14). Absent emits zero bytes, so a fixture that
   // declares no HTTP setting keeps byte-identical config text.
+  const httpEntries = Object.entries(options.http ?? {}).filter(([, value]) => value !== undefined);
   const httpSection =
-    options.http === undefined
+    httpEntries.length === 0
       ? ''
-      : `\nhttp:${options.http.callFindings === undefined ? '' : `\n  callFindings: ${options.http.callFindings}`}`;
+      : `\nhttp:\n${httpEntries.map(([key, value]) => `  ${key}: ${String(value)}`).join('\n')}`;
   return `\
 schemaVersion: 1
 project:
@@ -320,8 +326,7 @@ waivers: .gateforge/waivers
 baselines: .gateforge/baselines/obligations.json
 # Scanner settings (0.11.0): REQUIRED in .gateforge.yml. These four keys
 # used to sit at the top of .gateforge/classification-policy.yml.
-${scanSection}
-${httpSection}
+${scanSection}${httpSection}
 changed:
   provider: ${options.provider ?? 'auto'}
 witness:
