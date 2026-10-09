@@ -73,56 +73,83 @@ export function mergeRouteSources(
   mode: RouteSourceMode,
 ): MergedRouteSources {
   const detectorByKey = new Map<string, HttpContractFact[]>();
+  const detectorBySourceKey = new Map<string, HttpContractFact[]>();
   for (const fact of detector) {
     if (fact.role !== 'server-route') continue;
     const key = routeKey(fact.method, fact.normalizedPath);
     const entries = detectorByKey.get(key);
     if (entries === undefined) detectorByKey.set(key, [fact]);
     else entries.push(fact);
+    const sourceKey = routeSourceKey(fact.method, fact.normalizedPath);
+    const sourceEntries = detectorBySourceKey.get(sourceKey);
+    if (sourceEntries === undefined) detectorBySourceKey.set(sourceKey, [fact]);
+    else sourceEntries.push(fact);
   }
   const openapiByKey = new Map<string, OpenApiRoute[]>();
+  const openapiBySourceKey = new Map<string, OpenApiRoute[]>();
   for (const route of openapi) {
     const key = routeKey(route.method, route.normalizedPath);
     const entries = openapiByKey.get(key);
     if (entries === undefined) openapiByKey.set(key, [route]);
     else entries.push(route);
+    const sourceKey = routeSourceKey(route.method, route.normalizedPath);
+    const sourceEntries = openapiBySourceKey.get(sourceKey);
+    if (sourceEntries === undefined) openapiBySourceKey.set(sourceKey, [route]);
+    else sourceEntries.push(route);
   }
 
   const keys = new Set<string>();
-  if (mode !== 'openapi') for (const key of detectorByKey.keys()) keys.add(key);
-  if (mode !== 'detectors') for (const key of openapiByKey.keys()) keys.add(key);
+  if (mode !== 'openapi') {
+    for (const key of detectorByKey.keys()) keys.add(key);
+  }
+  if (mode === 'openapi') {
+    for (const key of openapiByKey.keys()) keys.add(key);
+  } else if (mode === 'both') {
+    for (const [key, routes] of openapiByKey) {
+      const route = routes[0];
+      if (route !== undefined && !detectorBySourceKey.has(routeSourceKey(route.method, route.normalizedPath))) {
+        keys.add(key);
+      }
+    }
+  }
 
   const table: RouteTableEntry[] = [];
   const findings: RouteSourceMismatch[] = [];
-  for (const key of keys) {
-    const detectorFacts = detectorByKey.get(key) ?? [];
-    const openapiRoutes = openapiByKey.get(key) ?? [];
-    const detectorOnly = detectorFacts.length > 0 && openapiRoutes.length === 0;
-    const openapiOnly = openapiRoutes.length > 0 && detectorFacts.length === 0;
-    if (mode === 'both' && detectorOnly) {
-      const fact = detectorFacts[0];
-      if (fact !== undefined) findings.push(mismatch(fact.method, fact.rawPath, 'detectors'));
-    } else if (mode === 'both' && openapiOnly) {
-      const route = openapiRoutes[0];
-      if (route !== undefined) findings.push(mismatch(route.method, route.path, 'openapi'));
+  if (mode === 'both') {
+    for (const facts of detectorByKey.values()) {
+      const fact = facts[0];
+      if (fact !== undefined && !openapiBySourceKey.has(routeSourceKey(fact.method, fact.normalizedPath))) {
+        findings.push(mismatch(fact.method, fact.rawPath, 'detectors'));
+      }
     }
-    const fact = mode === 'openapi' ? undefined : detectorFacts[0];
-    const openapiRoute = mode === 'detectors' ? undefined : openapiRoutes[0];
+    for (const routes of openapiByKey.values()) {
+      const route = routes[0];
+      if (route !== undefined && !detectorBySourceKey.has(routeSourceKey(route.method, route.normalizedPath))) {
+        findings.push(mismatch(route.method, route.path, 'openapi'));
+      }
+    }
+  }
+
+  for (const key of keys) {
+    const fact = mode === 'openapi' ? undefined : detectorByKey.get(key)?.[0];
+    const openapiRoute = mode === 'detectors'
+      ? undefined
+      : fact === undefined
+        ? openapiByKey.get(key)?.[0]
+        : openapiBySourceKey.get(routeSourceKey(fact.method, fact.normalizedPath))?.[0];
     if (openapiRoute === undefined && fact === undefined) continue;
-    const route = openapiRoute;
-    const method = fact?.method ?? route?.method;
-    const normalizedPath = fact?.normalizedPath ?? route?.normalizedPath;
+    const method = fact?.method ?? openapiRoute?.method;
+    const normalizedPath = fact?.normalizedPath ?? openapiRoute?.normalizedPath;
     if (method === undefined || normalizedPath === undefined) continue;
-    const path = route?.path ?? fact?.rawPath ?? normalizedPath;
     const entry: RouteTableEntry = {
       method,
-      path,
+      path: openapiRoute?.path ?? fact?.rawPath ?? normalizedPath,
       normalizedPath,
       routeSources: [
         ...(fact === undefined ? [] : ['detectors' as const]),
-        ...(route === undefined ? [] : ['openapi' as const]),
+        ...(openapiRoute === undefined ? [] : ['openapi' as const]),
       ],
-      ...(route?.operationId === undefined ? {} : { operationId: route.operationId }),
+      ...(openapiRoute?.operationId === undefined ? {} : { operationId: openapiRoute.operationId }),
       ...(fact?.registration === undefined ? {} : { registration: fact.registration }),
       ...(fact === undefined ? {} : { detectorFact: fact }),
     };
@@ -204,6 +231,11 @@ export function matchExchange(
 
 function routeKey(method: string, normalizedPath: string): string {
   return `${method} ${normalizedPath}`;
+}
+
+/** OpenAPI does not encode FastAPI's path converter, so compare it by slot layout. */
+function routeSourceKey(method: string, normalizedPath: string): string {
+  return routeKey(method, normalizedPath.replace(/\{\*\}$/, '{}'));
 }
 
 function mismatch(

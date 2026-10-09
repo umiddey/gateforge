@@ -66,6 +66,25 @@ describe('route table sources', () => {
     ]));
     expect(result.findings).toHaveLength(2);
   });
+  it('merges a FastAPI path converter with the OpenAPI parameter that omits its converter', () => {
+    const detector = [detectorRoute('GET', '/files/{*}', 0)];
+    const paths = routeTableFromOpenApi({
+      openapi: '3.1.0',
+      info: { title: 'Fixture API', version: '1.0' },
+      paths: { '/files/{file_path}': { get: { operationId: 'get_file' } } },
+    });
+    const result = mergeRouteSources(detector, paths, 'both');
+
+    expect(result.findings).toEqual([]);
+    expect(result.table).toEqual([
+      expect.objectContaining({
+        method: 'GET',
+        normalizedPath: '/files/{*}',
+        operationId: 'get_file',
+        routeSources: ['detectors', 'openapi'],
+      }),
+    ]);
+  });
 
   it('uses detector registration order, not OpenAPI path insertion order, for first-match dispatch', () => {
     const detector = [
