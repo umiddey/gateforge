@@ -70,6 +70,15 @@ export const HTTP_OBSERVED_KIND = 'http.observed';
 export const HTTP_EXCHANGES_KIND = 'http.exchanges';
 
 /**
+ * Bind-time OpenAPI kind (0.14 WP4): issued ONLY by the witness when a
+ * run binds a response-shape plan — ONE record per run carrying the
+ * attested backend's OpenAPI digest, byte count and declared routes, or
+ * the typed reason it is unavailable. Never suite-submittable
+ * (`/records` does not accept it) and never a claim.
+ */
+export const HTTP_OPENAPI_KIND = 'http.openapi';
+
+/**
  * Upper bound on the exchanges one `http.observed` record carries. A
  * session that drove more gets the first CAP exchanges in observation
  * order plus `truncated: true` in the payload: the cap can only hide

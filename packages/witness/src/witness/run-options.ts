@@ -33,11 +33,25 @@ export interface RunOptions {
   chaos?: ChaosOptions;
   /** The shape-recording plan, or absent when no pair can be compared. */
   twinShapes?: TwinShapePlan;
+  /**
+   * The response-shape plan: fetch the attested backend's OpenAPI
+   * document at binding and validate captured bodies against it. Absent
+   * when the run's `http.responseShape` is off, so such a run makes no
+   * request and seals no `http.openapi` record.
+   */
+  responseShape?: ResponseShapeOptions;
+}
+
+/** The owner's response-shape request: where the backend publishes its OpenAPI. */
+export interface ResponseShapeOptions {
+  /** The document path on the attested backend, e.g. `/openapi.json`. */
+  openapiPath: string;
 }
 
 /** The options a witness confirmed it applied, echoed back to the caller. */
 export interface AppliedRunOptions {
   chaos: ChaosOptions | null;
+  responseShape: ResponseShapeOptions | null;
   twinShapes: TwinShapePlan | null;
 }
 
@@ -144,10 +158,38 @@ export function parseRunOptions(raw: unknown): RunOptions {
   if (!isPlainObject(raw)) throw new Error('run options: options must be an object when present');
   const chaos = raw['chaos'];
   const twinShapes = raw['twinShapes'];
+  const responseShape = raw['responseShape'];
   return {
     ...(chaos === undefined || chaos === null ? {} : { chaos: parseBoundChaos(chaos) }),
     ...(twinShapes === undefined || twinShapes === null ? {} : { twinShapes: parseBoundTwinShapes(twinShapes) }),
+    ...(responseShape === undefined || responseShape === null
+      ? {}
+      : { responseShape: parseBoundResponseShape(responseShape) }),
   };
+}
+
+/**
+ * Parses the response-shape request a binding carries: the OpenAPI
+ * document path, which must be an absolute path on the attested backend.
+ *
+ * Args:
+ *   raw: the `options.responseShape` value from the binding body.
+ *
+ * Returns:
+ *   ResponseShapeOptions: the accepted request.
+ *
+ * @throws Error: when the path is not a non-empty absolute path.
+ */
+function parseBoundResponseShape(raw: unknown): ResponseShapeOptions {
+  if (!isPlainObject(raw)) throw new Error('run options: options.responseShape must be an object');
+  const openapiPath = raw['openapiPath'];
+  if (typeof openapiPath !== 'string' || !openapiPath.startsWith('/') || openapiPath.length < 2) {
+    throw new Error(
+      'run options: options.responseShape.openapiPath must be an absolute path such as /openapi.json, got ' +
+        JSON.stringify(openapiPath),
+    );
+  }
+  return { openapiPath };
 }
 
 /**

@@ -178,6 +178,7 @@ import {
   DEFAULT_REQUEST_TIMEOUT_MS,
   HTTP_EXCHANGES_KIND,
   HTTP_OBSERVED_KIND,
+  HTTP_OPENAPI_KIND,
   KNOWN_RECORD_KINDS,
   LOOPBACK_HOSTNAME,
   OBSERVED_EXCHANGES_CAP,
@@ -273,8 +274,10 @@ import {
   assertNoStartedConflict,
   parseRunOptions,
   type AppliedRunOptions,
+  type ResponseShapeOptions,
   type RunOptions,
 } from './run-options.js';
+import { fetchOpenApiAtBind, openApiRecordPayload, type OpenApiAtBind } from './openapi-at-bind.js';
 import type { FixtureLease } from './fixture-provider.js';
 import { validateScopeSnapshot } from './behavior.js';
 import { BEHAVIOR_BODY_LIMIT_BYTES, BehaviorDriverError, driveBehaviorRequest } from './behavior-request.js';
@@ -655,6 +658,10 @@ interface WitnessState {
    * enumeration to execution.
    */
   twinShapes: TwinShapePlan | null;
+  /** The response-shape plan this run bound, or null when it asked for none. */
+  responseShape: ResponseShapeOptions | null;
+  /** The bind-time OpenAPI fetch result, or null until a response-shape plan binds. */
+  openApi: OpenApiAtBind | null;
   /**
    * The expected test set the supervisor registered BEFORE the run
    * (enforcement-review fix 2a), keyed by the identity join key
@@ -1613,6 +1620,8 @@ export async function startWitness(options: WitnessOptions): Promise<WitnessHand
         ? null
         : { options: options.chaos, entries: [] },
     twinShapes: options.twinShapes === undefined || options.twinShapes === null ? null : options.twinShapes,
+    responseShape: null,
+    openApi: null,
     expectedTests: new Map(),
     enumerationDigest: null,
     pageObservation: null,
@@ -6724,6 +6733,22 @@ async function handleRunContext(
   }
   state.runContext = { runId, invocationId, inputDigest };
   state.observedSeqAtBind = state.observedSeq;
+  if (boundOptions.responseShape !== undefined && state.responseShape === null) {
+    state.responseShape = boundOptions.responseShape;
+    state.openApi = await fetchOpenApiAtBind(
+      state.options.targetBaseUrl ?? null,
+      boundOptions.responseShape.openapiPath,
+      state.options.requestTimeoutMs,
+    );
+    issueRecord(
+      state,
+      state.options.runId,
+      HTTP_OPENAPI_KIND,
+      'run',
+      openApiRecordPayload(state.openApi),
+      'engine-observed',
+    );
+  }
   sendJson(res, 200, { bound: true, runId, invocationId, inputDigest, ...appliedEcho(state) });
 }
 
@@ -6742,6 +6767,7 @@ function appliedOptionsOf(state: WitnessState): AppliedRunOptions {
   return {
     chaos: state.chaos === null ? null : state.chaos.options,
     twinShapes: state.twinShapes,
+    responseShape: state.responseShape,
   };
 }
 
@@ -6758,7 +6784,9 @@ function appliedOptionsOf(state: WitnessState): AppliedRunOptions {
  */
 function appliedEcho(state: WitnessState): { applied?: AppliedRunOptions } {
   const applied = appliedOptionsOf(state);
-  return applied.chaos === null && applied.twinShapes === null ? {} : { applied };
+  return applied.chaos === null && applied.twinShapes === null && applied.responseShape === null
+    ? {}
+    : { applied };
 }
 
 /**
