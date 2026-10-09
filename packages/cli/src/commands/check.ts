@@ -2459,14 +2459,17 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
   if (format === 'text') {
     const newCalls = evaluated.httpCallsNew;
     const migrates =
-      adoptedBaseline !== null &&
-      !adoptedBaseline.httpCallsRecorded &&
       config.http.callFindings === 'block' &&
-      newCalls > 0;
+      newCalls > 0 &&
+      (adoptedBaseline === null || !adoptedBaseline.httpCallsRecorded);
     if (migrates) {
-      report =
-        `${report}\nHTTP call findings: ${String(newCalls)} not yet recorded as debt — run ` +
-        '`gateforge adopt --family http-calls` (preview), then add --confirm to record them; until then they block';
+      // No receipt at all: the one sanctioned path is the plain adopt.
+      // A receipt without the marker: the http-calls family migration.
+      const next =
+        adoptedBaseline === null
+          ? '`gateforge adopt` to record them as debt'
+          : '`gateforge adopt --family http-calls` (preview), then add --confirm to record them';
+      report = `${report}\nHTTP call findings: ${String(newCalls)} not yet recorded as debt — run ${next}; until then they block`;
     } else if (evaluated.httpCallsBaselined + newCalls > 0) {
       report =
         `${report}\nHTTP call findings: ${String(evaluated.httpCallsBaselined)} known (baselined), ` +
