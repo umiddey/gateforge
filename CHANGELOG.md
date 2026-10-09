@@ -1,114 +1,199 @@
 # Changelog
 
-## 0.14.0 (unreleased)
-- Record each observed exchange's effective destination as `fetchDest` and
-  the Playwright resource type as `resourceType`. Browser `Sec-Fetch-Dest`
-  takes precedence when present; on plain-http custom hostnames the fixture
-  supplies the resource type and maps fetch/XHR to API destination `empty`.
-  A disagreement is recorded but never overrides the browser destination.
-  The resource-type fact is test-process supplied: it can only hide an R2
-  call, cannot make a fake test pass, and is not used by proof rules.
-  Documents and assets stay visible in the ledger but do not produce
-  API-call or response-shape findings. Missing destination metadata is
-  `unknown` and never blocks. An absent, empty, or incomplete route
-  inventory cannot prove a call unmatched; reports identify the inventory
-  as unavailable or incomplete instead.
-- Only a missing-route response (HTTP 404 or 405) is `HTTP_CALL_UNMATCHED`
-  and eligible to block or be adopted. Other statuses show
-  `HTTP_ROUTE_NOT_INVENTORIED` as a report-only advisory: the app answered,
-  but its route inventory may be incomplete.
+## 0.14.0
 
-- Add a pure OpenAPI path/method route table and merge it with detector
-  inventory using `http.routeSource` (`both` by default). Source-only routes
+Theme: In the witnessed run, Gateforge checks the API calls your UI actually
+makes against the backend routes. Only fetch/XHR traffic counts as API traffic
+for these checks; pages and assets remain visible in the ledger but do not
+create HTTP call findings. With an available, complete route inventory, a real
+API call answered with 404 or 405 blocks as `HTTP_CALL_UNMATCHED` and names
+the test; an unresolvable frontend call site blocks as `HTTP_CALL_UNRESOLVED`
+and names its `file:line` when `http.callFindings` is `block`. Optional
+OpenAPI response-shape checks compare bodies with declared models, and
+`gateforge config` reads and writes schema-checked `.gateforge.yml` settings.
+
+### Upgrading from 0.13
+
+1. Bump the CLI and every direct `@gate-forge/*` package together to `0.14.0`.
+   Keep all Gateforge packages on the same release.
+2. Run a witnessed suite, then `gateforge check`. In `block` mode, new
+   `HTTP_CALL_*` findings block. On a real ~700-endpoint app, four new
+   `HTTP_CALL_UNRESOLVED` findings moved blocking entries from 1 to 5.
+3. For an already-adopted repository, preview the HTTP-call migration with
+   `gateforge adopt --family http-calls`, review the findings, then run
+   `gateforge adopt --family http-calls --confirm` to record them as shrink-only
+   debt. On that app, blocking entries fell from 5 to 1.
+4. The owner must re-pin after staging: the receipt is part of the trusted
+   policy. The CLI says:
+
+   > the trusted-policy digest changed (the receipt is part of the approved revision): strict gates stay untrusted until the owner repins OUTSIDE this candidate — `gateforge enforcement pin --pin-file <path> --confirm` after staging, or the approved-digest env var / trusted config
+
+5. Prefer resolving the call sites to carrying debt. Declare genuine fetch or
+   axios wrappers and pure URL builders under the existing `scan.httpClients`
+   section in `.gateforge.yml`. For example, for `apiGet(path) { return
+   fetch(path); }` and a pure `buildApiPath(path)` that prefixes `/api/v1`:
+
+   ```yaml
+   scan:
+     httpClients:
+       wrapperFunctions:
+         - name: apiGet
+           method: GET
+       urlBuilders:
+         - name: buildApiPath
+           base: /api/v1
+   ```
+
+   The `wrapperFunctions` and `urlBuilders` arrays are declared by the
+   `scan.httpClients` schema; pack-http reads the wrapper name and concrete
+   method, and the builder name and optional literal base. Declare only
+   functions that actually satisfy those contracts.
+6. Set `http.callFindings: report` to keep new call findings advisory; the
+   `light` preset writes this setting by default. `normal` and `strict` use
+   `block`.
+
+### What's new
+
+#### Exchange ledger and resource classification
+
+- Every passed witnessed session, including one with no claims, contributes
+  its deduplicated HTTP exchanges as a claim-free `http.exchanges` record;
+  completed page sweeps contribute their exchanges too. Failed sessions drop
+  the record, and a session that proxied nothing issues none. This record can
+  never satisfy an obligation.
+- Each exchange records its effective `fetchDest` and raw Playwright
+  `resourceType`. Browser `Sec-Fetch-Dest` takes precedence when present;
+  otherwise the fixture maps fetch/XHR to API destination `empty`, documents
+  to `document`, and retains asset destinations. A disagreement is recorded
+  without overriding the browser value. The resource-type header is a
+  test-process observation: when browser destination metadata is absent it
+  affects API-call and response-shape finding selection, but never proves or
+  satisfies an obligation.
+  Documents and assets stay visible in the ledger without creating API-call
+  or response-shape findings; `unknown` traffic does not block.
+- The `httpLedger` report field adds one row per exchange—test, method,
+  query-stripped path, status, attributed route, and the matcher's
+  `match`/`nomatch`/`ambiguous`/`incomplete` result—plus a resolution summary.
+  The field is additive and report-only by itself; the R1-R5 rules below use
+  the same exchange evidence to create findings.
+- Reports include one HTTP coverage line and the same values under
+  `httpCoverage`: served, used, proven, missing, unmatched, and ambiguous.
+  An absent or incomplete inventory is named rather than treated as proof
+  that an observed call is unmatched. Reports that do not compute the
+  summary keep their existing output.
+
+#### Route inventory and attribution fixes
+
+- Merge a pure OpenAPI path/method route table with detector inventory using
+  `http.routeSource` (`both` by default). Routes present in only one source
   remain in the union and produce report-only `ROUTE_SOURCE_MISMATCH`
   findings.
-- Resolve concrete HTTP exchanges using existing positional route matching
-  and proven detector registration order. Unknown precedence stays
-  ambiguous; OpenAPI path order never substitutes for registration order.
-- Keep ONE route resolver. Route attribution now lives in a single
-  obligation-free matcher that both obligation grading and the exchange
-  ledger call; the second matcher the route table shipped with is gone.
-- Every witnessed session's HTTP exchanges become evidence. Closing a
-  session that passed (or completing a page sweep) issues one claim-free
-  `http.exchanges` record carrying that session's transport snapshot, so
-  calls made by tests without claims are no longer invisible. The kind
-  can never satisfy an obligation.
-- Report every exchange's route. A run's report JSON gains `httpLedger`:
-  one row per witnessed exchange (`testId`, method, query-stripped path,
-  status, attributed route, and the matcher's `match`/`nomatch`/
-  `ambiguous`/`incomplete` answer) with a resolution summary. Report-only
-  — no verdict and no exit code changes.
-- Ask the ledger for answers. The rules R1-R5 of the plan now run at
-  verdict time: a route a witnessed exchange matched OR the static join
-  consumed is USED, and every used-but-unproven route is counted with its
-  callers. A witnessed call that matches no route reports
-  `HTTP_CALL_UNMATCHED` with the test that made it; one that matches
-  several routes equally reports `HTTP_CALL_AMBIGUOUS`; a static call
-  site the join could not resolve reports `HTTP_CALL_UNRESOLVED` with its
-  `file:line`. Served-but-never-used stays a count, never a finding.
-- The channel is the owner's: `http.callFindings: report | block`
-  (default `block`). Report mode prints and serializes every NEW call
-  finding on the existing advisory channel and leaves the exit code alone;
-  block mode puts new findings on the run's blocking set exactly like any
-  other blocking finding. Findings already recorded as debt are counted, not
-  blocked (next entry).
-- Existing HTTP call findings are adopted, not blocked. Each finding gets a
-  stable identity: method and path shape plus test id for UNMATCHED and
-  AMBIGUOUS; file and scanner detail for UNRESOLVED. The HTTP status and the
-  line number are never part of it. `gateforge adopt --family http-calls`
-  previews, then `--confirm` records today's findings as debt in the adoption
-  receipt. `check` names that migration in one line; a repository with no
-  receipt is pointed at plain `gateforge adopt`. Adopted findings are counted
-  in the debt summary, and a fixed finding leaves the count with no edit.
-  `gateforge baseline update --family-http-calls` shrinks the receipt.
-- `light` writes `http.callFindings: report`; `normal` and `strict` write
-  `block`.
-- One summary line, everywhere. The human report prints
-  `HTTP: <served> served, <used> used, <proven> proven, <missing> missing,
-  <unmatched> unmatched, <ambiguous> ambiguous`, and the json report gains
-  the same numbers under `httpCoverage`. Additive: a report that does not
-  carry it keeps exactly the bytes it always had.
-- `gateforge next` names the caller. When the top item is a used route's
-  `http:request-observed` / `http:response-status-ok`, the `why` line now
-  ends with the witnessing test ids and the static call sites that make
-  the route real, so the single next action says WHO depends on it.
-- Prove which routes an app actually mounts. `pack-fastapi` now emits the
-  include chain that reaches each route (`include-chain:<app> → <router>
-  → …`, built from the same walk that positions a route — never a second
-  resolver) instead of a bare vocabulary token, and a router no
-  `include_router` targets emits NO proof at all. The compiled endpoint
-  carries those proofs in `mountProvenances`, so a proven-unmounted route
-  finally leaves the `served` denominator instead of being counted as
-  live. Each is also named report-only as `HTTP_ENDPOINT_UNMOUNTED`; the
-  finding is minted only in a run that carries proofs at all, so a
-  detector that cannot follow the mount graph never flags anything.
-- Mark conditional route declarations. A route declared inside a
-  module-level `if`/`try`/`with`/`for`/`while` registers only when its
-  branch runs, so its fact now carries `conditional: true`. Marked, never
-  dropped, and never a served-ness input: its router is mounted either
-  way, so the route keeps its mount proof and its registration (which is
-  right whenever the route does register).
-- Check the response BODY against the declared model. The witness fetches
-  the app's OpenAPI document (`http.openapiPath`, default `/openapi.json`)
-  once at run bind and seals it as an `http.openapi` record. Each proxied
-  JSON response body is validated against its route's declared response
-  schema (OpenAPI/JSON-Schema semantics: `nullable`, `oneOf`/`anyOf`,
-  `$ref`, `additionalProperties` allowed by default). A route with no
-  schema, or a run with no reachable document, is `unchecked` and never
-  fails the run.
-- The contract is `http:response-matches-model`, and the owner sets it with
-  `http.responseShape: off | report | block` (default `off`; the light and
-  normal presets set `report`, strict sets `block`). `report` prints shape
-  mismatches as advisories. `block` makes every consumed endpoint owe the
-  contract: a wrong field type fails with `HTTP_RESPONSE_SHAPE_MISMATCH`.
-  A body over 1 MiB is refused with `HTTP_BODY_TOO_LARGE` for that
-  obligation only. `off` changes no verdict and no golden.
-- `gateforge config get <key>`, `gateforge config set <key> <value>` and
-  `gateforge config list` read and write `.gateforge.yml` by dotted key
-  (owner decision 2026-10-06). `get` and `list` report the effective value,
-  defaults included. `set` parses the whole edited file against the pinned
-  schema, refuses unknown keys and invalid values, and leaves the file
-  untouched on any refusal.
+- Resolve concrete exchanges with positional route matching and proven
+  detector registration order. Unknown precedence stays ambiguous;
+  OpenAPI path order never substitutes for registration order.
+- Use one route resolver: obligation grading and the exchange ledger share
+  the same obligation-free matcher; the duplicate matcher shipped with the
+  route table is removed.
+- Prove which routes an app actually mounts. `pack-fastapi` emits the
+  `include-chain:<app> → <router> → …` that reaches each route from the
+  same walk that positions it. A router with no `include_router` target
+  emits no proof. The compiled endpoint carries `mountProvenances`, so a
+  proven-unmounted route leaves the `served` denominator and is named
+  report-only as `HTTP_ENDPOINT_UNMOUNTED`. That finding is emitted only
+  when the detector supplies mount proofs.
+- Preserve conditional route declarations. A route inside a module-level
+  `if`/`try`/`with`/`for`/`while` is marked `conditional: true`, not dropped.
+  The marker is not a served-ness input: the mounted router still carries
+  its mount proof and registration.
+
+#### HTTP call rules R1-R5
+
+- **R1 — API use means API use.** A route is used when an API exchange
+  matched it or the static join consumed it. Page, asset, and unknown
+  traffic do not count as API use. Used routes already owe
+  `http:request-observed` and `http:response-status-ok` through the
+  existing `consumed: true` policy (or every endpoint under
+  `http.endpoint.requireObservation: all`); the rule invents no obligation.
+- **R2 — an unmatched call requires a complete inventory.** A witnessed
+  API call that matches no route and receives 404 or 405 reports
+  `HTTP_CALL_UNMATCHED`, naming its test, method, and path. Repeated
+  occurrences are one finding. A no-match response with any other status
+  produces report-only `HTTP_ROUTE_NOT_INVENTORIED`: the app answered, but
+  its route inventory may be incomplete. An unavailable, empty, or
+  incomplete inventory cannot prove that a call is unmatched.
+- **R3 — equal route matches are ambiguous.** An API call matching several
+  routes at equal specificity reports `HTTP_CALL_AMBIGUOUS` with the
+  candidates. Incomplete placements and page, asset, or unknown rows do
+  not produce R2/R3 findings.
+- **R4 — unresolved frontend calls are not dropped.** A static call site
+  whose target cannot be resolved reports `HTTP_CALL_UNRESOLVED` with its
+  `file:line`. Existing `unresolved` blocking entries for those same sites
+  remain unchanged.
+- **R5 — served but unused is a count.** It appears in the summary and is
+  never a finding.
+- The owner chooses `http.callFindings: report | block` (default `block`).
+  `report` prints and serializes each new call finding as an advisory and
+  does not change the exit code. `block` puts new findings in the run's
+  blocking set. Findings already recorded as debt are counted, not blocked,
+  in either mode.
+- `gateforge next` names the caller when its top item is a used route's
+  `http:request-observed` or `http:response-status-ok`: its `why` line
+  includes witnessing test IDs and static call sites.
+
+#### Adoption
+
+- HTTP call findings have stable identities. Unmatched and ambiguous
+  identities include method, path shape, and test ID; unresolved identities
+  include file and scanner detail. HTTP status and source line number are
+  not part of the identity.
+- `gateforge adopt --family http-calls` previews the findings for an
+  already-adopted repository; `--confirm` records them as debt in the
+  adoption receipt. `check` names this migration. A repository with no
+  receipt is directed to plain `gateforge adopt`. Adopted findings appear
+  in the debt summary, and a finding that stops occurring leaves the
+  current debt count automatically.
+- The `http-calls` family marker is stored in the receipt, never the
+  baseline document, and is written only when findings are recorded. The
+  receipt keeps the 0.13 shape when there are no findings to record.
+- `gateforge baseline update --family-http-calls <fingerprint>...` shrinks
+  the recorded debt; `--family-http-calls=` keeps none.
+
+#### Response-shape checks
+
+- The witness fetches the app's OpenAPI document once at run bind, using
+  `http.openapiPath` (default `/openapi.json`), and seals it as an
+  `http.openapi` record. Each proxied JSON response body is checked against
+  its route's declared response schema with OpenAPI/JSON-Schema semantics,
+  including `nullable`, `oneOf`/`anyOf`, `$ref`, and
+  `additionalProperties` allowed by default. A route without a schema or a
+  run without a reachable document is `unchecked` and never fails the run.
+- The owner sets `http.responseShape: off | report | block` (default
+  `off`). `report` makes shape mismatches advisory; `block` makes each
+  consumed endpoint owe `http:response-matches-model`, and a wrong field
+  type fails with `HTTP_RESPONSE_SHAPE_MISMATCH`. A body over 1 MiB is
+  refused with `HTTP_BODY_TOO_LARGE` for that obligation only. `off`
+  changes no verdict or golden. `light` and `normal` set `report`; `strict`
+  sets `block`.
+
+#### Configuration command
+
+- `gateforge config get <key>`, `gateforge config set <key> <value>`, and
+  `gateforge config list` read or write `.gateforge.yml` by dotted key.
+  `get` and `list` report effective values, including defaults. `set`
+  validates the entire edited file against the pinned schema, refuses
+  unknown keys and invalid values, and leaves the file untouched on refusal.
+
+### Known limitations
+
+- A fixed call re-introduced identically is forgiven until
+  `gateforge baseline update --family-http-calls` shrinks it out of the
+  receipt (D3).
+- Realtime transports such as Socket.IO polling can produce report-only
+  `HTTP_ROUTE_NOT_INVENTORIED` advisories because they are not part of the
+  backend route inventory.
+- Only an API call answered with 404 or 405 counts as a missing route;
+  other statuses are report-only, and incomplete inventory cannot prove
+  absence.
 
 ## 0.13.10
 

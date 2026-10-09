@@ -1369,14 +1369,15 @@ its watermark, and `truncated` when the cap cut the list. `fetchDest` is
 the lowercased `Sec-Fetch-Dest` value when present; otherwise the
 Playwright fixture derives it from the request resource type (`fetch`/`xhr`
 become `empty`, `document` becomes `document`, and assets retain their
-destination class). The fixture's `x-gateforge-resource-type` header is a
-test-process observation, not proof: it can only hide a call from R2, never
-make a fake test pass, and proof rules do not use it. A disagreement records
-`resourceTypeConflict: true` while preserving browser `Sec-Fetch-Dest`.
+destination class). The fixture's `x-gateforge-resource-type` header is
+test-process supplied, not proof. When browser `Sec-Fetch-Dest` is absent, it
+supplies the fallback used to classify API traffic; that classification
+affects API call and response-shape findings, but never satisfies a transport
+obligation. A disagreement records `resourceTypeConflict: true` while
+preserving the browser destination.
 Missing both facts yields `null`. A session whose test did not pass drops its record, and
-a session that proxied nothing issues none. The kind can never satisfy an
-obligation — it is not selectable by any obligation, and it only reaches
-the report.
+`http.exchanges` cannot satisfy an obligation or serve as proof. Its rows
+supply the report and the R1-R5 evaluation.
 
 At verdict time the report JSON carries `httpLedger` for a run that
 witnessed at least one such record:
@@ -1416,9 +1417,11 @@ other non-empty destinations (for example `script`, `style`, `image`, or
 `incomplete` (an inventory entry cannot be attributed). If the route
 inventory is empty or unavailable, resolution is `incomplete` rather
 than `nomatch` and the summary reports `inventory: "unavailable"`; an
-unattributable route candidate reports `inventory: "incomplete"`. The
-ledger is report-only: it changes no verdict and no exit code, and the
-key is absent from runs that witnessed no session exchanges.
+unattributable route candidate reports `inventory: "incomplete"`.
+The `httpLedger` report field is report-only by itself; the exchange evidence
+is also consumed by the R1-R5 rules below, whose findings can affect the
+verdict and exit code through `http.callFindings`. The key is absent from runs
+that witnessed no session exchanges.
 `fetchDest: "empty"` alone identifies API traffic for R2/R3 findings.
 
 ### The HTTP call rules and the coverage summary (`http.callFindings`)
