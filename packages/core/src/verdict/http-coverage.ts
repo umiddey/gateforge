@@ -9,8 +9,10 @@
  *   the policy engine from the same `frontendConsumed` join
  *   (`policy/evaluate.ts`), so this module never invents an obligation —
  *   it reports who is used and who has not been proven yet.
- * - R2/R3: a witnessed call that matches no route, or matches several at
- *   equal specificity, is a real defect — `HTTP_CALL_UNMATCHED` /
+ * - R2: a `nomatch` call is an app defect only with status 404/405
+ *   (`HTTP_CALL_UNMATCHED`); any other status becomes the report-only
+ *   `HTTP_ROUTE_NOT_INVENTORIED` advisory because the app answered.
+ * - R3: a witnessed call matching several routes equally is
  *   `HTTP_CALL_AMBIGUOUS`.
  * - R4: a static call site the join could not resolve, with its
  *   `file:line` — `HTTP_CALL_UNRESOLVED`. It reads the unresolved
