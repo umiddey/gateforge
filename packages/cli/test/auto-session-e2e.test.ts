@@ -1,6 +1,6 @@
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, symlinkSync, unlinkSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -59,7 +59,7 @@ const PROCESS_PROBE = `JSON.stringify({
 })`;
 
 describe('automatic witnessed Playwright sessions', () => {
-  it('attributes every unchanged import shape, preserves extension hooks and direct API boundaries', async () => {
+  it.each([false, true])('attributes every unchanged import shape, preserves extension hooks and direct API boundaries (CJS-only shim: %s)', async (cjsOnlyShim) => {
     const app = createServer((req, res) => {
       res.setHeader('x-gateforge-env-fingerprint', FINGERPRINT);
       if (req.url === '/') {
@@ -76,8 +76,23 @@ describe('automatic witnessed Playwright sessions', () => {
       await new Promise<void>((resolve, reject) => reservation.close(error => error ? reject(error) : resolve()));
       await withTempRepo({}, async (repo) => {
         installStrictFixture(repo, {});
+        if (cjsOnlyShim) {
+          // Replace only the temporary consumer's dependency link, never its target.
+          unlinkSync(repo.path('node_modules'));
+          repo.writeFiles({
+            'node_modules/@playwright/test/package.json': '{"name":"@playwright/test","main":"index.js"}\n',
+            'node_modules/@playwright/test/index.js': "module.exports = require('playwright/test');\n",
+          });
+          const dependencies = process.env['GATEFORGE_PHYSICAL_NODE_MODULES'] ?? join(ROOT, 'node_modules');
+          for (const dependency of ['playwright', '@gate-forge']) {
+            symlinkSync(join(dependencies, dependency), repo.path(`node_modules/${dependency}`), 'dir');
+          }
+        }
+        const consumerCases = cjsOnlyShim
+          ? [...cases, ['alias-shim.spec.mts', "import { test, expect } from 'playwright/test';\nimport runtime from '../playwright-runtime.cjs';\ntest.beforeEach(() => { expect(runtime.test).toBe(test); expect(runtime.expect).toBe(expect); });", 'test'] as const]
+          : cases;
         const specs: Record<string, string> = {};
-        for (const [file, imports, call] of cases) {
+        for (const [file, imports, call] of consumerCases) {
           specs[`specs/${file}`] = `${imports}\n${call}('${file}', async ({ page }) => {\n${file === 'root.spec.ts' ? "const api = await test.request.newContext(); await api.get('/api/direct'); await api.dispose();" : ''}\n${file === 'explicit.spec.ts' ? "expect(plain.request.newContext).toBeDefined(); expect(plain.chromium).toBeDefined(); expect(test.request).toBeUndefined(); expect(test.chromium).toBeUndefined(); expect(test.test).toBeUndefined();" : ''}\nawait page.goto('/'); await page.getByRole('button', { name: 'Load' }).click(); await expect(page.getByText('Loaded')).toBeVisible();\n});\n`;
         }
         specs['specs/direct.spec.ts'] = "import { test, request, expect } from '@playwright/test';\ntest('direct only', async () => { const api = await request.newContext(); expect((await api.get('/api/direct')).status()).toBe(200); await api.dispose(); });\n";
@@ -102,6 +117,12 @@ test('inherited hook stays out of application processes', async ({ page }) => {
   }
 });
 `;
+        if (cjsOnlyShim) {
+          // This consumer uses the real ESM entry; its @playwright/test shim has no named exports.
+          for (const file of Object.keys(specs)) {
+            specs[file] = specs[file]!.replaceAll("from '@playwright/test'", "from 'playwright/test'");
+          }
+        }
         repo.writeFiles({
           ...specs,
           'playwright-runtime.cjs': "const { test, expect } = require('playwright/test');\nmodule.exports = { test, expect };\n",
@@ -117,7 +138,7 @@ createServer((req, res) => { res.setHeader('content-type', 'application/json'); 
           '.gateforge/fixture-detector.mjs': "import { endpointResourceName } from '@gate-forge/http-contract';\nexport default { async discover() { const resourceName = endpointResourceName('GET', '/api/items'); return { resources: [{ schemaVersion: 1, id: 'items', kind: 'http.endpoint', source: 'src/accounts.js', location: { file: 'src/accounts.js', line: 1, col: 0 }, detectorVersion: '1.0.0', attributes: { resourceName, method: 'GET', canonicalPath: '/api/items', identity: 'GET /api/items' } }], unresolved: [], findings: [], classificationSignals: ['plane', 'identity'].map(dimension => ({ schemaVersion: 1, target: { resourceName }, dimension, assertion: dimension === 'plane' ? 'tenant' : ['GET', '/api/items'], basis: 'declaration', source: 'gateforge.fixture', location: { file: 'src/accounts.js', line: 1, col: 0 }, detector: { id: 'gateforge.fixture', version: '1.0.0' } })) }; } };\n",
           '.gateforge/policies.yml': 'schemaVersion: 1\npolicies:\n  - id: observed\n    when: { kind: http.endpoint }\n    require: [http:request-observed, http:response-status-ok]\n',
           'playwright.config.mjs': `export default { testDir: 'specs', workers: 1, retries: 0, webServer: { command: 'node probe-server.cjs', url: 'http://127.0.0.1:${probePort}', reuseExistingServer: false }, projects: [{ name: 'chromium', use: { browserName: 'chromium' } }], use: { headless: true, baseURL: process.env.TEST_SERVICE_URL } };\n`,
-          '.gateforge/test-map.yml': 'schemaVersion: 1\ntests:\n' + [...cases.map(([file]) => ({ file, title: file })), { file: 'processes.spec.cjs', title: 'inherited hook stays out of application processes' }, ...['context continue keeps the session rewrite', 'later page continue keeps its outcome'].map(title => ({ file: 'routes.spec.ts', title }))].map(({ file, title }) => `  - key: playwright:chromium:specs/${file}:${title}\n    selector: { runner: playwright, project: chromium, file: specs/${file}, titlePath: ['${title}'] }\n    kind: observed-e2e\n    claims: ['tenant.${endpointResourceName('GET', '/api/items')}:http:request-observed', 'tenant.${endpointResourceName('GET', '/api/items')}:http:response-status-ok']\n    reason: Browser action loads items.\n`).join(''),
+          '.gateforge/test-map.yml': 'schemaVersion: 1\ntests:\n' + [...consumerCases.map(([file]) => ({ file, title: file })), { file: 'processes.spec.cjs', title: 'inherited hook stays out of application processes' }, ...['context continue keeps the session rewrite', 'later page continue keeps its outcome'].map(title => ({ file: 'routes.spec.ts', title }))].map(({ file, title }) => `  - key: playwright:chromium:specs/${file}:${title}\n    selector: { runner: playwright, project: chromium, file: specs/${file}, titlePath: ['${title}'] }\n    kind: observed-e2e\n    claims: ['tenant.${endpointResourceName('GET', '/api/items')}:http:request-observed', 'tenant.${endpointResourceName('GET', '/api/items')}:http:response-status-ok']\n    reason: Browser action loads items.\n`).join(''),
         });
         repo.git(['add', '-A']);
         repo.git(['commit', '--no-gpg-sign', '--quiet', '-m', 'neutral automatic session fixture']);
@@ -126,7 +147,7 @@ createServer((req, res) => { res.setHeader('content-type', 'application/json'); 
         // Witnessed execution intentionally excludes consumer webServer hooks.
         // First exercise native Playwright's actual server child with the same preload.
         const [executable, ...command] = defaultPlaywrightCommand(repo.root);
-        const native = spawn(executable!, [...command, 'test', 'processes.spec.cjs', '--reporter=line'], {
+        const native = spawn(executable!, [...command, 'test', 'processes.spec.cjs', ...(cjsOnlyShim ? ['alias-shim.spec.mts'] : []), '--reporter=line'], {
           cwd: repo.root,
           env: { ...process.env, TEST_SERVICE_URL: url, NODE_OPTIONS: autoSessionNodeOptions(process.env.NODE_OPTIONS) },
           stdio: ['ignore', 'pipe', 'pipe'],
@@ -151,9 +172,9 @@ createServer((req, res) => { res.setHeader('content-type', 'application/json'); 
         const records = JSON.parse(readFileSync(repo.path('.gateforge/test-gates/records.json'), 'utf8')) as Array<{ kind: string; testId?: string; payload?: { channel?: string; exchanges?: Array<{ url: string }> } }>;
         const result = JSON.parse(readFileSync(repo.path('.gateforge/test-gates/execution-result.json'), 'utf8'));
         const evidence = `${stdout}\n${stderr}`;
-        expect.soft(result.outcomes, evidence).toHaveLength(cases.length + 5);
+        expect.soft(result.outcomes, evidence).toHaveLength(consumerCases.length + 5);
         expect.soft(result.outcomes.every((row: { status: string }) => row.status === 'passed'), evidence).toBe(true);
-        for (const [file] of cases) {
+        for (const [file] of consumerCases) {
           const outcome = result.outcomes.find((row: { titlePath: string[] }) => row.titlePath.includes(file));
           expect.soft(outcome?.status, evidence).toBe('passed');
           const observed = records.filter(row => row.kind === 'http.observed' && row.testId === outcome?.runnerTestId && row.payload?.channel !== 'direct');
@@ -179,12 +200,12 @@ createServer((req, res) => { res.setHeader('content-type', 'application/json'); 
         }
         expect.soft(records.filter(row => row.kind === 'http.observed' && row.payload?.channel !== 'direct').flatMap(row => row.payload?.exchanges ?? []).some(exchange => exchange.url.endsWith('/api/direct')), evidence).toBe(false);
         expect.soft(records.filter(row => row.kind === 'http.observed' && row.testId && row.payload?.channel === 'direct').flatMap(row => row.payload?.exchanges ?? []).some(exchange => exchange.url.endsWith('/api/direct')), evidence).toBe(true);
-        expect.soft(result.measuredTests, evidence).toBe(cases.length + 5);
-        expect.soft(result.executedTests, evidence).toBe(cases.length + 5);
+        expect.soft(result.measuredTests, evidence).toBe(consumerCases.length + 5);
+        expect.soft(result.executedTests, evidence).toBe(consumerCases.length + 5);
         expect.soft(result.measuredTests, evidence).toBe(result.executedTests);
-        expect.soft(report.execution.measuredTests, evidence).toBe(cases.length + 5);
-        expect.soft(report.execution.executedTests, evidence).toBe(cases.length + 5);
-        console.log(`auto-session evidence: measured=${result.measuredTests}, executed=${result.executedTests}, aliasCases=${cases.filter(([file]) => file.startsWith('alias-')).length}`);
+        expect.soft(report.execution.measuredTests, evidence).toBe(consumerCases.length + 5);
+        expect.soft(report.execution.executedTests, evidence).toBe(consumerCases.length + 5);
+        console.log(`auto-session evidence: measured=${result.measuredTests}, executed=${result.executedTests}, aliasCases=${consumerCases.filter(([file]) => file.startsWith('alias-')).length}, cjsOnlyShim=${cjsOnlyShim}`);
       });
     } finally {
       await new Promise<void>((resolve, reject) => app.close(error => error ? reject(error) : resolve()));

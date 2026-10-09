@@ -32,6 +32,9 @@
   Twin comparison advice accepts both supported Playwright package imports
   and the explicit fixture; uninstrumented or zero-traffic twins remain
   explicitly not compared.
+- ESM `playwright/test` imports preserve that entry's native named exports even
+  when a consumer's `@playwright/test` is a CommonJS-only shim. ESM and CommonJS
+  helpers share the same automatic fixture test wrapper and witness session.
 
 ## 0.14.0
 
