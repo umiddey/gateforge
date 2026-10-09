@@ -105,6 +105,11 @@ export const CauseCodeSchema = z.enum([
   'HTTP_CALL_UNMATCHED',
   'HTTP_CALL_AMBIGUOUS',
   'HTTP_CALL_UNRESOLVED',
+  // 0.14 WP4: the witness's body-vs-model check. A mismatch is a finding
+  // (report-only under `http.responseShape: report`); an over-cap body is
+  // refused, never silently passed.
+  'HTTP_RESPONSE_SHAPE_MISMATCH',
+  'HTTP_BODY_TOO_LARGE',
 ]);
 
 /** Inferred cause-code union. */
@@ -218,4 +223,10 @@ export const CAUSE_NEXT_ACTIONS: Readonly<Record<CauseCode, string>> = Object.fr
   HTTP_CALL_UNRESOLVED:
     'The static join cannot compute this call\'s URL: declare the wrapper/base URL in the ' +
     'endpoint scan configuration so the call site resolves instead of staying invisible',
+  HTTP_RESPONSE_SHAPE_MISMATCH:
+    'A witnessed response body does not match the response schema the app declares in its OpenAPI ' +
+    'document: fix the handler so the body matches the declared model, or fix the declared schema if it is wrong',
+  HTTP_BODY_TOO_LARGE:
+    'A witnessed response body exceeds the 1 MiB check cap, so its shape cannot be verified: ' +
+    'return a smaller body for this route or exclude it from the body check',
 });

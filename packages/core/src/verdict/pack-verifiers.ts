@@ -118,6 +118,7 @@ const SUPPORTED_HTTP_CONTRACTS: readonly string[] = [
   'http:response-status-ok',
   'http:effect-verified',
   'http:read-result-verified',
+  'http:response-matches-model',
 ];
 
 function payloadOf(record: ClaimEvidenceInput['evidence'][number]['record']): Record<string, unknown> | null {
@@ -748,6 +749,8 @@ interface ObservedExchangeFacts {
   url: unknown;
   status: unknown;
   initiator?: unknown;
+  /** The witness's body-vs-model verdict (0.14 WP4); absent when unchecked. */
+  shape?: unknown;
 }
 
 /**
@@ -766,7 +769,9 @@ type ExchangeGrade =
  * Grades ONE observed HTTP exchange against the obligation's endpoint
  * (plan §9/§10): the observed path must be interpretable, the COMPLETE
  * route inventory must attribute it to EXACTLY the obligation's own
- * endpoint, and `http:response-status-ok` additionally requires a 2xx.
+ * endpoint, `http:response-status-ok` additionally requires a 2xx, and
+ * `http:response-matches-model` requires the witness's body verdict to
+ * be `ok` or `unchecked` (0.14 WP4).
  * The single matcher for both the engine-browser (`http.request`) and
  * the Observe channel (`http.observed`).
  *
@@ -879,6 +884,9 @@ function gradeObservedExchange(
         "(page.evaluate / injected script), not by the app's UI. Drive the operation through the UI.",
     };
   }
+  if (input.obligation.contract === 'http:response-matches-model') {
+    return gradeResponseShape(facts.shape, input.obligation.id, subject);
+  }
   if (input.obligation.contract === 'http:response-status-ok') {
     const status = facts.status;
     if (typeof status !== 'number' || !Number.isInteger(status) || status < 200 || status > 299) {
@@ -893,6 +901,62 @@ function gradeObservedExchange(
     }
   }
   return { ok: true };
+}
+
+/**
+ * Grades the witness's body-vs-model verdict for ONE exchange (0.14 WP4).
+ * The witness owns the captured body and the OpenAPI document, so this
+ * only reads its verdict. `ok` and `unchecked` satisfy: an unchecked
+ * route is not a body failure. `mismatch` fails and names the first
+ * offending JSON pointer. `refused` (an over-cap body with a declared
+ * schema) fails closed. An exchange without a verdict had no body check,
+ * so it is `missing`, never satisfied.
+ */
+function gradeResponseShape(shape: unknown, obligationId: string, subject: string): ExchangeGrade {
+  if (typeof shape !== 'object' || shape === null || !('verdict' in shape)) {
+    return {
+      ok: false,
+      status: 'missing',
+      reason:
+        `'${obligationId}': ${subject} carries no response-shape verdict; the witness did not check ` +
+        'its body against the declared response schema (run with http.responseShape: block)',
+    };
+  }
+  const verdict: unknown = shape.verdict;
+  if (verdict === 'ok' || verdict === 'unchecked') return { ok: true };
+  if (verdict === 'mismatch') {
+    const errors: unknown = 'errors' in shape ? shape.errors : undefined;
+    const first: unknown = Array.isArray(errors) ? errors[0] : undefined;
+    const pointer: unknown =
+      typeof first === 'object' && first !== null && 'pointer' in first ? first.pointer : undefined;
+    const message: unknown =
+      typeof first === 'object' && first !== null && 'message' in first ? first.message : undefined;
+    const where = typeof pointer === 'string' && pointer !== '' ? pointer : '(document root)';
+    const what = typeof message === 'string' ? message : 'does not match the declared schema';
+    return {
+      ok: false,
+      status: 'invalid',
+      reason:
+        `'${obligationId}': ${subject} response body does not match the response schema its OpenAPI ` +
+        `document declares: ${where} ${what}`,
+      ownRoute: true,
+    };
+  }
+  if (verdict === 'refused') {
+    return {
+      ok: false,
+      status: 'invalid',
+      reason:
+        `'${obligationId}': ${subject} response body exceeds the 1 MiB check cap, so its shape cannot be ` +
+        'verified (HTTP_BODY_TOO_LARGE)',
+      ownRoute: true,
+    };
+  }
+  return {
+    ok: false,
+    status: 'missing',
+    reason: `'${obligationId}': ${subject} carries an unrecognized response-shape verdict`,
+  };
 }
 
 /**
@@ -1087,7 +1151,7 @@ function gradeObservedTransport(input: ClaimEvidenceInput): ClaimOutcome | null 
     for (const raw of exchanges) {
       const facts =
         typeof raw === 'object' && raw !== null && !Array.isArray(raw)
-          ? { method: raw['method'], url: raw['url'], status: raw['status'], initiator: raw['initiator'] }
+          ? { method: raw['method'], url: raw['url'], status: raw['status'], initiator: raw['initiator'], shape: raw['shape'] }
           : { method: undefined, url: undefined, status: undefined };
       const grade = gradeObservedExchange(facts, input, subject, inventoryBlock, candidates);
       if (grade.ok) {
@@ -1389,7 +1453,13 @@ let registered = false;
  */
 const HTTP_CAPABILITY: ContractCapability = {
   namespace: 'http',
-  contracts: ['http:request-observed', 'http:response-status-ok', 'http:effect-verified', 'http:read-result-verified'],
+  contracts: [
+    'http:request-observed',
+    'http:response-status-ok',
+    'http:effect-verified',
+    'http:read-result-verified',
+    'http:response-matches-model',
+  ],
   unavailableContracts: [
     {
       contract: 'http:frontend-request-observed',

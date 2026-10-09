@@ -44,6 +44,13 @@ export const HTTP_READ_RESULT_VERIFIED = 'http:read-result-verified';
 /** Existing weaker HTTP contracts retained with their transport meaning. */
 export const HTTP_REQUEST_OBSERVED = 'http:request-observed';
 export const HTTP_RESPONSE_STATUS_OK = 'http:response-status-ok';
+/**
+ * The response-body contract (0.14 WP4): the witness's own check of the
+ * proxied body against the app's declared OpenAPI response schema. Owed
+ * only under `http.responseShape: block`; deliberately NOT in the closed
+ * behavior vocabulary below (behavior cases cannot name it).
+ */
+export const HTTP_RESPONSE_MATCHES_MODEL = 'http:response-matches-model';
 
 /**
  * Closed contract vocabulary a behavior case may name: the two strong

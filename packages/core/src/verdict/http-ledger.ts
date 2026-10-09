@@ -17,6 +17,9 @@ import type { HttpRouteCandidate } from './registry.js';
 /** How the ONE resolver placed one witnessed exchange. */
 export type HttpLedgerResolution = 'match' | 'nomatch' | 'ambiguous' | 'incomplete';
 
+/** The witness's body-vs-model verdict as the ledger shows it (0.14 WP4). */
+export type HttpLedgerShape = 'ok' | 'mismatch' | 'unchecked' | 'refused';
+
 /** One ledger row: one witnessed exchange, attributed. */
 export interface HttpLedgerRow {
   /** The test the exchange belongs to (`page-sweep` for sweep sessions). */
@@ -33,6 +36,10 @@ export interface HttpLedgerRow {
   resolution: HttpLedgerResolution;
   /** The equal candidates' identity texts, when the placement is ambiguous. */
   candidates?: string[];
+  /** The witness's body-vs-model verdict, when the exchange carried one (0.14 WP4). */
+  shape?: HttpLedgerShape;
+  /** The first mismatch pointer and message, or the refusal cause. */
+  shapeDetail?: string;
 }
 
 /** Row counts by resolution (exchanges equals the row count). */
@@ -71,6 +78,29 @@ function asLedgerRecord(value: unknown): LedgerRecordLike | null {
     kind: record['kind'],
     payload: record['payload'],
   };
+}
+
+/**
+ * Reads the witness's body verdict for one exchange (0.14 WP4) into the
+ * ledger's display fields. Absent or unrecognized input yields null, so
+ * rows for exchanges without a body check keep their existing shape.
+ */
+function ledgerShapeOf(value: unknown): { shape: HttpLedgerShape; shapeDetail?: string } | null {
+  if (typeof value !== 'object' || value === null || !('verdict' in value)) return null;
+  const verdict: unknown = value.verdict;
+  if (verdict === 'ok') return { shape: 'ok' };
+  if (verdict === 'unchecked') return { shape: 'unchecked' };
+  if (verdict === 'refused') return { shape: 'refused', shapeDetail: 'HTTP_BODY_TOO_LARGE' };
+  if (verdict !== 'mismatch') return null;
+  const errors: unknown = 'errors' in value ? value.errors : undefined;
+  const first: unknown = Array.isArray(errors) ? errors[0] : undefined;
+  const pointer: unknown =
+    typeof first === 'object' && first !== null && 'pointer' in first ? first.pointer : undefined;
+  const message: unknown =
+    typeof first === 'object' && first !== null && 'message' in first ? first.message : undefined;
+  const where = typeof pointer === 'string' && pointer !== '' ? pointer : '(document root)';
+  const what = typeof message === 'string' ? message : 'does not match the declared schema';
+  return { shape: 'mismatch', shapeDetail: `${where} ${what}` };
 }
 
 /**
@@ -123,6 +153,7 @@ export function buildHttpLedger(
       // an uninterpretable URL degrades to its query-stripped text.
       const interpreted = interpretObservedPath(url);
       const path = interpreted.ok ? interpreted.path : (url.split(/[?#]/, 1)[0] ?? url);
+      const shape = ledgerShapeOf(exchange['shape']);
       const resolution = matchHttpRoute(method, path, httpRoutes ?? []);
       rows.push({
         testId: record.testId,
@@ -132,6 +163,7 @@ export function buildHttpLedger(
         route: resolution.status === 'match' ? resolution.matched.resourceId : null,
         resolution: resolution.status,
         ...(resolution.status === 'ambiguous' ? { candidates: [...resolution.candidates] } : {}),
+        ...(shape === null ? {} : shape),
       });
     }
   }

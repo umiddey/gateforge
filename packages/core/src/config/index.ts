@@ -30,6 +30,24 @@ export const HttpConfigSchema = z
      * any other blocking finding.
      */
     callFindings: z.enum(['report', 'block']).default('report'),
+    /**
+     * Whether the witness checks each proxied response body against the
+     * app's declared OpenAPI response schema (0.14 WP4). `off` (default)
+     * checks nothing. `report` surfaces mismatches and oversized bodies as
+     * advisories. `block` also owes `http:response-matches-model` for every
+     * consumed endpoint, so a mismatch fails the gate.
+     */
+    responseShape: z.enum(['off', 'report', 'block']).default('off'),
+    /**
+     * Where the attested backend publishes its OpenAPI document (0.14
+     * WP4), fetched once by the witness at run start. An absolute path
+     * such as `/openapi.json`. Read only when `responseShape` is not `off`.
+     */
+    openapiPath: z
+      .string()
+      .startsWith('/')
+      .min(2, 'http.openapiPath must be an absolute path such as /openapi.json')
+      .default('/openapi.json'),
   })
   .strict();
 
@@ -507,7 +525,12 @@ export const GateforgeConfigSchema = z
      * findings block on; absent settings use both sources and report
      * mode.
      */
-    http: HttpConfigSchema.default({ routeSource: 'both', callFindings: 'report' }),
+    http: HttpConfigSchema.default({
+      routeSource: 'both',
+      callFindings: 'report',
+      responseShape: 'off',
+      openapiPath: '/openapi.json',
+    }),
     /**
      * Path to the classification-policy YAML document (plan phase 5,
      * ADR 0003 D5): repository-wide deterministic classification rules.

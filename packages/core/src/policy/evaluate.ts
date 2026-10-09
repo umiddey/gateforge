@@ -32,6 +32,7 @@ import { PolicyFileSchema, type Policy, type PolicyFile } from '../schemas/polic
 import { ClaimSchema, type Claim } from '../schemas/claim.js';
 import { HTTP_ENDPOINT_RESOURCE_KIND, type GraphResource, type ResourceGraph } from '../graph/schema.js';
 import { compareStrings } from '../graph/util.js';
+import { HTTP_REQUEST_OBSERVED, HTTP_RESPONSE_MATCHES_MODEL, HTTP_RESPONSE_STATUS_OK } from '../schemas/behavior-policy.js';
 
 /** The CRUD contract namespace gated by lifecycle flags. */
 export const CRUD_CONTRACT_PREFIX = 'crud:';
@@ -220,6 +221,12 @@ export interface PolicyEvaluationInput {
    * appended verbatim before the deterministic sort.
    */
   extraBlocking?: BlockingEntry[];
+  /**
+   * Whether the owner declared `http.responseShape: block` (0.14 WP4). When
+   * true, consumed endpoints whose policy owes the transport contracts also
+   * owe `http:response-matches-model`.
+   */
+  responseShapeOwed?: boolean;
 }
 
 /**
@@ -263,6 +270,7 @@ export function evaluatePolicies(input: PolicyEvaluationInput): PolicyEvaluation
       obligations,
       obligationIds,
       policyFile.options?.['http.endpoint.requireObservation'] === 'all',
+      input.responseShapeOwed === true,
     );
   }
 
@@ -322,6 +330,7 @@ function generateObligations(
   obligations: Obligation[],
   obligationIds: Set<string>,
   observationScopeAll: boolean,
+  responseShapeOwed: boolean,
 ): void {
   const classification = resource.classification;
   if (classification === null || resource.id === null) return;
@@ -349,6 +358,25 @@ function generateObligations(
         id,
         resourceId: resource.id,
         contract,
+        policyId: policy.id,
+        lifecycle: classification.lifecycle,
+      });
+    }
+    // 0.14 WP4: an endpoint whose policy owes the transport contracts also
+    // owes the witness's body-vs-model check, but only under `block` (the
+    // owner's declaration; `report` and `off` owe nothing extra).
+    const bodyId = `${resource.id}:${HTTP_RESPONSE_MATCHES_MODEL}`;
+    const owesBody =
+      responseShapeOwed &&
+      resource.kind === HTTP_ENDPOINT_RESOURCE_KIND &&
+      policy.require.some((contract) => contract === HTTP_REQUEST_OBSERVED || contract === HTTP_RESPONSE_STATUS_OK);
+    if (owesBody && !obligationIds.has(bodyId)) {
+      obligationIds.add(bodyId);
+      obligations.push({
+        schemaVersion: 1,
+        id: bodyId,
+        resourceId: resource.id,
+        contract: HTTP_RESPONSE_MATCHES_MODEL,
         policyId: policy.id,
         lifecycle: classification.lifecycle,
       });

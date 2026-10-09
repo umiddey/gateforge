@@ -30,7 +30,7 @@ import { compareStrings } from '../graph/util.js';
 import { CAUSE_NEXT_ACTIONS, type CauseCode } from '../schemas/verdict.js';
 import type { Location } from '../schemas/common.js';
 import type { BlockingEntry } from '../policy/evaluate.js';
-import type { HttpLedger } from './http-ledger.js';
+import type { HttpLedger, HttpLedgerRow } from './http-ledger.js';
 import { HTTP_REQUEST_OBSERVED, HTTP_RESPONSE_STATUS_OK } from '../schemas/behavior-policy.js';
 
 /** A witnessed call that matches no route in the run's inventory. */
@@ -377,4 +377,34 @@ export function httpCallFindingEntries(findings: readonly HttpCallFinding[]): Bl
     cause: finding.code as CauseCode,
     nextAction: CAUSE_NEXT_ACTIONS[finding.code as CauseCode],
   }));
+}
+
+/**
+ * Projects the witness's body-shape findings (0.14 WP4) onto the finding
+ * channel: one entry per mismatched or refused exchange, in ledger order.
+ * `ok` and `unchecked` rows are not findings. The CHANNEL is the caller's
+ * decision (`http.responseShape: report` surfaces them as advisories; the
+ * `block` setting fails through the body obligation instead).
+ *
+ * Args:
+ *   rows: the run's ledger rows.
+ *
+ * Returns:
+ *   BlockingEntry[]: one entry per mismatch or refusal.
+ */
+export function httpResponseShapeEntries(rows: readonly HttpLedgerRow[]): BlockingEntry[] {
+  return rows
+    .filter((row) => row.shape === 'mismatch' || row.shape === 'refused')
+    .map((row) => {
+      const cause: CauseCode = row.shape === 'mismatch' ? 'HTTP_RESPONSE_SHAPE_MISMATCH' : 'HTTP_BODY_TOO_LARGE';
+      return {
+        kind: 'finding' as const,
+        resourceId: row.route,
+        name: null,
+        detail: `${cause}: ${row.testId} ${row.method} ${row.path} (status ${row.status}): ${row.shapeDetail ?? ''}`,
+        location: null,
+        cause,
+        nextAction: CAUSE_NEXT_ACTIONS[cause],
+      };
+    });
 }

@@ -538,6 +538,7 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
     graph,
     policies: policiesParsed.data,
     claims,
+    responseShapeOwed: config.http.responseShape === 'block',
     extraBlocking: [
       ...blocking,
       ...adapterProjectionBlockers(cwd, config.adapters, adapters, classification.decisions),

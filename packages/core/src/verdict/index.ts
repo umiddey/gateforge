@@ -53,6 +53,7 @@ export {
 export {
   evaluateHttpCoverage,
   httpCallFindingEntries,
+  httpResponseShapeEntries,
   HTTP_CALL_UNMATCHED,
   HTTP_CALL_AMBIGUOUS,
   HTTP_CALL_UNRESOLVED,

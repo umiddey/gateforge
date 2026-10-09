@@ -433,3 +433,12 @@ clock:
     }
   });
 });
+
+describe('http.responseShape (WP4 step 4)', () => {
+  it('defaults to off, accepts report and block, and rejects other values', () => {
+    expect(parseConfig(validConfig).http.responseShape).toBe('off');
+    expect(parseConfig({ ...validConfig, http: { responseShape: 'block' } }).http.responseShape).toBe('block');
+    expect(parseConfig({ ...validConfig, http: { responseShape: 'report' } }).http.responseShape).toBe('report');
+    expect(() => parseConfig({ ...validConfig, http: { responseShape: 'strict' } })).toThrow(GateforgeConfigError);
+  });
+});

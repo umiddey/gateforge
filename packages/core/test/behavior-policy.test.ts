@@ -659,6 +659,7 @@ describe('strong HTTP contracts are available with genuine case evidence', () =>
       'http:response-status-ok',
       'http:effect-verified',
       'http:read-result-verified',
+      'http:response-matches-model',
     ]);
     expect(
       http?.unavailableContracts.map((entry) => entry.contract),

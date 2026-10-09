@@ -30,6 +30,7 @@ import {
   fingerprintObligation,
   evaluateHttpCoverage,
   httpCallFindingEntries,
+  httpResponseShapeEntries,
   type HttpCoverageResult,
   loadWaivers,
   strictCapabilityGaps,
@@ -773,7 +774,14 @@ export function evaluateRun(input: EvaluateInput): EvaluateResult {
   });
   const callEntries = httpCallFindingEntries(httpCoverage.findings);
   const callBlocking = config.http.callFindings === 'block' ? callEntries : [];
-  const httpCallAdvisories = config.http.callFindings === 'block' ? [] : callEntries;
+  // `report` shows response-shape mismatches as advisories; `block` grades
+  // them through the claim obligation instead (never twice).
+  const responseShapeAdvisories =
+    config.http.responseShape === 'report' ? httpResponseShapeEntries(ledger.rows) : [];
+  const httpCallAdvisories = [
+    ...(config.http.callFindings === 'block' ? [] : callEntries),
+    ...responseShapeAdvisories,
+  ];
   const runBlocking = [...applied.blocking, ...callBlocking];
 
   const blockingRun =

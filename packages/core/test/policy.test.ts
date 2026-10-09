@@ -491,6 +491,58 @@ describe('http.endpoint.requireObservation option (plan Phase 4c, E60)', () => {
   });
 });
 
+describe('http:response-matches-model is owed only when the owner declares block (WP4 step 4)', () => {
+  const OBSERVATION_POLICY: PolicyFile = {
+    schemaVersion: 1,
+    policies: [
+      {
+        id: 'frontend-consumed-endpoints-transport-only',
+        when: { kind: 'http.endpoint', consumed: true },
+        require: ['http:request-observed', 'http:response-status-ok'],
+      },
+    ],
+  };
+  const consumed = endpointGraph({ capabilities: ['crud-read'], frontendConsumed: true });
+
+  it('an owed endpoint also owes http:response-matches-model after the observation contracts', () => {
+    const result = evaluatePolicies({ graph: consumed, policies: OBSERVATION_POLICY, responseShapeOwed: true });
+    expect(result.obligations.map((o) => o.id)).toEqual([
+      'tenant.http-post-api-accounts-a1b2c3d4:http:request-observed',
+      'tenant.http-post-api-accounts-a1b2c3d4:http:response-matches-model',
+      'tenant.http-post-api-accounts-a1b2c3d4:http:response-status-ok',
+    ]);
+  });
+
+  it('absent or false responseShapeOwed owes nothing extra, byte-identical to before', () => {
+    const base = evaluatePolicies({ graph: consumed, policies: OBSERVATION_POLICY });
+    expect(base.obligations).toHaveLength(2);
+    expect(canonicalJson(evaluatePolicies({ graph: consumed, policies: OBSERVATION_POLICY, responseShapeOwed: false }))).toBe(
+      canonicalJson(base),
+    );
+  });
+
+  it('a policy that does not require an observation contract never owes the body contract', () => {
+    const result = evaluatePolicies({
+      graph: endpointGraph({ capabilities: ['workflow-command'], frontendConsumed: true }),
+      policies: {
+        schemaVersion: 1,
+        policies: [{ id: 'workflow-command-endpoints', when: { capability: 'workflow-command', consumed: true }, require: ['workflow:transition-allowed'] }],
+      },
+      responseShapeOwed: true,
+    });
+    expect(result.obligations.some((o) => o.contract === 'http:response-matches-model')).toBe(false);
+  });
+
+  it('a table never owes the body contract, even when owed', () => {
+    const result = evaluatePolicies({
+      graph: graphFor(userFacing({ create: true, read: true, update: true, delete: true, deleteSemantics: 'hard' })),
+      policies: OBSERVATION_POLICY,
+      responseShapeOwed: true,
+    });
+    expect(result.obligations.some((o) => o.contract === 'http:response-matches-model')).toBe(false);
+  });
+});
+
 describe('internal resources (ADR 0001)', () => {
   const INTERNAL_POLICY: PolicyFile = {
     schemaVersion: 1,

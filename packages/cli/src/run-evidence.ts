@@ -29,7 +29,11 @@ import { shellQuote } from './args.js';
 import { httpRoutesView } from './state.js';
 
 /** The observation contracts run evidence can speak for. */
-export const RUN_EVIDENCE_CONTRACTS: readonly string[] = ['http:request-observed', 'http:response-status-ok'];
+export const RUN_EVIDENCE_CONTRACTS: readonly string[] = [
+  'http:request-observed',
+  'http:response-status-ok',
+  'http:response-matches-model',
+];
 
 /** One app API exchange a test's page made, query dropped. */
 export interface RunExchange {

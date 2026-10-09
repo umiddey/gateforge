@@ -2080,6 +2080,7 @@ describe('contract capability metadata (plan 2026-09-13 Phase 0 item 3, ADR 0005
       'http:response-status-ok',
       'http:effect-verified',
       'http:read-result-verified',
+      'http:response-matches-model',
     ]);
     expect(http?.testKinds).toEqual(['browser-e2e', 'api-e2e']);
     expect(http?.observer).toContain('behavior.case');
@@ -2243,6 +2244,7 @@ describe('contract capability metadata (plan 2026-09-13 Phase 0 item 3, ADR 0005
       'http:response-status-ok',
       'http:effect-verified',
       'http:read-result-verified',
+      'http:response-matches-model',
     ]);
     // A NEW namespace can register; clean it up by registering a unique one.
     expect(() =>

@@ -572,6 +572,8 @@ function configTemplate(
     runner?: string;
     /** `unmatchedRoutes` writes the owner-owned `endpoints.unmatchedRoutes` key; undefined writes NO key. */
     unmatchedRoutes?: 'block' | 'warn';
+    /** `responseShape` writes the owner-owned `http.responseShape` key (0.14 WP4); undefined writes NO key. */
+    responseShape?: 'report' | 'block';
     pagesBlock?: string;
   } = {},
 ): string {
@@ -611,6 +613,10 @@ runner: ${options.runner}
     options.historyRetentionDays === undefined
       ? ''
       : `history:\n  retentionDays: ${String(options.historyRetentionDays)}\n`;
+  // The owner-owned response-shape grading (0.14 WP4). Only written when a
+  // preset named it; absent keeps today's `off` and a byte-identical config.
+  const httpBlock =
+    options.responseShape === undefined ? '' : `http:\n  responseShape: ${options.responseShape}\n`;
   // The owner-owned unmatched-route grading. Only written when the owner
   // answered (the terminal question, the flag, or the non-interactive
   // `warn`); an existing config that said nothing keeps saying nothing,
@@ -669,7 +675,7 @@ witness:
   maxDurationSeconds: 5
 clock:
   mode: system
-${endpointsBlock}${options.pagesBlock ?? ''}${runnerBlock}${historyBlock}${strictnessBlock}${enforcementBlock}\
+${endpointsBlock}${options.pagesBlock ?? ''}${runnerBlock}${historyBlock}${httpBlock}${strictnessBlock}${enforcementBlock}\
 `;
 }
 
@@ -1993,6 +1999,8 @@ export async function initCommand(io: Io, argv: readonly string[]): Promise<numb
     // A preset names the owner-owned strictness key; without one the key
     // stays absent, which means `strict` (today's frozen behavior).
     strictnessMode: goal?.settings.strictnessMode,
+    // A preset names the owner-owned response-shape grading (0.14 WP4); without one no key is written.
+    responseShape: goal?.settings.responseShape,
     // The scanned runner, when it is unambiguous and not Playwright.
     runner: detectedRunner,
     // The owner's answer for unmatched by-id routes; undefined writes no key.

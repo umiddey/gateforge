@@ -190,12 +190,13 @@ function routeFocus(focused: ReadonlySet<string>, id: string): number {
 }
 
 /**
- * The two transport contracts a used HTTP route owes (plan §4.3 R1).
+ * The HTTP contracts a used route owes (plan §4.3 R1; 0.14 WP4 adds the body shape).
  * Only an obligation naming one of them has an HTTP caller to name.
  */
 const TRANSPORT_CONTRACTS: Record<string, true> = {
   'http:request-observed': true,
   'http:response-status-ok': true,
+  'http:response-matches-model': true,
 };
 
 /**

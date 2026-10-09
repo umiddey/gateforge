@@ -1183,12 +1183,15 @@ function parseChaosSeed(raw: string, resultOnly: boolean): { seed: number } {
 export interface WitnessRunOptions {
   chaos?: ChaosRun;
   twinShapes?: { queryKeys: readonly string[]; inventory: readonly string[] };
+  /** The response-shape request (0.14 WP4): the attested backend's OpenAPI path. */
+  responseShape?: { openapiPath: string };
 }
 
 /** The run options a witness confirmed it is applying. */
 export interface AppliedWitnessOptions {
   chaos: ChaosRun | null;
   twinShapes: { queryKeys: readonly string[]; inventory?: readonly string[] } | null;
+  responseShape: { openapiPath: string } | null;
 }
 
 /** True when a binding echo is the additive `applied` block we sent. */
@@ -1210,6 +1213,7 @@ function runOptionsJson(options: WitnessRunOptions): JsonValue {
             inventory: [...options.twinShapes.inventory],
           },
         }),
+    ...(options.responseShape === undefined ? {} : { responseShape: { ...options.responseShape } }),
   };
 }
 
@@ -4223,6 +4227,9 @@ async function runSupervisedTestGatesInner(
           },
         }
       : {}),
+    ...(config.http.responseShape === 'off'
+      ? {}
+      : { responseShape: { openapiPath: config.http.openapiPath } }),
   };
   let appliedOptions: AppliedWitnessOptions | null = null;
   if (
@@ -4253,6 +4260,13 @@ async function runSupervisedTestGatesInner(
       io.stderr,
       'test-gates: twin path coverage needs a witness that accepts run options — this witness does not; ' +
         'pairs were not compared',
+    );
+  }
+  if (config.http.responseShape !== 'off' && appliedOptions?.responseShape == null) {
+    writeLine(
+      io.stderr,
+      'test-gates: http response-shape checks need a witness that accepts run options — this witness does not; ' +
+        'no exchange body was checked',
     );
   }
   // A witness that perturbs timing on its OWN (its environment, never

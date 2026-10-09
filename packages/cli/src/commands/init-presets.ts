@@ -32,6 +32,11 @@ export interface InitPresetSettings {
   /** Write the enforcement block with `strictE2E: true`. */
   strictE2E: boolean;
   /**
+   * The `http.responseShape` the goal writes (0.14 WP4): `report` shows
+   * body-shape mismatches as advisories, `block` makes them fail the gate.
+   */
+  responseShape: 'report' | 'block';
+  /**
    * How much gate wiring the goal implies:
    * - `none` — no hook at all; the report is the product.
    * - `pre-commit` — a fast static hook over the files you touched.
@@ -55,6 +60,7 @@ export const INIT_PRESETS: Readonly<Record<InitPresetName, InitPresetSettings>> 
   light: {
     strictnessMode: 'warn',
     strictE2E: false,
+    responseShape: 'report',
     wiring: 'none',
     mode: 'changed',
     ci: false,
@@ -64,6 +70,7 @@ export const INIT_PRESETS: Readonly<Record<InitPresetName, InitPresetSettings>> 
   normal: {
     strictnessMode: 'changed',
     strictE2E: false,
+    responseShape: 'report',
     wiring: 'pre-commit',
     mode: 'changed',
     ci: true,
@@ -73,6 +80,7 @@ export const INIT_PRESETS: Readonly<Record<InitPresetName, InitPresetSettings>> 
   strict: {
     strictnessMode: 'strict',
     strictE2E: true,
+    responseShape: 'block',
     wiring: 'blocking',
     mode: 'staged',
     ci: true,
