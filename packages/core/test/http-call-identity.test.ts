@@ -63,10 +63,12 @@ describe('the identity of an HTTP call finding (0.14 WP5 D1)', () => {
   });
 
   it('keeps the fingerprint when the same call returns a different HTTP status', () => {
+    // Only 404/405 make an unmatched call a finding (any other status is the
+    // report-only HTTP_ROUTE_NOT_INVENTORIED), so status churn means 404 ↔ 405.
     const notFound = onlyFinding([row({ testId: 'journey', path: '/nowhere', status: 404 })]);
-    const broken = onlyFinding([row({ testId: 'journey', path: '/nowhere', status: 500 })]);
-    expect(broken.fingerprint).toBe(notFound.fingerprint);
-    expect(broken.key).toBe(notFound.key);
+    const notAllowed = onlyFinding([row({ testId: 'journey', path: '/nowhere', status: 405 })]);
+    expect(notAllowed.fingerprint).toBe(notFound.fingerprint);
+    expect(notAllowed.key).toBe(notFound.key);
   });
 
   it('drops the query string from the path shape', () => {
