@@ -54,7 +54,7 @@ export interface HttpLedgerSummary {
   unmatched: number;
   ambiguous: number;
   incomplete: number;
-  inventory: 'complete' | 'incomplete' | 'unavailable';
+  inventory?: 'complete' | 'incomplete' | 'unavailable';
 }
 
 /** The whole-run ledger embedded report-only in the run report JSON. */
