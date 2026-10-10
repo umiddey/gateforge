@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { withTempRepo } from '@gate-forge/core';
@@ -149,11 +149,20 @@ describe('Playwright Observe declarations through the actual CLI', () => {
           GATEFORGE_APPROVED_POLICY_DIGEST: trustedPolicyDigestForConfig(repo.root, loadConfigAt(repo.root)),
         };
         const run = await runCliProcess(repo.root, runEnv, ['test-gates', '--changed', '--format', 'json']);
-        const report = JSON.parse(run.stdout) as { verdicts: Array<{ obligationId: string; verdict: string }>; execution: { selectedTests: { passed: number; failed: number } } };
+        const report = JSON.parse(run.stdout) as { verdicts: Array<{ obligationId: string; verdict: string }>; execution: { selectedTests: { passed: number; failed: number } }; uiLedger?: { rows: Array<{ testId: string; step: string }> } };
         expect(report.verdicts.find(verdict => verdict.obligationId === CLAIM), `${run.stdout}\n${run.stderr}`).toMatchObject({ verdict: 'satisfied' });
         expect(run.code, `${run.stdout}\n${run.stderr}`).toBe(0);
         expect(report.execution.selectedTests).toMatchObject({ passed: 1, failed: 0 });
         expect([...app.rows.values()]).toEqual([{ id: 'account-1', first_name: 'Ada', last_name: 'Lovelace', status: 'active' }]);
+        const stateDir = join(repo.root, '.gateforge/test-gates');
+        const drained = JSON.parse(readFileSync(join(stateDir, 'ui-ledger.json'), 'utf8')) as { rows: Array<{ testId: string; step: string }> };
+        const click = drained.rows.find(row => row.step === "pw:api:Click locator('button')");
+        expect(click).toEqual({ testId: expect.any(String), step: "pw:api:Click locator('button')" });
+        expect(new Set(drained.rows.map(row => row.testId)).size).toBe(1);
+        const persisted = JSON.parse(readFileSync(join(stateDir, 'report.json'), 'utf8')) as typeof report;
+        expect(persisted.uiLedger?.rows).toContainEqual(click);
+        expect(persisted.uiLedger?.rows).toEqual(drained.rows);
+        expect(report.uiLedger).toEqual(persisted.uiLedger);
         const checked = await runCliProcess(repo.root, runEnv, ['check', '--changed', '--require-e2e', '--format', 'json']);
         expect(checked.code, `${checked.stdout}\n${checked.stderr}`).toBe(0);
         const checkReport = JSON.parse(checked.stdout) as { advisories?: Array<{ cause: string; resourceId: string; detail: string }> };

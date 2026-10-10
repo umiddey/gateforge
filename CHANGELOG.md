@@ -3,9 +3,11 @@
 ## 0.15.0 (unreleased)
 
 - Playwright reports retain per-test runner-observed UI actions and assertions
-  as a report-only `uiLedger`, distinguishing journeys with identical HTTP
-  traffic. Signatures ignore source locations and normalize UUIDs/long digit
-  runs; each attempt is capped at 500 unique steps with truncation disclosed.
+  as a report-only `uiLedger` in full supervised runs as well as selection
+  reports, distinguishing journeys with identical HTTP traffic. Locator-free
+  keyboard and mouse input is retained alongside locator actions and assertions.
+  Signatures ignore source locations and normalize UUIDs/long digit runs;
+  each attempt is capped at 500 unique steps with truncation disclosed.
 - `enforcement doctor` runs repository hooks only with `--hook-mutation`,
   once in an isolated copy at low priority. Its 120 s deadline kills the
   whole process tree, avoiding default full-hook workloads and orphaned

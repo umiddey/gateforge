@@ -53,6 +53,22 @@ describe('runner-reported UI step signatures', () => {
     expect(b.uiSteps).toEqual(a.uiSteps);
   });
 
+  it('retains locator-free keyboard and mouse input and normalizes typed values', () => {
+    const { step, end } = harness();
+    const titles = [
+      'Press "Tab"', 'Key down "Shift"', 'Key up "Shift"',
+      'Type "INV-2026-0001"', 'Insert "123e4567-e89b-12d3-a456-426614174000"',
+      'Mouse move', 'Mouse down', 'Mouse up', 'Mouse wheel', 'Click', 'Double click',
+    ];
+    for (const title of titles) step('a', 'pw:api', title);
+    const expected = [
+      'Press "Tab"', 'Key down "Shift"', 'Key up "Shift"',
+      'Type "INV-<digits>-<digits>"', 'Insert "<uuid>"',
+      'Mouse move', 'Mouse down', 'Mouse up', 'Mouse wheel', 'Click', 'Double click',
+    ].map(title => `pw:api:${title}`).sort();
+    expect(end('a').uiSteps).toEqual(expected);
+  });
+
   it('ignores fixture, hook, test.step and navigation-free internal API steps', () => {
     const { step, end } = harness();
     for (const category of ['fixture', 'hook', 'test.step']) step('a', category, 'Click A');
@@ -103,11 +119,23 @@ describe('runner-reported UI step signatures', () => {
       writeFileSync(join(project, `${file}.spec.cjs`), `
         const { test, expect } = require(${JSON.stringify(join(ROOT, 'node_modules/@playwright/test'))});
         test('journey', async ({ page }) => {
-          await page.setContent('<button>A</button><button>B</button><p>X</p><p>Y</p>');
+          await page.setContent('<button>A</button><button>B</button><p>X</p><p>Y</p><input>');
           await test.step('wrapper must not be recorded', async () => {
             await page.getByRole('button', { name: '${button}' }).click();
             await expect(page.getByText('${text}')).toHaveText('${text}');
           });
+          await page.keyboard.press('Tab');
+          await page.keyboard.down('Shift');
+          await page.keyboard.up('Shift');
+          await page.locator('input').focus();
+          await page.keyboard.type('INV-2026-0001');
+          await page.keyboard.insertText('123e4567-e89b-12d3-a456-426614174000');
+          await page.mouse.move(1, 1);
+          await page.mouse.down();
+          await page.mouse.up();
+          await page.mouse.wheel(0, 10);
+          await page.mouse.click(1, 1);
+          await page.mouse.dblclick(1, 1);
         });
       `);
     }
@@ -118,6 +146,11 @@ describe('runner-reported UI step signatures', () => {
     const signatures = events.map((event) => event.uiSteps);
     expect(signatures[0]).toContain("pw:api:Click getByRole('button', { name: 'A' })");
     expect(signatures[0]).toContain("expect:Expect \"toHaveText\" getByText('X')");
+    for (const title of [
+      'Press "Tab"', 'Key down "Shift"', 'Key up "Shift"',
+      'Type "INV-<digits>-<digits>"', 'Insert "<uuid>"',
+      'Mouse move', 'Mouse down', 'Mouse up', 'Mouse wheel', 'Click', 'Double click',
+    ]) expect(signatures[0], title).toContain(`pw:api:${title}`);
     expect(signatures[0]).not.toEqual(signatures[1]);
     expect(signatures[0]).toEqual(signatures[2]);
     expect(signatures[0]?.join(' ')).not.toContain('wrapper must not be recorded');

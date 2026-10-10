@@ -6096,6 +6096,7 @@ async function runSupervisedTestGatesInner(
       : { chaos: { ...chaosRun, ...(chaosSchedule === null ? {} : { schedule: chaosSchedule }) } }),
     ...(localFailures.length === 0 ? {} : { failedTests: localFailures }),
     ...(evaluated.httpLedger === undefined ? {} : { httpLedger: evaluated.httpLedger }),
+    ...(evaluated.uiLedger === undefined ? {} : { uiLedger: evaluated.uiLedger }),
     httpCoverage: evaluated.httpCoverage.summary,
   });
   /**
@@ -6127,6 +6128,7 @@ async function runSupervisedTestGatesInner(
             ? {}
             : { chaos: { ...chaosRun, ...(chaosSchedule === null ? {} : { schedule: chaosSchedule }) } }),
           ...(evaluated.httpLedger === undefined ? {} : { httpLedger: evaluated.httpLedger }),
+          ...(evaluated.uiLedger === undefined ? {} : { uiLedger: evaluated.uiLedger }),
           httpCoverage: evaluated.httpCoverage.summary,
         }),
       ) as Record<string, unknown>),
