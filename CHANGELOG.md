@@ -10,6 +10,10 @@
   once in an isolated copy at low priority. Its 120 s deadline kills the
   whole process tree, avoiding default full-hook workloads and orphaned
   formatter processes after a timeout.
+- Witnessed Playwright sessions also route pages from consumer-created browser
+  contexts and `browser.newPage()`, including overridden context/page fixtures
+  and popups. Consumer context routes retain the session rewrite; test-scoped
+  hooks are removed at teardown so later contexts cannot reuse a prior session.
 - Supervised Playwright runs with missing/malformed/empty outcomes, or only
   skipped outcomes and a failed exit, report
   `RUNNER_STARTUP_FAILED`, the child exit code and the first 20 stderr lines
