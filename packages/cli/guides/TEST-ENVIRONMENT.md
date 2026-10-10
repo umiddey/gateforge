@@ -924,6 +924,7 @@ the re-sealed receipt names parent 9f2c… but the run state retains no parent r
 re-seal hop 1 claims a receipt parent but the run state retains a run-record (fail closed)
 re-seal hop 1's parent receipt does not authenticate with this keyring: … (fail closed)
 re-seal hop 2's parent receipt does not authenticate with this keyring: … (fail closed)
+re-seal hop 1's retained evidence does not recompute: its retained evidence does not match the attestation its document seals (fail closed)
 re-seal hop 1's retained evidence does not recompute: its evidence attestation does not verify with this keyring (fail closed)
 re-sealed receipt claims 561 carried test(s) but its chain holds 560 carried outcome(s)
 the re-sealed receipt carries 6 consecutive re-seals, past the bound of 5 — run the full suite

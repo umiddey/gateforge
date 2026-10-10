@@ -4253,7 +4253,7 @@ async function runSupervisedTestGatesInner(
   // this run would then perturb or compare nothing while reporting as
   // if it had. Say which, rather than reporting the fiction.
   if (chaosRun !== null && appliedOptions?.chaos == null) {
-    if (spawnedWitness !== null) await stopWitnessProcess(spawnedWitness);
+    if (spawnedWitness !== null) await stopWitnessProcess(io, spawnedWitness);
     throw new UsageError(
       `test-gates: --chaos ${String(chaosRun.seed)} needs a witness that accepts run options; the witness at ` +
         `'${effectiveWitnessUrl ?? ''}' confirmed no chaos plan, so no schedule was applied and this run would ` +
@@ -4320,7 +4320,7 @@ async function runSupervisedTestGatesInner(
   // the suite's own account of execution — refuse it instead.
   if (effectiveWitnessUrl === undefined || witnessVerifierKey === undefined) {
     if (spawnedWitness !== null) {
-      await stopWitnessProcess(spawnedWitness);
+      await stopWitnessProcess(io, spawnedWitness);
     }
     throw new UsageError(
       `test-gates --changed requires ${VERIFIER_KEY_ENV} or ${VERIFIER_KEY_FILE_ENV} in the orchestrating environment: ` +
@@ -4610,7 +4610,7 @@ async function runSupervisedTestGatesInner(
         )
         .map((row) => ({ file: row.planned.file, titlePath: [...row.planned.titlePath] }));
     } catch (error) {
-      if (spawnedWitness !== null) await stopWitnessProcess(spawnedWitness);
+      if (spawnedWitness !== null) await stopWitnessProcess(io, spawnedWitness);
       throw new UsageError(
         `test-gates: the global native preparation freeze refuses this run — ${(error as Error).message}`,
       );
@@ -4730,7 +4730,7 @@ async function runSupervisedTestGatesInner(
         );
       }
     } catch (error) {
-      if (spawnedWitness !== null) await stopWitnessProcess(spawnedWitness);
+      if (spawnedWitness !== null) await stopWitnessProcess(io, spawnedWitness);
       if (armedFreeze !== null) removeFreezeSpecDir(armedFreeze.control);
       throw error;
     }
@@ -5017,6 +5017,10 @@ async function runSupervisedTestGatesInner(
   let sessionTrace: readonly TracedTestInput[] | null = null;
   let lifecycleConflicts: string[] = [];
   let intentFailures: string[] = [];
+  // The live attestation envelope (step 8 below) — fetched in the
+  // `finally` while the spawned witness still serves, persisted as the
+  // durable fallback, then the witness is stopped. `null` until then.
+  let liveAttestation: Attestation | null = null;
   // The FINAL control-spec verdict, decided in the `finally` below — at
   // the close of the supervised window, which is the last moment the
   // generated spec is read — and consumed below, after the run sealed.
@@ -5354,11 +5358,32 @@ async function runSupervisedTestGatesInner(
         }
       }
     }
+    // 8. Live attestation, fetched HERE — while the spawned witness
+    // still serves, as the LAST live witness read before the stop below.
+    // Same discipline as the legacy path, which fetches while its
+    // witness is up. Fetching after the stop cannot succeed: the process
+    // is gone, the fetch fails with a transport error, and a run whose
+    // every record was accepted still reports
+    // `witness-attestation-unavailable` (observed). The envelope is
+    // persisted immediately, so the durable fallback is in the manifest
+    // before the witness shuts down and appends its own copy.
+    liveAttestation = await fetchWitnessAttestation(
+      io,
+      effectiveWitnessUrl,
+      runToken,
+      witnessVerifierKey,
+      expectedDigest === null
+        ? null
+        : { runId: manifest.runId, invocationId, inputDigest: expectedDigest },
+    );
+    if (liveAttestation !== null) {
+      persistLiveAttestation(stateDir, liveAttestation);
+    }
     if (spawnedWitness !== null) {
       // Graceful stop (the same contract as the consumer teardown): the
       // witness appends its attested manifest envelope at shutdown, so
       // the durable evidence channel is sealed before evaluation.
-      await stopWitnessProcess(spawnedWitness);
+      await stopWitnessProcess(io, spawnedWitness);
     }
     try {
       hostLoadCollector?.stop();
@@ -5558,19 +5583,9 @@ async function runSupervisedTestGatesInner(
     }
   }
 
-  // 8. Live attestation (same discipline as the legacy path).
-  const liveAttestation = await fetchWitnessAttestation(
-    io,
-    effectiveWitnessUrl,
-    runToken,
-    witnessVerifierKey,
-    expectedDigest === null
-      ? null
-      : { runId: manifest.runId, invocationId, inputDigest: expectedDigest },
-  );
-  if (liveAttestation !== null) {
-    persistLiveAttestation(stateDir, liveAttestation);
-  }
+  // 8. Live attestation: fetched and persisted in the supervised
+  // window's `finally`, while the spawned witness still serves (the
+  // stop follows the fetch there). Nothing to do here any more.
 
   // 9. Evaluate + project supervision/mapping/inventory/lifecycle findings
   // into blocking entries (never diff-scoped, never waived). Lifecycle
@@ -6751,25 +6766,46 @@ const EMPTY_CATALOG: TestCatalog = {
 };
 
 /**
+ * The grace a spawned witness gets between SIGTERM and SIGKILL. The
+ * witness's shutdown sequence is long by design — proxy listeners,
+ * session proxies, page observers, fixture leases, queue channel,
+ * engine browser, HTTP server — and the attested manifest envelope is
+ * appended LAST, so the bound must cover that whole sequence. The wait
+ * itself is on the EXIT event: a witness that shuts down in half a
+ * second is reaped immediately, and only a genuinely hung shutdown
+ * ever reaches the bound.
+ */
+const WITNESS_STOP_GRACE_MS = 30_000;
+
+/**
  * Gracefully stops a witness this command spawned (the same contract as
- * the consumer teardown): SIGTERM with a short grace period so the
- * witness appends its attested manifest envelope, then SIGKILL.
+ * the consumer teardown): SIGTERM, then wait for the process to EXIT so
+ * the witness can run its whole shutdown sequence and append the
+ * attested manifest envelope. If the bounded grace expires first, the
+ * SIGKILL is a REPORTED failure on stderr — the envelope is then known
+ * to be absent, and a missing durable attestation must be explainable,
+ * never silent.
  *
  * Args:
+ *   io: output target for the reported-SIGKILL failure line.
  *   handle: the spawned witness handle.
  */
-async function stopWitnessProcess(handle: { child: ChildProcess }): Promise<void> {
+async function stopWitnessProcess(io: Io, handle: { child: ChildProcess }): Promise<void> {
   handle.child.kill('SIGTERM');
-  await new Promise<void>((resolveWait) => {
-    const timer = setTimeout(() => {
-      handle.child.kill('SIGKILL');
-      resolveWait();
-    }, 2000);
+  const exited = await new Promise<boolean>((resolveWait) => {
+    const timer = setTimeout(() => resolveWait(false), WITNESS_STOP_GRACE_MS);
     handle.child.once('exit', () => {
       clearTimeout(timer);
-      resolveWait();
+      resolveWait(true);
     });
   });
+  if (exited) return;
+  handle.child.kill('SIGKILL');
+  writeLine(
+    io.stderr,
+    `test-gates: the spawned witness did not exit within ${String(Math.round(WITNESS_STOP_GRACE_MS / 1000))}s of SIGTERM — ` +
+      'SIGKILL sent before it appended its manifest envelope, so this run has no durable attestation',
+  );
 }
 
 /**

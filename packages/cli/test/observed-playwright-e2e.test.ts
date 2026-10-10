@@ -180,6 +180,62 @@ describe('Playwright Observe declarations through the actual CLI', () => {
     }
   }, 180_000);
 
+  // The live attestation is a LIVE witness read: it must happen while
+  // the witness this run spawned still serves. A run that stops the
+  // witness first can never fetch an envelope — the fetch fails with a
+  // transport error, the run downgrades to
+  // `witness-attestation-unavailable` even though every record was
+  // accepted, and the durable manifest envelope depends on the stop
+  // giving the witness enough grace to append it.
+  it('fetches the live attestation while the self-spawned witness still serves, then stops it', async () => {
+    const app = await startApp();
+    try {
+      await withTempRepo({}, async repo => {
+        installStrictFixture(repo, { 'specs/native.spec.js': SPEC });
+        repo.writeFiles({
+          '.gateforge.yml': `${GATEFORGE_YML}runtime: .gateforge/runtime.yml\n`,
+          '.gateforge/runtime.yml': 'schemaVersion: 1\nenvAllowlist: [TEST_SERVICE_URL]\n',
+          '.gateforge/policies.yml': 'schemaVersion: 1\npolicies:\n  - id: persistence\n    when: {}\n    require: [persistence:create]\n',
+          '.gateforge/adapters/tenant.accounts.mjs': ADAPTER.replace('  deletion:', "  observe: { create: { method: 'POST', path: '/api/accounts' } },\n  volatileFields: ['status'],\n  deletion:"),
+          '.gateforge/test-map.yml': `schemaVersion: 1\ntests:\n  - key: playwright:chromium:specs/native.spec.js:${TITLE}\n    selector:\n      runner: playwright\n      project: chromium\n      file: specs/native.spec.js\n      titlePath: ['${TITLE}']\n    kind: observed-e2e\n    claims: ['${CLAIM}']\n    reason: Native UI writes an account; independent engine reads verify its persisted fields.\n`,
+        });
+        repo.git(['add', '-A']);
+        repo.git(['commit', '--no-gpg-sign', '--quiet', '-m', 'live attestation fixture']);
+        repo.writeFiles({ 'src/accounts.js': '// accounts resource\n// changed source\n' });
+        repo.git(['add', 'src/accounts.js']);
+        const { env } = operatorEnvironment();
+        const runEnv = {
+          ...env,
+          TEST_SERVICE_URL: app.url,
+          UNLISTED_SERVICE_URL: app.url,
+          GATEFORGE_APP_BASE_URL: app.url,
+          GATEFORGE_TARGET_BASE_URL: app.url,
+          GATEFORGE_TARGET_FINGERPRINT: FINGERPRINT,
+          GATEFORGE_APPROVED_POLICY_DIGEST: trustedPolicyDigestForConfig(repo.root, loadConfigAt(repo.root)),
+        };
+        const run = await runCliProcess(repo.root, runEnv, ['test-gates', '--changed', '--format', 'json']);
+        expect(run.code, `test-gates stdout:\n${run.stdout}\nstderr:\n${run.stderr}`).toBe(0);
+        // The live read happens BEFORE the spawned witness is stopped:
+        // no unavailability line, and the report claims the attested
+        // evidence state.
+        expect(run.stderr, `stderr:\n${run.stderr}`).not.toContain('live attestation unavailable');
+        const report = JSON.parse(run.stdout) as { diagnosticContext: { evidenceState: string }; httpLedger?: { rows: unknown[] } };
+        expect(report.diagnosticContext.evidenceState, `stdout:\n${run.stdout}\nstderr:\n${run.stderr}`).toBe('attested');
+        // The witnessed exchange stays credited: the run's records carry
+        // the attestation, so the report-side ledger exists.
+        expect(report.httpLedger?.rows.length ?? 0, `stdout:\n${run.stdout}`).toBeGreaterThan(0);
+        // The durable channel: the witness appended its attested
+        // manifest envelope at shutdown (the stop must wait for it).
+        const manifest = JSON.parse(
+          readFileSync(join(repo.root, '.gateforge/test-gates', 'manifest.json'), 'utf8'),
+        ) as { attestation?: Record<string, unknown> };
+        expect(manifest.attestation, 'manifest.json carries no attestation envelope').toBeDefined();
+      });
+    } finally {
+      await app.stop();
+    }
+  }, 180_000);
+
   // The refused repo is the SAME repository the positive case observes,
   // with its mapping, so the named selector resolves. The candidate's own
   // config records its load outside the repository: the refusal is then

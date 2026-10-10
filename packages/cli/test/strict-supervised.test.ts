@@ -1202,7 +1202,12 @@ policies:
           expect(fullReportA.execution.repositoryDebt.unclaimed).toBeGreaterThan(500);
           expect(fullReportA.diagnosticContext).toMatchObject({
             scope: 'full',
-            evidenceState: 'witness-attestation-unavailable',
+            // The witness this run spawned is stopped only AFTER the
+            // live attestation is fetched, so a run whose records were
+            // all accepted claims the attested evidence state (it used
+            // to report witness-attestation-unavailable because the
+            // fetch ran after the stop and always failed).
+            evidenceState: 'attested',
           });
           expect(fullReportA.diagnosticContext.candidateTreeId).toMatch(/^[0-9a-f]{40}$/);
           expect(fullReportA.diagnosticContext.inputDigest).toMatch(/^[0-9a-f]{64}$/);
