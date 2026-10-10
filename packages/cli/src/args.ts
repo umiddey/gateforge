@@ -49,6 +49,7 @@ const BOOLEAN_FLAGS: Record<string, true> = {
   'dry-run': true,
   probe: true,
   'strict-preflight': true,
+  'hook-mutation': true,
 };
 
 /**

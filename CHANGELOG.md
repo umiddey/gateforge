@@ -2,6 +2,10 @@
 
 ## 0.15.0 (unreleased)
 
+- `enforcement doctor` runs repository hooks only with `--hook-mutation`,
+  once in an isolated copy at low priority. Its 120 s deadline kills the
+  whole process tree, avoiding default full-hook workloads and orphaned
+  formatter processes after a timeout.
 - Supervised Playwright runs with missing/malformed/empty outcomes, or only
   skipped outcomes and a failed exit, report
   `RUNNER_STARTUP_FAILED`, the child exit code and the first 20 stderr lines

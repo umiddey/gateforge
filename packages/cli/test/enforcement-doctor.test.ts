@@ -6,7 +6,7 @@
  * agent-writable is reported as NOT active. Exit is 0 whenever the
  * doctor runs (diagnostic), `--json` is deterministic.
  */
-import { chmodSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -15,6 +15,7 @@ import { installFixture, runCli } from './helpers.js';
 import { installCommitHook } from '../src/git-hooks.js';
 import { trustedPolicyDigestForConfig } from '../src/execution.js';
 import { loadConfigAt } from '../src/commands/common.js';
+import * as enforcement from '../src/commands/enforcement.js';
 
 /** Sanitized env for direct module calls. */
 function gitEnv(): NodeJS.ProcessEnv {
@@ -97,9 +98,60 @@ describe('enforcement doctor (standard mode reports honestly)', () => {
     });
   });
 
-  it('detects file mutations from repeated pre-commit hook runs and recommends gate ordering', async () => {
+  it('does not run configured hooks unless --hook-mutation is requested', async () => {
     await withTempRepo({}, async (repo) => {
       installFixture(repo);
+      const marker = repo.path('outside-scratch-marker');
+      repo.writeFiles({
+        '.pre-commit-config.yaml': 'repos:\n  - repo: local\n    hooks:\n      - id: marker\n        name: marker\n        entry: true\n        language: system\n',
+        'mockbin/pre-commit': `#!/bin/sh\nprintf x >> "${marker}"\n`,
+      });
+      chmodSync(repo.path('mockbin/pre-commit'), 0o755);
+      const result = await runCli(repo, ['enforcement', 'doctor', '--json'], {
+        PATH: `${repo.path('mockbin')}:${process.env['PATH'] ?? ''}`,
+      });
+      expect(result.code).toBe(0);
+      expect(existsSync(marker)).toBe(false);
+      const mutation = checkById(parseDoctor(result.stdout), 'hook-mutation');
+      expect(mutation.status).toBe('warn');
+      expect(mutation.detail).toContain('--hook-mutation');
+      expect(mutation.detail).toContain('not run');
+    });
+  });
+
+  it('kills the entire hook process tree on the total deadline', async () => {
+    // Exercise real OS process-group termination; fake timers cannot drive child processes.
+    await withTempRepo({}, async (repo) => {
+      const pidfile = repo.path('grandchild.pid');
+      repo.writeFiles({
+        'mockbin/pre-commit': `#!/bin/sh\nsh -c 'sleep 30 & echo $! > "${pidfile}"; sleep 300'\n`,
+      });
+      chmodSync(repo.path('mockbin/pre-commit'), 0o755);
+      let pid: number | undefined;
+      try {
+        const result = await enforcement.runHookOnce(repo.root, {
+          ...gitEnv(),
+          PATH: `${repo.path('mockbin')}:${process.env['PATH'] ?? ''}`,
+        }, 1000);
+        expect(result.timedOut).toBe(true);
+        pid = Number(readFileSync(pidfile, 'utf8').trim());
+        expect(pid).toBeGreaterThan(0);
+        // An orphan may await init's reaping, but a zombie cannot keep doing work.
+        const procStat = `/proc/${pid}/stat`;
+        expect(existsSync(procStat) ? readFileSync(procStat, 'utf8').split(') ')[1]?.[0] : 'dead').toMatch(/^(Z|dead)$/);
+      } finally {
+        if (pid === undefined && existsSync(pidfile)) pid = Number(readFileSync(pidfile, 'utf8').trim());
+        if (pid !== undefined) {
+          try { process.kill(pid, 'SIGKILL'); } catch { /* Already dead. */ }
+        }
+      }
+    });
+  });
+
+  it('detects file mutations from one pre-commit hook run and recommends gate ordering', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      const passMarker = repo.path('hook-pass-count');
       repo.writeFiles({
         '.pre-commit-config.yaml': [
           'repos:',
@@ -115,11 +167,11 @@ describe('enforcement doctor (standard mode reports honestly)', () => {
           '        language: system',
           '',
         ].join('\n'),
-        'mockbin/pre-commit': '#!/bin/sh\nprintf x >> mutation-marker.txt\n',
+        'mockbin/pre-commit': `#!/bin/sh\nprintf x >> "${passMarker}"\nprintf x >> mutation-marker.txt\n`,
         'mutation-marker.txt': 'start\n',
       });
       chmodSync(repo.path('mockbin/pre-commit'), 0o755);
-      const result = await runCli(repo, ['enforcement', 'doctor', '--json'], {
+      const result = await runCli(repo, ['enforcement', 'doctor', '--json', '--hook-mutation'], {
         PATH: `${repo.path('mockbin')}:${process.env['PATH'] ?? ''}`,
       });
       const report = parseDoctor(result.stdout);
@@ -127,6 +179,8 @@ describe('enforcement doctor (standard mode reports honestly)', () => {
       expect(result.code).toBe(0);
       expect(mutation.status).toBe('warn');
       expect(mutation.detail).toContain('mutation-marker.txt');
+      expect(readFileSync(passMarker, 'utf8')).toBe('x');
+      expect(readFileSync(repo.path('mutation-marker.txt'), 'utf8')).toBe('start\n');
       // The advice has to be actionable in the ORDER the owner meets
       // it: the hook does not exist yet, so it must name the command
       // that installs it and the position to give it.
@@ -144,7 +198,7 @@ describe('enforcement doctor (standard mode reports honestly)', () => {
         'mockbin/pre-commit': '#!/bin/sh\nmkdir -p .lint_cache && printf "*\\n" > .lint_cache/.gitignore && date +%N >> .lint_cache/state\n',
       });
       chmodSync(repo.path('mockbin/pre-commit'), 0o755);
-      const result = await runCli(repo, ['enforcement', 'doctor', '--json'], {
+      const result = await runCli(repo, ['enforcement', 'doctor', '--json', '--hook-mutation'], {
         PATH: `${repo.path('mockbin')}:${process.env['PATH'] ?? ''}`,
       });
       const mutation = checkById(parseDoctor(result.stdout), 'hook-mutation');
@@ -160,7 +214,7 @@ describe('enforcement doctor (standard mode reports honestly)', () => {
         'mockbin/pre-commit': '#!/bin/sh\nfor i in 1 2 3 4 5 6 7 8; do date +%N >> "generated-$i.txt"; done\n',
       });
       chmodSync(repo.path('mockbin/pre-commit'), 0o755);
-      const result = await runCli(repo, ['enforcement', 'doctor', '--json'], {
+      const result = await runCli(repo, ['enforcement', 'doctor', '--json', '--hook-mutation'], {
         PATH: `${repo.path('mockbin')}:${process.env['PATH'] ?? ''}`,
       });
       const mutation = checkById(parseDoctor(result.stdout), 'hook-mutation');
@@ -188,7 +242,7 @@ describe('enforcement doctor (standard mode reports honestly)', () => {
         ].join('\n'),
       });
       chmodSync(repo.path('mockbin/pre-commit'), 0o755);
-      const result = await runCli(repo, ['enforcement', 'doctor', '--json'], {
+      const result = await runCli(repo, ['enforcement', 'doctor', '--json', '--hook-mutation'], {
         PATH: `${repo.path('mockbin')}:${process.env['PATH'] ?? ''}`,
         HOME: home,
         XDG_DATA_HOME: dataHome,
@@ -207,7 +261,7 @@ describe('enforcement doctor (standard mode reports honestly)', () => {
         'mockbin/pre-commit': '#!/bin/sh\ni=0; while [ $i -lt 40 ]; do echo "noise line $i"; i=$((i+1)); done >&2\nexit 1\n',
       });
       chmodSync(repo.path('mockbin/pre-commit'), 0o755);
-      const result = await runCli(repo, ['enforcement', 'doctor', '--json'], {
+      const result = await runCli(repo, ['enforcement', 'doctor', '--json', '--hook-mutation'], {
         PATH: `${repo.path('mockbin')}:${process.env['PATH'] ?? ''}`,
       });
       const mutation = checkById(parseDoctor(result.stdout), 'hook-mutation');
@@ -215,6 +269,42 @@ describe('enforcement doctor (standard mode reports honestly)', () => {
       expect(mutation.detail).toContain('noise line 39');
       expect(mutation.detail).not.toContain('noise line 10');
       expect(mutation.detail).toContain('pre-commit run --all-files');
+    });
+  });
+
+  it('preserves the unavailable runner warning when hook mutation is requested', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.writeFiles({
+        '.pre-commit-config.yaml': 'repos: []\n',
+        'mockbin/git': '#!/bin/sh\nexec /usr/bin/git "$@"\n',
+      });
+      chmodSync(repo.path('mockbin/git'), 0o755);
+      const result = await runCli(repo, ['enforcement', 'doctor', '--json', '--hook-mutation'], {
+        PATH: repo.path('mockbin'),
+      });
+      expect(result.code).toBe(0);
+      expect(checkById(parseDoctor(result.stdout), 'hook-mutation')).toEqual({
+        id: 'hook-mutation',
+        status: 'warn', detail: 'pre-commit is unavailable; hook mutation behavior was not checked',
+      });
+    });
+  });
+
+  it('caps captured hook output at 5 MiB and stops the overflowing process', async () => {
+    await withTempRepo({}, async (repo) => {
+      // Keep the child alive after output so termination, rather than its normal exit, is observed.
+      repo.writeFiles({
+        'mockbin/pre-commit': `#!/bin/sh\nexec "${process.execPath}" -e 'process.stdout.write(Buffer.alloc(6 * 1024 * 1024, 120)); setInterval(() => {}, 1000)'\n`,
+      });
+      chmodSync(repo.path('mockbin/pre-commit'), 0o755);
+      const result = await enforcement.runHookOnce(repo.root, {
+        ...gitEnv(), PATH: `${repo.path('mockbin')}:${process.env['PATH'] ?? ''}`,
+      }, 5000);
+      expect(result.error?.code).toBe('ENOBUFS');
+      expect(Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr)).toBe(5 * 1024 * 1024);
+      expect(result.timedOut).toBe(false);
+      expect(result.status).toBeNull();
     });
   });
 

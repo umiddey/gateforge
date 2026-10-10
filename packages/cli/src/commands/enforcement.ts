@@ -35,8 +35,8 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { spawnSync } from 'node:child_process';
-import { homedir, tmpdir } from 'node:os';
+import { spawn, spawnSync } from 'node:child_process';
+import { homedir, setPriority, tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { BehaviorPolicySchema, QUARANTINE_DIR, trustedPolicyDigest } from '@gate-forge/core';
 import type { GateforgeConfig } from '@gate-forge/core';
@@ -109,7 +109,7 @@ import { runPipeline, sourcesByResourceId } from '../pipeline.js';
 import { testToolingSourceConflicts } from '../scope.js';
 
 export const ENFORCEMENT_USAGE =
-  'usage: gateforge enforcement doctor [--json] [--strict-preflight]\n' +
+  'usage: gateforge enforcement doctor [--json] [--strict-preflight] [--hook-mutation]\n' +
   '       gateforge enforcement pin --pin-file <path> [--confirm]';
 
 /**
@@ -386,20 +386,80 @@ function snapshotHookWorkspace(root: string, env: NodeJS.ProcessEnv): Map<string
   return files;
 }
 
+/** Runs one hook pass with bounded output and a deadline covering its process group. */
+export function runHookOnce(cwd: string, env: NodeJS.ProcessEnv, timeoutMs: number): Promise<{
+  status: number | null;
+  stdout: string;
+  stderr: string;
+  error?: NodeJS.ErrnoException;
+  timedOut: boolean;
+}> {
+  // Node 20 and the project's ES2023 lib do not provide Promise.withResolvers.
+  return new Promise((resolveResult) => {
+    const child = spawn('pre-commit', ['run', '--all-files'], {
+      cwd, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    if (child.pid !== undefined) {
+      try { setPriority(child.pid, 19); } catch { /* Priority is best-effort. */ }
+    }
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    const maxBuffer = 5 * 1024 * 1024;
+    let captured = 0;
+    let error: NodeJS.ErrnoException | undefined;
+    let timedOut = false;
+    const killGroup = (): void => {
+      if (child.pid !== undefined) {
+        try { process.kill(-child.pid, 'SIGKILL'); } catch { /* Group may have already exited. */ }
+      }
+    };
+    const deadline = setTimeout(() => {
+      timedOut = true;
+      killGroup();
+    }, timeoutMs);
+    const capture = (chunks: Buffer[], chunk: Buffer): void => {
+      const remaining = maxBuffer - captured;
+      if (remaining > 0) {
+        const kept = chunk.subarray(0, remaining);
+        chunks.push(kept);
+        captured += kept.length;
+      }
+      if (chunk.length > remaining && error === undefined) {
+        error = Object.assign(new Error('pre-commit output exceeded 5 MiB'), { code: 'ENOBUFS' });
+        killGroup();
+      }
+    };
+    child.stdout.on('data', (chunk: Buffer) => capture(stdout, chunk));
+    child.stderr.on('data', (chunk: Buffer) => capture(stderr, chunk));
+    child.on('error', (cause: NodeJS.ErrnoException) => { error = cause; });
+    child.on('close', (status) => {
+      clearTimeout(deadline);
+      resolveResult({
+        status, stdout: Buffer.concat(stdout).toString('utf8'), stderr: Buffer.concat(stderr).toString('utf8'),
+        ...(error === undefined ? {} : { error }), timedOut,
+      });
+    });
+  });
+}
+
 /**
- * Runs configured pre-commit hooks twice in a disposable checkout and reports workspace writes.
+ * Runs configured pre-commit hooks once in a disposable checkout when explicitly requested.
  *
  * Args:
  *   cwd: owner repository whose hook configuration will be copied.
  *   env: caller environment used only to locate the hook runner.
+ *   enabled: whether the caller opted into executing repository hooks.
  *
  * Returns:
  *   { status, detail }: advisory hook-mutation doctor result.
  */
-function precommitMutationCheck(cwd: string, env: NodeJS.ProcessEnv): { status: DoctorStatus; detail: string } {
+async function precommitMutationCheck(cwd: string, env: NodeJS.ProcessEnv, enabled: boolean): Promise<{ status: DoctorStatus; detail: string }> {
   const configPath = join(cwd, '.pre-commit-config.yaml');
   if (!existsSync(configPath)) {
     return { status: 'warn', detail: 'no .pre-commit-config.yaml; hook mutation behavior was not checked' };
+  }
+  if (!enabled) {
+    return { status: 'warn', detail: 'pre-commit hooks were not run; pass --hook-mutation to run them once in an isolated copy' };
   }
   let hookIds: string[] = [];
   try {
@@ -460,26 +520,17 @@ function precommitMutationCheck(cwd: string, env: NodeJS.ProcessEnv): { status: 
       }
     }
     const mutations = new Set<string>();
-    const failures: string[] = [];
-    for (let pass = 0; pass < 2; pass += 1) {
-      const before = snapshotHookWorkspace(checkout, safeEnv);
-      const result = spawnSync('pre-commit', ['run', '--all-files'], {
-        cwd: checkout,
-        env: safeEnv,
-        encoding: 'utf8',
-        timeout: 120_000,
-        maxBuffer: 5 * 1024 * 1024,
-      });
-      if ((result.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') {
-        return { status: 'warn', detail: 'pre-commit is unavailable; hook mutation behavior was not checked' };
-      }
-      const after = snapshotHookWorkspace(checkout, safeEnv);
-      for (const path of new Set([...before.keys(), ...after.keys()])) {
-        if (before.get(path) !== after.get(path)) mutations.add(path);
-      }
-      if (result.error !== undefined || result.status !== 0) {
-        failures.push(`run ${pass + 1}: ${lastLines(result.stderr || result.stdout || result.error?.message || `exit ${String(result.status)}`, 3)}`);
-      }
+    const before = snapshotHookWorkspace(checkout, safeEnv);
+    const result = await runHookOnce(checkout, safeEnv, 120_000);
+    if (result.error?.code === 'ENOENT') {
+      return { status: 'warn', detail: 'pre-commit is unavailable; hook mutation behavior was not checked' };
+    }
+    if (result.timedOut) {
+      return { status: 'warn', detail: 'pre-commit hooks timed out after 120 s; the process tree was killed' };
+    }
+    const after = snapshotHookWorkspace(checkout, safeEnv);
+    for (const path of new Set([...before.keys(), ...after.keys()])) {
+      if (before.get(path) !== after.get(path)) mutations.add(path);
     }
     if (mutations.size > 0) {
       // These are the REPOSITORY's own hooks, and the doctor runs
@@ -495,19 +546,19 @@ function precommitMutationCheck(cwd: string, env: NodeJS.ProcessEnv): { status: 
             'FIRST in .pre-commit-config.yaml, above these hooks, so a file-mutating hook cannot invalidate its receipt';
       return {
         status: 'warn',
-        detail: `pre-commit hooks modified workspace files on repeated runs: ${summarizePaths([...mutations].sort(), 5)}${recommendation}`,
+        detail: `pre-commit hooks modified workspace files in one run: ${summarizePaths([...mutations].sort(), 5)}${recommendation}`,
       };
     }
-    if (failures.length > 0) {
+    if (result.error !== undefined || result.status !== 0) {
       return {
         status: 'warn',
         detail:
           `pre-commit hooks did not complete cleanly in an isolated copy (without ${[...excluded].filter((name) => name !== '.git').join(', ')}), ` +
           `so file changes by hooks were not checked; hooks that need those folders fail there. ` +
-          `Run \`pre-commit run --all-files\` in the repository to see the full error. Last lines: ${failures.join('; ')}`,
+          `Run \`pre-commit run --all-files\` in the repository to see the full error. Last lines: ${lastLines(result.stderr || result.stdout || result.error?.message || `exit ${String(result.status)}`, 3)}`,
       };
     }
-    return { status: 'ok', detail: 'pre-commit hooks ran twice without workspace file mutations' };
+    return { status: 'ok', detail: 'pre-commit hooks ran once without workspace file mutations' };
   } catch (error) {
     return { status: 'warn', detail: `hook mutation behavior was not checked: ${(error as Error).message}` };
   } finally {
@@ -1163,11 +1214,12 @@ async function playwrightProjectNaming(
  *
  * Args:
  *   io: process context.
+ *   options: optional opt-in hook execution.
  *
  * Returns:
  *   Promise<DoctorReport>: deterministic report.
  */
-export async function buildDoctorReport(io: Io): Promise<DoctorReport> {
+export async function buildDoctorReport(io: Io, options: { hookMutation?: boolean } = {}): Promise<DoctorReport> {
   const checks: DoctorCheck[] = [];
   // 0. Config (all later checks degrade honestly when it fails).
   let mode: 'standard' | 'managed' = 'standard';
@@ -1342,7 +1394,7 @@ export async function buildDoctorReport(io: Io): Promise<DoctorReport> {
           `hook exists in '${hook.hooksDir ?? 'the hooks directory'}' — run \`pre-commit install\` to activate the gate`
         : hook.detail,
   });
-  const hookMutation = precommitMutationCheck(io.cwd, io.env);
+  const hookMutation = await precommitMutationCheck(io.cwd, io.env, options.hookMutation === true);
   checks.push({ id: 'hook-mutation', ...hookMutation });
   const ciWired = hasWiredCi(io.cwd);
   checks.push({
@@ -1745,8 +1797,8 @@ export async function enforcementCommand(io: Io, argv: readonly string[]): Promi
     writeLine(io.stdout, ENFORCEMENT_USAGE);
     return 0;
   }
-  rejectUnknownFlags(options, ['json', 'help', 'strict-preflight'], ENFORCEMENT_USAGE);
-  const report = await buildDoctorReport(io);
+  rejectUnknownFlags(options, ['json', 'help', 'strict-preflight', 'hook-mutation'], ENFORCEMENT_USAGE);
+  const report = await buildDoctorReport(io, { hookMutation: options['hook-mutation'] === true });
   if (options['json'] === true) {
     writeLine(io.stdout, canonicalJson(report as unknown as JsonValue));
     return strictExit(io, report.run, options['strict-preflight'] === true, 'json');
