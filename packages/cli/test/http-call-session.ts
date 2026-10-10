@@ -5,9 +5,9 @@
  * finding tests and the WP5 adoption tests drive the authoritative CLI
  * over this one setup, so a finding means the same thing in both.
  */
-import { readFileSync } from 'node:fs';
+import { readFileSync, rmSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 import { expect } from 'vitest';
@@ -15,6 +15,7 @@ import { type TempRepo } from '@gate-forge/core';
 import { startWitness } from '../../pack-playwright/src/witness/server.js';
 import { GateforgeReporter } from '../../pack-playwright/src/reporter/reporter.js';
 import { startSupervisorSpoolDrain } from '../../pack-playwright/src/supervisor/drain.js';
+import { spoolPathFor } from '../../pack-playwright/src/supervisor/spool.js';
 import { configYml, writeV2Manifest } from './helpers.js';
 import { mintCompleteRunReceipt } from './gate-receipts.js';
 
@@ -148,6 +149,10 @@ export async function sealRunWithCalls(
     proxyTarget: target.url,
   });
   const stateDir = join(repo.root, '.gateforge', 'test-gates');
+  // Each call seals a fresh run. Callers seal twice in one repo with the same
+  // RUN_ID; the previous call's spool already holds testBegin/testEnd for
+  // TEST_ID, so a reused spool never opens the second run's session.
+  rmSync(dirname(spoolPathFor(stateDir, RUN_ID)), { recursive: true, force: true });
   const reporter = new GateforgeReporter({ stateDir, runId: RUN_ID });
   const drain = startSupervisorSpoolDrain({
     stateDir, runId: RUN_ID, witnessUrl: witness.url, runToken: TOKEN, verifierKey: VERIFIER_KEY,
