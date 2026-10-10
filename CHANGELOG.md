@@ -2,6 +2,11 @@
 
 ## 0.15.0 (unreleased)
 
+- Test-owned Playwright API request contexts route app-origin calls through
+  the current session proxy, including redirects, exposing witnessed
+  `httpLedger` rows marked `initiator: test-code` without satisfying UI
+  claims. Non-app origins, setup contexts and page/context-owned request
+  objects remain direct; the obsolete API exchange self-report channel is removed.
 - Playwright reports retain per-test runner-observed UI actions and assertions
   as a report-only `uiLedger`, distinguishing journeys with identical HTTP
   traffic. Signatures ignore source locations and normalize UUIDs/long digit

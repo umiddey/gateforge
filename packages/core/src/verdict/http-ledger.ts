@@ -41,6 +41,8 @@ export interface HttpLedgerRow {
   path: string;
   /** The observed response status. */
   status: number;
+  /** Test-code transport is measurable, but never UI claim evidence. */
+  initiator?: 'test-code';
   /** Sec-Fetch-Dest classification; only `api` may produce R2/R3 findings. */
   kind: HttpLedgerKind;
   /** The serving route's resource id, or null when unresolved. */
@@ -178,6 +180,7 @@ export function buildHttpLedger(
         method: method.toUpperCase(),
         path,
         status,
+        ...(exchange['initiator'] === 'test-code' ? { initiator: 'test-code' as const } : {}),
         kind,
         route: resolution.status === 'match' ? resolution.matched.resourceId : null,
         resolution: resolution.status,

@@ -186,8 +186,6 @@ import {
   OBSERVED_KIND,
   PERSISTENCE_KIND,
   RUN_HEADER,
-  DIRECT_CHANNEL,
-  DIRECT_EXCHANGES_CAP,
   VERIFIER_HEADER,
 } from '../constants.js';
 import { PageObserverRegistrationError, registerPageObserver, sweepPageVisits } from './page-observer-registration.js';
@@ -2624,10 +2622,6 @@ async function handleRequest(
       await handleSessionPageOrigins(state, res, (await readBody(req)) as Record<string, unknown>);
       return;
     }
-    if (req.method === 'POST' && path === '/sessions/direct-exchanges') {
-      await handleSessionDirectExchanges(state, res, (await readBody(req)) as Record<string, unknown>);
-      return;
-    }
 
     if (req.method === 'POST' && path === '/sessions/page-observer') {
       const body = (await readBody(req)) as SessionPageObserverRequest;
@@ -4016,8 +4010,6 @@ async function handleSessionOpen(
     proxyUrl: null,
     proxyServer: null,
     claims,
-    directExchanges: [],
-    directRecordsIssued: new Set(),
     // The registered expected-set identity this session was minted for
     // (enforcement-review fix 2b); null when no expected set is bound.
     registered:
@@ -4281,43 +4273,6 @@ async function handleSessionPageOrigins(
   sendJson(res, 200, { recorded: true as const });
 }
 
-/** Stores bounded, deduplicated direct API exchanges on their session. */
-async function handleSessionDirectExchanges(
-  state: WitnessState,
-  res: ServerResponse,
-  body: Record<string, unknown>,
-): Promise<void> {
-  if (!isPlainObject(body)) throw new HttpError(400, 'direct exchange report body must be an object');
-  const session = requireOpenSession(state, body);
-  const reported = body['exchanges'];
-  if (!Array.isArray(reported) || reported.length === 0) {
-    throw new HttpError(400, 'direct exchange report requires at least one exchange');
-  }
-  const exchanges = reported.map((item) => {
-    if (
-      !isPlainObject(item) ||
-      typeof item['method'] !== 'string' ||
-      !/^[A-Z]+$/.test(item['method']) ||
-      typeof item['url'] !== 'string' ||
-      item['url'].length === 0 ||
-      typeof item['status'] !== 'number' ||
-      !Number.isInteger(item['status']) ||
-      item['status'] < 100 ||
-      item['status'] > 599
-    ) {
-      throw new HttpError(400, 'each direct exchange must have an uppercase method, URL, and HTTP status');
-    }
-    return { method: item['method'], url: item['url'], status: item['status'] };
-  });
-  for (const exchange of exchanges) {
-    if (session.directExchanges.some((prior) =>
-      prior.method === exchange.method && prior.url === exchange.url && prior.status === exchange.status
-    )) continue;
-    if (session.directExchanges.length >= DIRECT_EXCHANGES_CAP) break;
-    session.directExchanges.push(exchange);
-  }
-  sendJson(res, 200, { recorded: true as const, kept: session.directExchanges.length });
-}
 
 
 /**
@@ -5755,16 +5710,6 @@ async function handleObserveFinalize(
   // transport record carries. Persistence-vs-persistence consumption is
   // untouched: it still matches against the LIVE log, so one exchange
   // can never credit two persistence claims.
-  if (session.directExchanges.length > 0) {
-    for (const claimId of session.claims) {
-      if (session.directRecordsIssued.has(claimId)) continue;
-      issueRecord(state, claimId, HTTP_OBSERVED_KIND, session.testId, {
-        channel: DIRECT_CHANNEL,
-        exchanges: session.directExchanges.map((exchange) => ({ ...exchange })),
-      }, 'engine-observed');
-      session.directRecordsIssued.add(claimId);
-    }
-  }
 
   const transport = transportSnapshot(state, session, false);
   const claims = session.claims.filter((claim) => state.observeDeclarations?.has(claim));
