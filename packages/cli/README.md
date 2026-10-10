@@ -139,7 +139,9 @@ run), `2` config/usage error. `tests diagnose` has its own advisory contract
   `enforcement doctor` fails the `playwright-projects` row — `test-gates`
   needs a named project.
 - Gateforge reads the FIRST of `playwright.config.{ts,mts,cts,js,mjs,cjs}`
-  at the repository root; a suffixed config such as
+  at the repository root, then up to two directory levels down (breadth-first,
+  alphabetical, hidden/dependency/build/Python directories pruned). Multiple
+  configs are disclosed, but only the first is inventoried. A suffixed config such as
   `playwright.config.e2e.js` is not read — rename it to
   `playwright.config.js` if it is the suite to prove.
 - Run-state hygiene is enforced, not forgiven: a committed run-state

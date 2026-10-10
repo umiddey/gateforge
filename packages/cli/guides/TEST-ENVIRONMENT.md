@@ -160,7 +160,7 @@ Four rules decide what a run does with a declared state:
 - **A relative path is relative to the runner's working directory** —
   the directory holding the playwright config the run uses. That is the
   repository root for a root-level config and the project's own
-  directory for a config one level down, which is exactly the directory
+  directory for a config up to two levels down, which is exactly the directory
   your setup test wrote the file from: the artifact the dependent project
   reads is the artifact the setup project saved, wherever the config
   lives. The file need not exist before the run; the setup project creates

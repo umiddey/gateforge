@@ -2,6 +2,10 @@
 
 ## 0.15.0 (unreleased)
 
+- Playwright config discovery searches two directory levels breadth-first,
+  retaining root-first selection and multiple-config disclosure. Hidden,
+  dependency, build and Python environment directories are pruned at every
+  level; sealed-tree re-sealing uses the same convention.
 - Observe-channel HTTP claim snapshots exclude static assets before deduplication
   and the 500-exchange cap, using the ledger's existing request classification.
   Unmatched truncated records stay blocking as missing with a cap diagnostic,

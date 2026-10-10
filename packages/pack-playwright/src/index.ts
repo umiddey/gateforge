@@ -191,6 +191,8 @@ export {
   existingRepoFile,
   PLAYWRIGHT_CONFIG_NAMES,
   CONFIG_SEARCH_PRUNED_DIRS,
+  CONFIG_SEARCH_MAX_DEPTH,
+  isConfigSearchDirectory,
   untrustedEnv,
   reconciliationKey,
   splitPytestNodeId,

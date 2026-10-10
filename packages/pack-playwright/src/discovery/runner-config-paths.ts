@@ -17,7 +17,7 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 
-import { findPlaywrightConfig } from './reconcile.js';
+import { findPlaywrightConfigs } from './reconcile.js';
 
 /**
  * A Playwright configuration at the repository root, including the
@@ -147,8 +147,7 @@ function scriptNamedConfigs(cwd: string): string[] {
 export function runnerConfigPaths(cwd: string, runner: string): string[] {
   const found = new Set<string>();
   if (runner === 'playwright') {
-    const resolved = findPlaywrightConfig(cwd);
-    if (resolved !== null) found.add(resolved);
+    for (const path of findPlaywrightConfigs(cwd)) found.add(path);
     let entries: string[] = [];
     try {
       entries = readdirSync(cwd);
