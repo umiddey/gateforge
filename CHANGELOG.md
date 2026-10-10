@@ -2,6 +2,9 @@
 
 ## 0.15.0 (unreleased)
 
+- Witnessed browser routing requires `GATEFORGE_APP_BASE_URL` only when a
+  page or browser context is used, preserving page-free supervised tests
+  and their original integrity diagnostics.
 - Test-owned Playwright API request contexts route app-origin calls through
   the current session proxy, including redirects, exposing witnessed
   `httpLedger` rows marked `initiator: test-code` without satisfying UI

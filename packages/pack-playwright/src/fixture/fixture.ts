@@ -384,18 +384,17 @@ const extended = browserRunner.extend<EvidenceFixtures>({
       return;
     }
     const appBaseURL = process.env['GATEFORGE_APP_BASE_URL']?.trim();
-    if (!appBaseURL) {
-      throw new Error('GATEFORGE_APP_BASE_URL is required for witnessed browser traffic.');
-    }
     const witness = new WitnessClient();
     const session = await resolveSessionBounded(witness, testInfo.testId, testInfo.workerIndex, 5_000);
     if (session === null) {
       throw new Error(`No supervisor-issued witness session for ${testInfo.testId}.`);
     }
-    const appOrigin = new URL(appBaseURL);
-    const appOriginPrefix = `${appOrigin.origin}/`;
+    // The auto fixture also runs for tests that never create a context or
+    // page. Require app routing configuration only at those browser edges.
+    const appOrigin = appBaseURL ? new URL(appBaseURL) : null;
+    const appOriginPrefix = appOrigin === null ? null : `${appOrigin.origin}/`;
     const sessionOrigin = session.proxyUrl === null ? null : new URL(session.proxyUrl);
-    if (sessionOrigin !== null) {
+    if (sessionOrigin !== null && appOrigin !== null) {
       if (appOrigin.protocol !== 'http:' || sessionOrigin.protocol !== appOrigin.protocol || sessionOrigin.hostname !== appOrigin.hostname) {
         throw new Error('Gateforge session proxy and app base must share the same loopback HTTP host');
       }
@@ -437,8 +436,12 @@ const extended = browserRunner.extend<EvidenceFixtures>({
         testId: session.testId,
       });
     };
-    const reporter = createUnroutedOriginReporter({ witness, session, appBaseURL });
-    const initialPopupRoute = sessionOrigin === null ? null : sessionProxyRoute(appOrigin, sessionOrigin, reporter.report);
+    const reporter = appBaseURL
+      ? createUnroutedOriginReporter({ witness, session, appBaseURL })
+      : null;
+    const initialPopupRoute = sessionOrigin === null || appOrigin === null || reporter === null
+      ? null
+      : sessionProxyRoute(appOrigin, sessionOrigin, reporter.report);
     const pages = new Map<Page, Promise<void>>();
     const tracking = new Map<Page, InitiatorTracking>();
     const pageClosers = new Map<Page, Page['close']>();
@@ -452,6 +455,9 @@ const extended = browserRunner.extend<EvidenceFixtures>({
     }>();
     let active = true;
     const preparePage = (page: Page): Promise<void> => {
+      if (!appBaseURL || appOrigin === null || reporter === null) {
+        throw new Error('GATEFORGE_APP_BASE_URL is required for witnessed browser traffic.');
+      }
       const existing = pages.get(page);
       if (existing !== undefined) return existing;
       const close = page.close;
@@ -483,6 +489,9 @@ const extended = browserRunner.extend<EvidenceFixtures>({
       return ready;
     };
     const prepareContext = async (context: BrowserContext): Promise<void> => {
+      if (appOriginPrefix === null) {
+        throw new Error('GATEFORGE_APP_BASE_URL is required for witnessed browser traffic.');
+      }
       if (contexts.has(context)) return;
       const newPage = context.newPage;
       const contextRoute = context.route;
@@ -562,7 +571,7 @@ const extended = browserRunner.extend<EvidenceFixtures>({
       for (const [page, close] of pageClosers) page.close = close;
       try {
         await Promise.all(pages.values());
-        await reporter.settled();
+        await reporter?.settled();
         await flushPageObserver();
       } finally {
         for (const [page, handler] of pageRoutes) {
