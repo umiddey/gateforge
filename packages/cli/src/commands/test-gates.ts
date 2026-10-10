@@ -6008,7 +6008,11 @@ async function runSupervisedTestGatesInner(
     }
     return 1;
   }
+  if (envelope.startupDiagnostic !== undefined) {
+    writeLine(io.stderr, envelope.incompleteDetail ?? 'RUNNER_STARTUP_FAILED');
+  }
   const diagnosticContext = {
+    ...(envelope.startupDiagnostic === undefined ? {} : { runnerStartup: envelope.startupDiagnostic }),
     scope: namedTestIds !== null ? ('named' as const) : options.scope,
     candidateTreeId: testedTreeId,
     inputDigest: expectedDigest,

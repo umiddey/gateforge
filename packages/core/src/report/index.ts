@@ -18,6 +18,7 @@
  * Rendering is pure and deterministic: identical inputs serialize
  * byte-for-byte identically.
  */
+import type { RunnerExecutionEnvelope } from '../schemas/runner-adapter.js';
 import { canonicalJson, type JsonValue } from '../canonical-json.js';
 import { fingerprintObligation } from '../fingerprints.js';
 import { compareStrings } from '../graph/util.js';
@@ -221,6 +222,8 @@ export interface DiagnosticContext {
   inputDigest: string | null;
   evidenceState: string;
   authority: 'authoritative' | 'non-authoritative';
+  /** Display-only startup failure from the supervised runner child. */
+  runnerStartup?: RunnerExecutionEnvelope['startupDiagnostic'];
   /** Owner-approved documentation folders and their reduced trust guarantee. */
   docsExclusions?: {
     folders: readonly string[];

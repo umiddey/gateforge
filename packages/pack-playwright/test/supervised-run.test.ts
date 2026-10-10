@@ -13,10 +13,10 @@ import { startWitness } from '../src/witness/server.js';
 import { startSupervisorSpoolDrain } from '../src/supervisor/drain.js';
 import { spoolPathFor } from '../src/supervisor/spool.js';
 import { SupervisorClient } from '../src/supervisor/client.js';
-import { superviseExecution } from '@gate-forge/core';
+import { renderRun, superviseExecution } from '@gate-forge/core';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   defaultPlaywrightCommand,
   executeSupervisedPlaywright,
@@ -120,6 +120,72 @@ describe('executeSupervisedPlaywright (wired adapter execute)', () => {
     expect(envelope.complete).toBe(false);
     expect(envelope.incompleteDetail).toMatch(/reporter|outcomes/i);
     expect(envelope.fixtureOutcome).toBe('unknown');
+  });
+
+  it('reports import death with a typed bounded redacted startup diagnostic', async () => {
+    const envelope = await executeSupervisedPlaywright(
+      { logicalKeys: ['k'] },
+      { stateDir: tempStateDir(), runId: 'run', vars: {} },
+      {
+        cwd: tempProject(),
+        command: [process.execPath, '-e', `process.stderr.write("Error: Cannot find module 'x'\\nGATEFORGE_API_TOKEN=secret\\n" + "detail\\n".repeat(30)); process.exitCode = 1;`],
+      },
+    );
+    expect(envelope).toMatchObject({
+      complete: false,
+      processExit: 1,
+      startupDiagnostic: { cause: 'RUNNER_STARTUP_FAILED', processExit: 1 },
+    });
+    const diagnostic = envelope.startupDiagnostic;
+    expect(diagnostic).toBeDefined();
+    if (diagnostic === undefined) throw new Error('missing startup diagnostic');
+    expect(diagnostic.stderr).toContain("Error: Cannot find module 'x'");
+    expect(diagnostic.stderr).not.toContain('secret');
+    expect(diagnostic.stderr.split('\n').length).toBeLessThanOrEqual(20);
+    expect(envelope.incompleteDetail).toContain("Error: Cannot find module 'x'");
+    const supervised = superviseExecution([], {
+      ...envelope, outcomes: [], fixtureOutcome: 'unknown', shards: null, retriesDetected: false,
+    });
+    expect(JSON.stringify(supervised)).toContain("Error: Cannot find module 'x'");
+    const report = renderRun([], {
+      format: 'json',
+      diagnosticContext: {
+        scope: 'named', candidateTreeId: null, inputDigest: null,
+        evidenceState: 'execution-incomplete', authority: 'non-authoritative',
+        runnerStartup: diagnostic,
+      },
+    });
+    expect(report).toContain('RUNNER_STARTUP_FAILED');
+    expect(report).toContain("Error: Cannot find module 'x'");
+  });
+
+  it('echoes child stderr in debug mode after draining its pipes', async () => {
+    const previous = process.env['GATEFORGE_DEBUG_RUNNER'];
+    const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    process.env['GATEFORGE_DEBUG_RUNNER'] = '1';
+    try {
+      await executeSupervisedPlaywright(
+        { logicalKeys: ['k'] },
+        { stateDir: tempStateDir(), runId: 'run', vars: {} },
+        { cwd: tempProject(), command: [process.execPath, '-e', `process.stderr.write("startup stderr\\n"); process.exitCode = 1;`] },
+      );
+      expect(write.mock.calls.map(([chunk]) => String(chunk)).join('')).toContain('startup stderr');
+    } finally {
+      write.mockRestore();
+      if (previous === undefined) delete process.env['GATEFORGE_DEBUG_RUNNER'];
+      else process.env['GATEFORGE_DEBUG_RUNNER'] = previous;
+    }
+  });
+
+  it('diagnoses an empty outcomes document even when the child exits zero', async () => {
+    const stateDir = tempStateDir();
+    const envelope = await executeSupervisedPlaywright(
+      { logicalKeys: ['k'] },
+      { stateDir, runId: 'run', vars: {} },
+      { cwd: tempProject(), command: stubRunner(stateDir, { ...PASSING_DOC, outcomes: [] }, 0) },
+    );
+    expect(envelope.complete).toBe(false);
+    expect(envelope.startupDiagnostic).toMatchObject({ cause: 'RUNNER_STARTUP_FAILED', processExit: 0 });
   });
 
   it('a stale outcomes file from a previous run is never readable as this run (deleted pre-run)', async () => {

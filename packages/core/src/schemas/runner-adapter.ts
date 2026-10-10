@@ -94,6 +94,13 @@ export interface RunnerInstanceOutcome {
 export interface RunnerExecutionEnvelope {
   /** Framework process exit code (supplementary, never decisive). */
   processExit: number | null;
+  /** Display-only child startup evidence; never authorizes execution. */
+  startupDiagnostic?: {
+    cause: 'RUNNER_STARTUP_FAILED';
+    processExit: number | null;
+    /** First 20 stderr lines, bounded to 8192 characters, with token echoes removed. */
+    stderr: string;
+  };
   /** Whether the COMPLETE selected set ran (no missing cases/shards). */
   complete: boolean;
   /** One outcome per planned instance. */

@@ -507,7 +507,6 @@ export async function executeSupervisedPlaywright(
     env: childEnv,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
-  let stdout = '';
   let stderr = '';
   let timedOut = false;
   // The stall watchdog (F4): a real suite finishes tests for hours, so
@@ -569,18 +568,18 @@ export async function executeSupervisedPlaywright(
       if (activity !== undefined) activity.onTestFinished = undefined;
     };
     child.stdout?.on('data', (chunk: Buffer) => {
-      stdout += chunk.toString('utf8');
       if (echoRunnerOutput) process.stderr.write(chunk);
     });
     child.stderr?.on('data', (chunk: Buffer) => {
-      stderr += chunk.toString('utf8');
+      if (stderr.length < 8192) stderr += chunk.toString('utf8').slice(0, 8192 - stderr.length);
       if (echoRunnerOutput) process.stderr.write(chunk);
     });
     child.once('error', (error) => {
       stopTimers();
       settle({ code: null, timedOut: false, error });
     });
-    child.once('exit', (code) => {
+    // `exit` can precede the last pipe data; `close` waits for stdio to drain.
+    child.once('close', (code) => {
       stopTimers();
       settle({ code, timedOut, error: null });
     });
@@ -600,10 +599,9 @@ export async function executeSupervisedPlaywright(
       );
     }
   }
-  void stdout;
   if (outcome.error !== null) {
-    return incomplete(
-      null,
+    return startupFailure(
+      null, stderr,
       `supervised run could not start the runner (${argv.join(' ')}): ${outcome.error.message}`,
     );
   }
@@ -618,14 +616,24 @@ export async function executeSupervisedPlaywright(
     return incomplete(outcome.code, stallDetail);
   }
   const document = readOutcomesDocument(outcomesPath);
-  if (document === null) {
-    return incomplete(
-      outcome.code,
-      'runner outcomes missing or malformed — the trusted engine reporter writes them on every ' +
-        'supervised run (absent = crash, kill, or lost contact; an incomplete run never reports success)',
-    );
+  if (document === null || document.outcomes.every((row) => row.status === 'skipped')) {
+    return startupFailure(outcome.code, stderr,
+      'before executing any tests; runner outcomes missing, malformed, or empty');
   }
   return parseOutcomesDocument(document, outcome.code);
+}
+
+/** Bounded display evidence only: tokens cannot escape via env echo lines. */
+function startupFailure(processExit: number | null, stderr: string, reason: string): RunnerExecutionEnvelope {
+  const excerpt = stderr.slice(0, 8192).split(/\r?\n/).slice(0, 20)
+    .map((line) => /GATEFORGE_[A-Z0-9_]*TOKEN[A-Z0-9_]*/i.test(line)
+      ? '[Gateforge token environment echo redacted]' : line).join('\n').slice(0, 8192);
+  const detail = `RUNNER_STARTUP_FAILED: runner exited with status ${String(processExit)} — ${reason}` +
+    (excerpt.length === 0 ? '' : `\n${excerpt}`);
+  return {
+    ...incomplete(processExit, detail),
+    startupDiagnostic: { cause: 'RUNNER_STARTUP_FAILED', processExit, stderr: excerpt },
+  };
 }
 
 /**
