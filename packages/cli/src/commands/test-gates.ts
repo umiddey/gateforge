@@ -984,6 +984,7 @@ async function legacyTestGates(io: Io, options: LegacyOptions): Promise<number> 
       ? {}
       : { advisories: [...evaluated.httpCallAdvisories] }),
     ...(evaluated.httpLedger === undefined ? {} : { httpLedger: evaluated.httpLedger }),
+    ...(evaluated.uiLedger === undefined ? {} : { uiLedger: evaluated.uiLedger }),
     httpCoverage: evaluated.httpCoverage.summary,
   });
   writeLine(io.stdout, report);
@@ -1004,6 +1005,7 @@ async function legacyTestGates(io: Io, options: LegacyOptions): Promise<number> 
         ? {}
         : { advisories: [...evaluated.httpCallAdvisories] }),
       ...(evaluated.httpLedger === undefined ? {} : { httpLedger: evaluated.httpLedger }),
+      ...(evaluated.uiLedger === undefined ? {} : { uiLedger: evaluated.uiLedger }),
       httpCoverage: evaluated.httpCoverage.summary,
     }),
   );
@@ -3597,6 +3599,7 @@ async function runSupervisedTestGatesInner(
         ? {}
         : { advisories: [...evaluated.httpCallAdvisories] }),
       ...(evaluated.httpLedger === undefined ? {} : { httpLedger: evaluated.httpLedger }),
+      ...(evaluated.uiLedger === undefined ? {} : { uiLedger: evaluated.uiLedger }),
       httpCoverage: evaluated.httpCoverage.summary,
     });
     writeLine(io.stdout, report);

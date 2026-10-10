@@ -299,6 +299,7 @@ export interface GateforgeReporterOptions {
  */
 export class GateforgeReporter {
   private readonly rows: ClaimRow[] = [];
+  private readonly uiStepsByAttempt = new Map<string, { steps: Set<string>; truncated: boolean }>();
   /**
    * Phase 4 claim injections (reconciliation key → obligation ids),
    * loaded once from the CLI-written run-state document. Declarations
@@ -404,6 +405,38 @@ export class GateforgeReporter {
     });
   }
 
+  /** Only runner-reported UI APIs and assertions; never test.step labels or source locations. */
+  onStepEnd(
+    test: ReporterTest,
+    result: { retry?: number },
+    step: { category?: string; title?: string },
+  ): void {
+    if (this.spoolFile === null || this.isFreezeControl(test)) return;
+    if (step.category !== 'pw:api' && step.category !== 'expect') return;
+    if (typeof step.title !== 'string' || step.title.length === 0) return;
+    // Playwright 1.58 exposes rendered locator descriptions in BOTH titles.
+    // Its public reporter steps do not expose the internal params/apiName.
+    // Exclude context/page creation, routing, waits and other internal work
+    // without a UI target; retain page navigation alongside locator actions.
+    if (
+      step.category === 'pw:api' &&
+      !/\b(?:locator|getBy\w+)\(/.test(step.title) &&
+      !/^(?:Navigate to|Go back|Go forward|Reload)/.test(step.title)
+    ) return;
+    const normalized = `${step.category}:${step.title}`
+      .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, '<uuid>')
+      .replace(/\d{4,}/g, '<digits>');
+    const key = JSON.stringify([test.id, result.retry ?? 0]);
+    let collected = this.uiStepsByAttempt.get(key);
+    if (collected === undefined) {
+      collected = { steps: new Set(), truncated: false };
+      this.uiStepsByAttempt.set(key, collected);
+    }
+    if (collected.steps.has(normalized)) return;
+    if (collected.steps.size === 500) collected.truncated = true;
+    else collected.steps.add(normalized);
+  }
+
   /** Runner-level error hook: a global setup/teardown/runner error. */
   onError(error: { message?: string }): void {
     this.runnerErrors.push(typeof error?.message === 'string' ? error.message : String(error));
@@ -428,6 +461,9 @@ export class GateforgeReporter {
     // becomes 'failed', the drain records the refusal as a conflict, and
     // the sealed receipt is never written.
     if (this.isFreezeControl(test)) return;
+    const uiKey = JSON.stringify([test.id, result.retry ?? 0]);
+    const ui = this.uiStepsByAttempt.get(uiKey);
+    this.uiStepsByAttempt.delete(uiKey);
     const titlePath = this.titlePathOf(test);
     const file = this.repoRelativeOf(test);
     const finishedAt = new Date().toISOString();
@@ -500,6 +536,8 @@ export class GateforgeReporter {
         project: this.projectOf(test),
         outcome: result.status,
         attempt: (typeof result.retry === 'number' ? result.retry : 0) + 1,
+        ...(ui === undefined ? {} : { uiSteps: [...ui.steps].sort() }),
+        ...(ui?.truncated === true ? { uiStepsTruncated: true } : {}),
         // Additive diagnosis for a non-passing test: the CI progress
         // stream and the failures artifact are the only readers, and the
         // CLI screens the message before printing or writing it.

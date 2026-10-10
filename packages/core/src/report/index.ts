@@ -386,6 +386,11 @@ export interface RenderRunOptions {
    * had.
    */
   httpLedger?: HttpLedger;
+  /** Runner-observed UI signature, descriptive only; absent for non-UI runs. */
+  uiLedger?: {
+    rows: Array<{ testId: string; step: string }>;
+    truncatedTestIds?: string[];
+  };
   /**
    * The HTTP coverage summary (0.14 WP3, plan §4.5): the one line that
    * makes the served/used/proven denominator visible. REPORT-ONLY — it
@@ -634,6 +639,7 @@ function jsonReport(
   // Report-only exchange ledger (0.14 WP2): present only when the run
   // witnessed session exchanges, so existing reports keep their keys.
   if (options.httpLedger !== undefined) report['httpLedger'] = options.httpLedger;
+  if (options.uiLedger !== undefined) report['uiLedger'] = options.uiLedger;
   // HTTP coverage summary (0.14 WP3): additive, like the ledger, so a
   // report without it keeps exactly the document it always had.
   if (options.httpCoverage !== undefined) report['httpCoverage'] = options.httpCoverage;

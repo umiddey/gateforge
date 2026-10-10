@@ -7,10 +7,14 @@
  */
 import { readFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
+import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
+import { setTimeout as delay } from 'node:timers/promises';
 import { expect } from 'vitest';
 import { type TempRepo } from '@gate-forge/core';
 import { startWitness } from '../../pack-playwright/src/witness/server.js';
+import { GateforgeReporter } from '../../pack-playwright/src/reporter/reporter.js';
+import { startSupervisorSpoolDrain } from '../../pack-playwright/src/supervisor/drain.js';
 import { configYml, writeV2Manifest } from './helpers.js';
 import { mintCompleteRunReceipt } from './gate-receipts.js';
 
@@ -134,6 +138,7 @@ export async function sealRunWithCalls(
   repo: TempRepo,
   paths: readonly string[],
   successPaths: readonly string[] = [SERVED_PATH],
+  uiTitles: readonly string[] = ["Click getByRole('button', { name: 'A' })"],
 ): Promise<void> {
   const target = await startTarget(successPaths);
   const witness = await startWitness({
@@ -142,19 +147,30 @@ export async function sealRunWithCalls(
     verifierKey: VERIFIER_KEY,
     proxyTarget: target.url,
   });
+  const stateDir = join(repo.root, '.gateforge', 'test-gates');
+  const reporter = new GateforgeReporter({ stateDir, runId: RUN_ID });
+  const drain = startSupervisorSpoolDrain({
+    stateDir, runId: RUN_ID, witnessUrl: witness.url, runToken: TOKEN, verifierKey: VERIFIER_KEY,
+  });
   try {
     const headers = {
       'content-type': 'application/json',
       [RUN_HEADER]: TOKEN,
       [VERIFIER_HEADER]: VERIFIER_KEY,
     };
-    const opened = await fetch(`${witness.url}/sessions/open`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ runId: RUN_ID, testId: TEST_ID, workerIndex: 0, claims: [] }),
-    });
-    expect(opened.status).toBe(200);
-    const session = (await opened.json()) as { sessionId: string; proxyUrl: string | null };
+    reporter.onTestBegin({ id: TEST_ID }, { workerIndex: 0 });
+    let session: { sessionId: string; proxyUrl: string | null } | undefined;
+    const deadline = Date.now() + 5_000;
+    while (session === undefined && Date.now() < deadline) {
+      const response = await fetch(`${witness.url}/sessions/resolve`, {
+        method: 'POST', headers,
+        body: JSON.stringify({ testId: TEST_ID, workerIndex: 0 }),
+      });
+      if (response.ok) session = await response.json() as typeof session;
+      else await delay(20);
+    }
+    expect(session).toBeDefined();
+    if (session === undefined) throw new Error('supervisor did not open the test session');
     expect(session.proxyUrl).not.toBeNull();
     for (const path of paths) {
       const response = await fetch(`${session.proxyUrl as string}${path}`, {
@@ -164,12 +180,11 @@ export async function sealRunWithCalls(
       // Configured success paths simulate routes served by the app but missing from static inventory.
       expect(response.status).toBe(successPaths.includes(path) ? 200 : 404);
     }
-    const closed = await fetch(`${witness.url}/sessions/close`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ sessionId: session.sessionId, outcome: 'passed' }),
-    });
-    expect(closed.status).toBe(200);
+    for (const title of uiTitles) {
+      reporter.onStepEnd({ id: TEST_ID }, { retry: 0 }, { category: 'pw:api', title });
+    }
+    reporter.onTestEnd({ id: TEST_ID }, { status: 'passed', workerIndex: 0 });
+    expect((await drain.stop()).conflicts).toEqual([]);
 
     const ledger = (await (
       await fetch(`${witness.url}/records`, { headers: { [RUN_HEADER]: TOKEN } })
@@ -185,6 +200,7 @@ export async function sealRunWithCalls(
     await writeV2Manifest(repo, { runId: RUN_ID, verifierKey: VERIFIER_KEY, recordIds });
     await mintCompleteRunReceipt(repo, { verifierKey: VERIFIER_KEY, claimInventory: [] });
   } finally {
+    await drain.stop();
     await witness.stop();
     await target.stop();
   }

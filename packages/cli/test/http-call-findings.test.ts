@@ -32,6 +32,7 @@ interface CallReport {
   verdicts: unknown[];
   httpCoverage: { served: number; used: number; proven: number; missing: number; unmatched: number; ambiguous: number };
   httpLedger?: { rows: Array<{ path: string; resolution: string }> };
+  uiLedger?: { rows: Array<{ testId: string; step: string }>; truncatedTestIds?: string[] };
 }
 
 /** Runs `check --format json` over the sealed run state. */
@@ -56,6 +57,20 @@ async function checkJson(repo: Parameters<typeof runCli>[0]): Promise<CallReport
 }
 
 describe('the HTTP call rules end to end (0.14 WP3 R2/R3/R5)', () => {
+  it('retains UI truncation through reporter, drain and CLI without changing the verdict', async () => {
+    await withTempRepo({}, async (repo) => {
+      installRepo(repo, 'report');
+      const titles = Array.from({ length: 501 }, (_, index) => `Click locator('#button-${index}')`);
+      await sealRunWithCalls(repo, [SERVED_PATH], [SERVED_PATH], titles);
+      const report = await checkJson(repo);
+      expect(report.code).toBe(0);
+      expect(report.verdicts).toEqual([]);
+      expect(report.uiLedger?.rows).toHaveLength(500);
+      expect(report.uiLedger?.truncatedTestIds).toEqual([TEST_ID]);
+      expect(report.uiLedger?.rows.every((row) => row.testId === TEST_ID)).toBe(true);
+    });
+  }, 60_000);
+
   it('reports the unmatched call with its test id and leaves the exit code at 0', async () => {
     await withTempRepo({}, async (repo) => {
       installRepo(repo, 'report');
@@ -69,6 +84,9 @@ describe('the HTTP call rules end to end (0.14 WP3 R2/R3/R5)', () => {
       expect(report.httpLedger?.rows).toEqual([
         expect.objectContaining({ path: '/nowhere', resolution: 'nomatch', testId: TEST_ID, status: 404 }),
         expect.objectContaining({ path: '/x', resolution: 'match', testId: TEST_ID, status: 200 }),
+      ]);
+      expect(report.uiLedger?.rows).toEqual([
+        { testId: TEST_ID, step: "pw:api:Click getByRole('button', { name: 'A' })" },
       ]);
       // R5: two routes served, one used (the caller's route), one never
       // called — a count, never a finding.
@@ -140,6 +158,7 @@ describe('the HTTP call rules end to end (0.14 WP3 R2/R3/R5)', () => {
       });
       const report = await checkJson(repo);
       expect(report.httpLedger).toBeUndefined();
+      expect(report.uiLedger).toBeUndefined();
       expect(report.httpCoverage).toEqual({
         served: 2,
         used: 0,

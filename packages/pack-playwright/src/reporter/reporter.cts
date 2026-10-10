@@ -52,7 +52,7 @@ type GateforgeReporterImplementation = import('./reporter.js').GateforgeReporter
 type ImplementationCall = (...args: unknown[]) => void | Promise<unknown>;
 
 /** Runner callbacks this shim forwards (buffered until the impl loads). */
-type ForwardedCallback = 'onTestBegin' | 'onTestEnd' | 'onError';
+type ForwardedCallback = 'onTestBegin' | 'onTestEnd' | 'onStepEnd' | 'onError';
 
 class GateforgeReporterCjs {
   private readonly options: Record<string, unknown>;
@@ -86,6 +86,15 @@ class GateforgeReporterCjs {
   /** Runner callback (synchronous): buffered until the impl arrives. */
   onTestEnd(test: ReporterTest, result: ReporterTestResult): void {
     this.forward('onTestEnd', [test, result]);
+  }
+
+  /** UI steps must survive the same buffered require boundary as outcomes. */
+  onStepEnd(
+    test: ReporterTest,
+    result: ReporterTestResult,
+    step: { category?: string; title?: string },
+  ): void {
+    this.forward('onStepEnd', [test, result, step]);
   }
 
   /** Runner callback (synchronous): buffered until the impl arrives. */
