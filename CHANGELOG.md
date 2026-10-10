@@ -2,10 +2,13 @@
 
 ## 0.15.0 (unreleased)
 
-- Supervised Playwright runs that execute no tests report
+- Supervised Playwright runs with missing/malformed/empty outcomes, or only
+  skipped outcomes and a failed exit, report
   `RUNNER_STARTUP_FAILED`, the child exit code and the first 20 stderr lines
   (8192 characters maximum, Gateforge token echoes redacted). JSON reports retain this
   diagnostic; debug output drains child stderr before returning.
+  Successful all-skipped runs retain their existing execution envelope and
+  are not misclassified as runner startup failures.
 - Playwright config discovery searches two directory levels breadth-first,
   retaining root-first selection and multiple-config disclosure. Hidden,
   dependency, build and Python environment directories are pruned at every

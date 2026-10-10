@@ -21,6 +21,7 @@ import {
   defaultPlaywrightCommand,
   executeSupervisedPlaywright,
   playwrightVersion,
+  parseOutcomesDocument,
   readRunnerOutcomes,
   type RunnerOutcomesDocument,
 } from '../src/discovery/supervised-run.js';
@@ -186,6 +187,30 @@ describe('executeSupervisedPlaywright (wired adapter execute)', () => {
     );
     expect(envelope.complete).toBe(false);
     expect(envelope.startupDiagnostic).toMatchObject({ cause: 'RUNNER_STARTUP_FAILED', processExit: 0 });
+  });
+
+  it('preserves an all-skipped successful run but diagnoses all-skipped runner failure', async () => {
+    const document: RunnerOutcomesDocument = {
+      ...PASSING_DOC,
+      outcomes: [{ ...PASSING_ROW, status: 'skipped' }],
+    };
+    for (const code of [0, 1]) {
+      const stateDir = tempStateDir();
+      const envelope = await executeSupervisedPlaywright(
+        { logicalKeys: ['k'] },
+        { stateDir, runId: 'run', vars: {} },
+        { cwd: tempProject(), command: stubRunner(stateDir, document, code) },
+      );
+      if (code === 0) {
+        expect(envelope.startupDiagnostic).toBeUndefined();
+        expect(envelope).toEqual(parseOutcomesDocument(document, code));
+      } else {
+        expect(envelope.complete).toBe(false);
+        expect(envelope.startupDiagnostic).toMatchObject({
+          cause: 'RUNNER_STARTUP_FAILED', processExit: 1,
+        });
+      }
+    }
   });
 
   it('a stale outcomes file from a previous run is never readable as this run (deleted pre-run)', async () => {

@@ -616,9 +616,13 @@ export async function executeSupervisedPlaywright(
     return incomplete(outcome.code, stallDetail);
   }
   const document = readOutcomesDocument(outcomesPath);
-  if (document === null || document.outcomes.every((row) => row.status === 'skipped')) {
+  if (
+    document === null ||
+    document.outcomes.length === 0 ||
+    (outcome.code !== 0 && document.outcomes.every((row) => row.status === 'skipped'))
+  ) {
     return startupFailure(outcome.code, stderr,
-      'before executing any tests; runner outcomes missing, malformed, or empty');
+      'before executing any tests; runner outcomes missing, malformed, empty, or all skipped with a failed exit');
   }
   return parseOutcomesDocument(document, outcome.code);
 }
