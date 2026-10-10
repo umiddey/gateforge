@@ -610,7 +610,7 @@ describe('strict supervised gate (test-gates --changed + receipt + check)', () =
           expect(report.verdicts.find((entry) => entry.obligationId === id)?.verdict).toBe('satisfied');
         }
         // The Playwright run remains unchanged; the current report key set
-        // includes the report-only HTTP ledger and coverage.
+        // includes the report-only HTTP ledger, coverage and UI ledger.
         expect(Object.keys(report).sort()).toEqual([
           'blocking',
           'diagnosticContext',
@@ -622,6 +622,7 @@ describe('strict supervised gate (test-gates --changed + receipt + check)', () =
           'schemaVersion',
           'scope',
           'summary',
+          'uiLedger',
           'verdicts',
           'waiverCounts',
         ]);

@@ -158,7 +158,20 @@ function stableReport(report: TwinReport): unknown {
     run: undefined,
     diagnosticContext: undefined,
     verdicts: report.verdicts?.map((verdict) => ({ ...verdict, recordIds: verdict.recordIds.length })),
+    uiLedger: stableUiLedger(report['uiLedger'] as { rows: Array<{ testId: string; step: string }>; truncatedTestIds?: string[] } | undefined),
   };
+}
+
+/**
+ * The UI ledger keyed by each test's step sequence instead of its runner
+ * id: the unlinked run renames the raw twin, and Playwright derives the id
+ * from the title, so only that id may differ — every test's steps may not.
+ */
+function stableUiLedger(ledger: { rows: Array<{ testId: string; step: string }>; truncatedTestIds?: string[] } | undefined): unknown {
+  if (ledger === undefined) return undefined;
+  const byTest = new Map<string, string[]>();
+  for (const row of ledger.rows) byTest.set(row.testId, [...(byTest.get(row.testId) ?? []), row.step]);
+  return { tests: [...byTest.values()].map((steps) => steps.join('\n')).sort(), truncated: ledger.truncatedTestIds?.length ?? 0 };
 }
 
 /** The state directory a run wrote (the fixture's, gitignored). */
