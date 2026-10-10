@@ -177,20 +177,20 @@ createServer((req, res) => { res.setHeader('content-type', 'application/json'); 
         for (const [file] of consumerCases) {
           const outcome = result.outcomes.find((row: { titlePath: string[] }) => row.titlePath.includes(file));
           expect.soft(outcome?.status, evidence).toBe('passed');
-          const observed = records.filter(row => row.kind === 'http.observed' && row.testId === outcome?.runnerTestId && row.payload?.channel !== 'direct');
+          const observed = records.filter(row => row.kind === 'http.observed' && row.testId === outcome?.runnerTestId);
           expect.soft(observed.flatMap(row => row.payload?.exchanges ?? []).some(exchange => exchange.url.endsWith('/api/items')), file + evidence).toBe(true);
           expect.soft(result.sessionTrace.find((row: { titlePath: string[] }) => row.titlePath.includes(file))?.sessions.length, file + evidence).toBe(1);
         }
         for (const title of ['context stub keeps its outcome', 'context continue keeps the session rewrite', 'later page continue keeps its outcome']) {
           const outcome = result.outcomes.find((row: { titlePath: string[] }) => row.titlePath.includes(title));
           expect.soft(outcome?.status, title + evidence).toBe('passed');
-          const hasItemsExchange = records.some(row => row.kind === 'http.observed' && row.testId === outcome?.runnerTestId && row.payload?.channel !== 'direct' && row.payload?.exchanges?.some(exchange => exchange.url.endsWith('/api/items')));
+          const hasItemsExchange = records.some(row => row.kind === 'http.observed' && row.testId === outcome?.runnerTestId && row.payload?.exchanges?.some(exchange => exchange.url.endsWith('/api/items')));
           expect.soft(hasItemsExchange, title + evidence).toBe(title === 'context continue keeps the session rewrite');
         }
         const processTitle = 'inherited hook stays out of application processes';
         const processOutcome = result.outcomes.find((row: { titlePath: string[] }) => row.titlePath.includes(processTitle));
         expect.soft(processOutcome?.status, processTitle + evidence).toBe('passed');
-        expect.soft(records.some(row => row.kind === 'http.observed' && row.testId === processOutcome?.runnerTestId && row.payload?.channel !== 'direct' && row.payload?.exchanges?.some(exchange => exchange.url.endsWith('/api/items'))), processTitle + evidence).toBe(true);
+        expect.soft(records.some(row => row.kind === 'http.observed' && row.testId === processOutcome?.runnerTestId && row.payload?.exchanges?.some(exchange => exchange.url.endsWith('/api/items'))), processTitle + evidence).toBe(true);
         for (const file of ['server-process.json', 'grandchild-process.json']) {
           const probe = JSON.parse(readFileSync(repo.path(file), 'utf8'));
           expect.soft(probe.nodeOptions, file).toContain('auto-session.cjs');
@@ -198,8 +198,10 @@ createServer((req, res) => { res.setHeader('content-type', 'application/json'); 
           expect.soft(probe.playwrightModule, file).not.toContain('auto-session-wrapper');
           expect.soft(probe.playwrightModule.replaceAll('\\', '/'), file).toContain('/node_modules/@playwright/test/');
         }
-        expect.soft(records.filter(row => row.kind === 'http.observed' && row.payload?.channel !== 'direct').flatMap(row => row.payload?.exchanges ?? []).some(exchange => exchange.url.endsWith('/api/direct')), evidence).toBe(false);
-        expect.soft(records.filter(row => row.kind === 'http.observed' && row.testId && row.payload?.channel === 'direct').flatMap(row => row.payload?.exchanges ?? []).some(exchange => exchange.url.endsWith('/api/direct')), evidence).toBe(true);
+        const directExchanges = records.filter(row => row.kind === 'http.observed' && row.testId).flatMap(row => (row.payload?.exchanges ?? []) as Array<{ url: string; initiator?: string }>).filter(exchange => exchange.url.endsWith('/api/direct'));
+        expect.soft(directExchanges.length, evidence).toBeGreaterThan(0);
+        expect.soft(directExchanges.every(exchange => exchange.initiator === 'test-code'), evidence).toBe(true);
+        expect.soft(records.some(row => row.payload?.channel === 'direct'), evidence).toBe(false);
         expect.soft(result.measuredTests, evidence).toBe(consumerCases.length + 5);
         expect.soft(result.executedTests, evidence).toBe(consumerCases.length + 5);
         expect.soft(result.measuredTests, evidence).toBe(result.executedTests);
