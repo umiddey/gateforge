@@ -5094,6 +5094,29 @@ async function takePreObservation(
 }
 
 /**
+ * Whether the ledger holds TEST evidence: any issued record other than
+ * the single run-level OpenAPI metadata record (kind `http.openapi`,
+ * testId `run`) that binding a response-shape run seals. That record is
+ * run metadata sealed at bind time — BEFORE the supervisor drain
+ * registers its PRE-run declarations — so the PRE-run gates must not
+ * treat it as "the run already happened". Any other record (exchanges,
+ * observations, persistence, claims) is real test evidence and counts.
+ *
+ * Args:
+ *   state: running witness state.
+ *
+ * Returns:
+ *   boolean: true when the ledger holds at least one non-metadata record.
+ */
+function hasTestEvidenceRecord(state: WitnessState): boolean {
+  for (const record of state.ledger.values()) {
+    if (record.kind === HTTP_OPENAPI_KIND && record.testId === 'run') continue;
+    return true;
+  }
+  return false;
+}
+
+/**
  * `POST /runs/server-e2e-declarations` — SUPERVISOR ONLY (verifier key;
  * the same authority as `POST /runs/expected-set`): registers the
  * obligation ids the trusted mapping layer declared kind `server-e2e`.
@@ -5145,7 +5168,7 @@ async function handleServerE2eDeclarations(
     });
     return;
   }
-  if (state.ledger.size > 0 || state.sessions.size > 0 || state.serverPreObservations.size > 0) {
+  if (hasTestEvidenceRecord(state) || state.sessions.size > 0 || state.serverPreObservations.size > 0) {
     sendJson(res, 409, {
       error:
         'witness already issued evidence or holds open sessions; server-e2e declarations must be ' +
@@ -5208,7 +5231,7 @@ async function handleObserveDeclarations(
     });
     return;
   }
-  if (state.ledger.size > 0 || state.sessions.size > 0) {
+  if (hasTestEvidenceRecord(state) || state.sessions.size > 0) {
     sendJson(res, 409, {
       error:
         'witness already issued evidence or holds open sessions; observe declarations must be ' +
@@ -6748,7 +6771,7 @@ async function handleRunContext(
     return;
   }
   if (
-    state.ledger.size > 0 ||
+    hasTestEvidenceRecord(state) ||
     state.observed.length > 0 ||
     state.preObservations.size > 0 ||
     state.serverPreObservations.size > 0 ||

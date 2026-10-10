@@ -2,6 +2,13 @@
 
 ## 0.15.0 (unreleased)
 
+- Witnesses of runs whose bound options request response shapes no longer
+  refuse the supervisor's PRE-run observe and server-e2e declarations with
+  409: the run-level `http.openapi` record sealed at bind time is run
+  metadata, not test evidence, so a fresh witness binds both declaration
+  sets and a response-shape run witnesses its full authorized HTTP ledger.
+  The declaration and run-context gates still refuse after any real test
+  record, open session, pre-observation or in-flight proxy exchange.
 - Witnessed browser routing requires `GATEFORGE_APP_BASE_URL` only when a
   page or browser context is used, preserving page-free supervised tests
   and their original integrity diagnostics.
