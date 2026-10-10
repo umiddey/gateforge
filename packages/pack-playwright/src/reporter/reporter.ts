@@ -417,11 +417,13 @@ export class GateforgeReporter {
     // Playwright 1.58 exposes rendered locator descriptions in BOTH titles.
     // Its public reporter steps do not expose the internal params/apiName.
     // Exclude context/page creation, routing, waits and other internal work
-    // without a UI target; retain page navigation alongside locator actions.
+    // without a UI target; retain navigation and locator-free input. The
+    // input titles are pinned by 1.58's protocolMetainfo and real-run tests.
     if (
       step.category === 'pw:api' &&
       !/\b(?:locator|getBy\w+)\(/.test(step.title) &&
-      !/^(?:Navigate to|Go back|Go forward|Reload)/.test(step.title)
+      !/^(?:Navigate to|Go back|Go forward|Reload)/.test(step.title) &&
+      !/^(?:(?:Press|Type|Insert|Key down|Key up) "|Mouse (?:move|down|up|wheel)$|(?:Click|Double click)$)/.test(step.title)
     ) return;
     const normalized = `${step.category}:${step.title}`
       .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, '<uuid>')
