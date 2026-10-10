@@ -161,6 +161,7 @@ import {
   BehaviorCatalogSchema,
   BEHAVIOR_CASE_KIND,
   enumerationDigestOf,
+  httpExchangeKind,
   interpretObservedPath,
   pathMatchesShape,
   recordIdOf,
@@ -1428,8 +1429,8 @@ function sealPageObservationRecords(state: WitnessState, sessionId: string, outc
 
 /**
  * Issues the session's ONE claim-free `http.exchanges` record (0.14
- * WP2): the same transport snapshot the per-claim `http.observed`
- * records carry (watermark, dedup, cap, `truncated`), bound to the
+ * WP2): the transport snapshot including assets (watermark, dedup, cap,
+ * `truncated`), bound to the
  * SESSION identity instead of an obligation so no claim can ever select
  * it. Only a session that sealed as PASSED retains its exchanges — the
  * same non-passing rule {@link sealPageObservationRecords} applies to
@@ -5765,7 +5766,7 @@ async function handleObserveFinalize(
     }
   }
 
-  const transport = transportSnapshot(state, session);
+  const transport = transportSnapshot(state, session, false);
   const claims = session.claims.filter((claim) => state.observeDeclarations?.has(claim));
   for (const claimId of claims) {
     const outcome = await finalizeObserveClaim(state, session, claimId, transport);
@@ -5835,13 +5836,15 @@ interface TransportExchange {
  * persistence: an exchange that completed before the trusted context
  * bound predates this invocation and never travels. An EMPTY snapshot
  * is a typed `missing-traffic` note at the call site, never a record.
+ * Observe claims exclude assets before dedup/cap; claim-free ledger
+ * snapshots retain them under their existing discipline.
  */
 interface TransportSnapshot {
   readonly exchanges: ReadonlyArray<TransportExchange>;
   readonly truncated: boolean;
 }
 
-function transportSnapshot(state: WitnessState, session: TestSession): TransportSnapshot {
+function transportSnapshot(state: WitnessState, session: TestSession, includeAssets = true): TransportSnapshot {
   const watermark = state.runContext === null ? 0 : state.observedSeqAtBind;
   // key -> position in `exchanges`, so a repeat can upgrade its shape in place.
   const seen = new Map<string, number>();
@@ -5849,6 +5852,7 @@ function transportSnapshot(state: WitnessState, session: TestSession): Transport
   let truncated = false;
   for (const exchange of state.observed) {
     if (exchange.sessionId !== session.sessionId || exchange.seq <= watermark) continue;
+    if (!includeAssets && httpExchangeKind(exchange.fetchDest) === 'asset') continue;
     const key = `${exchange.method} ${exchange.path} ${String(exchange.status)} ${exchange.initiator ?? 'page'} ${exchange.fetchDest ?? ''} ${exchange.resourceType ?? ''}`;
     const at = seen.get(key);
     if (at !== undefined) {
@@ -5882,7 +5886,7 @@ function transportSnapshot(state: WitnessState, session: TestSession): Transport
  * Applies the SAME snapshot discipline `transportSnapshot` enforces —
  * dedup by `(method, url, status)`, cap at {@link OBSERVED_EXCHANGES_CAP}
  * with `truncated: true` past the cap — to an already-captured exchange
- * list (the page sweep's visits).
+ * list. Ledger callers retain assets; Observe callers must exclude them.
  */
 function cappedExchangeSnapshot(
   exchanges: ReadonlyArray<{
@@ -5893,11 +5897,13 @@ function cappedExchangeSnapshot(
     resourceType?: string | null;
     resourceTypeConflict?: boolean;
   }>,
+  includeAssets = true,
 ): TransportSnapshot {
   const seen: Record<string, true> = Object.create(null) as Record<string, true>;
   const kept: TransportExchange[] = [];
   let truncated = false;
   for (const exchange of exchanges) {
+    if (!includeAssets && httpExchangeKind(exchange.fetchDest) === 'asset') continue;
     const key = `${exchange.method} ${exchange.url} ${String(exchange.status)} ${exchange.fetchDest ?? ''} ${exchange.resourceType ?? ''}`;
     if (key in seen) continue;
     seen[key] = true;

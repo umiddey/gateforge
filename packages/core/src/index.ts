@@ -1055,6 +1055,8 @@ export { interpretObservedPath, matchHttpRoute, resolveHttpRoute, pathMatchesSha
  */
 export {
   buildHttpLedger,
+  httpExchangeKind,
+  type HttpLedgerKind,
   type HttpLedger,
   type HttpLedgerResolution,
   type HttpLedgerRow,

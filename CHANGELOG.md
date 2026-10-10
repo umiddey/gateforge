@@ -2,6 +2,11 @@
 
 ## 0.15.0 (unreleased)
 
+- Observe-channel HTTP claim snapshots exclude static assets before deduplication
+  and the 500-exchange cap, using the ledger's existing request classification.
+  Unmatched truncated records stay blocking as missing with a cap diagnostic,
+  rather than blaming an unrelated endpoint; retained matches still satisfy.
+  Claim-free `http.exchanges` ledger snapshots keep their existing semantics.
 - Witnessed Playwright runs automatically use the existing Gateforge fixture
   for consumer `@playwright/test` imports, including CommonJS, ESM, TypeScript,
   project extensions and root `test.test` calls, without editing specs.

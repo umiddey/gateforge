@@ -1136,7 +1136,7 @@ function gradeObservedTransport(input: ClaimEvidenceInput): ClaimOutcome | null 
       );
       continue;
     }
-    if (exchanges.length === 0) {
+    if (exchanges.length === 0 && payload?.['truncated'] !== true) {
       invalidReasons.push(
         `'${input.obligation.id}': ${subject} carries an EMPTY exchanges list; a session that ` +
           'proxied no HTTP exchange gets a typed missing-traffic note instead of a record',
@@ -1171,7 +1171,11 @@ function gradeObservedTransport(input: ClaimEvidenceInput): ClaimOutcome | null 
       }
     }
     if (matchedHere) satisfied.push(label);
-    else if (ownInvalid !== null) ownInvalidReasons.push(ownInvalid);
+    else if (payload?.['truncated'] === true) {
+      missingReasons.push(
+        `'${input.obligation.id}': ${subject}: record truncated at 500 exchanges; the claimed call may lie past the cap`,
+      );
+    } else if (ownInvalid !== null) ownInvalidReasons.push(ownInvalid);
     else if (testInitiated !== null) testInitiatedReasons.push(testInitiated);
     else if (invalid !== null) invalidReasons.push(invalid);
     else if (missing !== null) missingReasons.push(missing);
@@ -1271,6 +1275,7 @@ function gradeTransportObservation(input: ClaimEvidenceInput): ClaimOutcome {
   }
   if (observed.status === 'satisfied') return observed;
   if (observed.status === 'invalid') return observed;
+  if (observed.status === 'missing' && observed.reason?.includes('record truncated at 500 exchanges')) return observed;
   if (
     observed.status === 'missing' &&
     observed.reason?.includes('the request was started by test code running in the page')

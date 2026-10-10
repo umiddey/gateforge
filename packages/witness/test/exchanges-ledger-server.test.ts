@@ -1,8 +1,8 @@
 /**
  * Every session's exchanges become evidence (WP2 step 2): closing a
  * session that PASSED issues ONE claim-free `http.exchanges` record
- * carrying the same transport snapshot the per-claim `http.observed`
- * records carry (watermark, dedup, cap, `truncated`). A session whose
+ * including all traffic destinations (watermark, dedup, cap, `truncated`).
+ * Observe claims exclude assets instead. A session whose
  * test did not pass drops its record (the `sealPageObservationRecords`
  * rule), and zero proxied exchanges issue nothing. The page-sweep
  * session gets the same ONE record when its sweep completes, and a
@@ -149,6 +149,46 @@ async function exchangeRecords(): Promise<Array<Record<string, unknown>>> {
 }
 
 describe('POST /sessions/close — one http.exchanges record per passed session', () => {
+  it('keeps the claimed API exchange after 600 distinct assets in the Observe snapshot', async () => {
+    const claim = 'tenant.widgets:http:request-observed';
+    expect((await post('/runs/observe-declarations', { obligations: [claim] })).status).toBe(200);
+    const opened = await post('/sessions/open', { runId: RUN_ID, testId: TEST_ID, workerIndex: 0, claims: [claim] });
+    expect(opened.status).toBe(200);
+    const session = opened.body as unknown as SessionCredential;
+    for (let i = 0; i < 600; i++) {
+      expect(await proxiedGet(session, `/asset-${String(i)}`, ['script', 'style', 'image'][i % 3])).toBe(200);
+    }
+    expect(await proxiedGet(session, '/api/data', 'empty')).toBe(200);
+    expect((await post('/observe/finalize', { sessionId: session.sessionId })).status).toBe(200);
+    const response = await fetch(`${witness.url}/records`, { headers: { [RUN_HEADER]: RUN_TOKEN } });
+    const body = (await response.json()) as { records: Array<Record<string, unknown>> };
+    const observed = body.records.find((record) => record['kind'] === 'http.observed');
+    expect(observed).toBeDefined();
+    const payload = observed?.['payload'] as Record<string, unknown>;
+    expect(payload['exchanges']).toEqual([
+      { method: 'GET', url: '/api/data', status: 200, fetchDest: 'empty', resourceType: null },
+    ]);
+    expect(payload['truncated'] ?? false).toBe(false);
+
+    expect((await post('/sessions/close', { sessionId: session.sessionId, outcome: 'passed' })).status).toBe(200);
+    const ledgerPayload = (await exchangeRecords())[0]?.['payload'] as Record<string, unknown>;
+    const ledgerExchanges = ledgerPayload['exchanges'] as Array<Record<string, unknown>>;
+    expect(ledgerExchanges).toHaveLength(500);
+    expect(ledgerExchanges[0]).toMatchObject({ url: '/asset-0', fetchDest: 'script' });
+    expect(ledgerPayload['truncated']).toBe(true);
+  });
+
+  it('retains asset exchanges in the claim-free ledger snapshot', async () => {
+    const session = await openUnclaimedSession();
+    expect(await proxiedGet(session, '/asset.css', 'style')).toBe(200);
+    expect((await post('/sessions/close', { sessionId: session.sessionId, outcome: 'passed' })).status).toBe(200);
+    const payload = (await exchangeRecords())[0]?.['payload'] as Record<string, unknown>;
+    expect(payload['exchanges']).toEqual([
+      { method: 'GET', url: '/asset.css', status: 200, fetchDest: 'style', resourceType: null },
+    ]);
+    expect(payload['truncated']).toBeUndefined();
+  });
+
   it('issues ONE claim-free record for an UNCLAIMED session with proxied traffic', async () => {
     const session = await openUnclaimedSession();
     expect(await proxiedGet(session, '/x')).toBe(200);
