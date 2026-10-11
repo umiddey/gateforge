@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { describe, expect, it } from 'vitest';
@@ -67,6 +67,48 @@ describe('witnessed Playwright preload environment', () => {
       }
     },
   );
+  it('registers Gateforge page routing fixtures on a plain import in a real runner', () => {
+    const root = mkdtempSync(join(tmpdir(), 'gateforge-preload-real-runner-'));
+    // The default is the repository's pinned runner. Supply an independent
+    // install to exercise another real version without re-resolving this repo.
+    const runnerRequire = process.env['GATEFORGE_TEST_PLAYWRIGHT_INSTALL']
+      ? createRequire(join(process.env['GATEFORGE_TEST_PLAYWRIGHT_INSTALL'], 'package.json'))
+      : createRequire(import.meta.url);
+    try {
+      for (const name of ['playwright', 'playwright-core', '@playwright/test']) {
+        const manifest = runnerRequire.resolve(`${name}/package.json`);
+        const target = join(root, 'node_modules', name);
+        mkdirSync(dirname(target), { recursive: true });
+        cpSync(dirname(manifest), target, { recursive: true, dereference: true });
+      }
+      writeFileSync(join(root, 'package.json'), '{"type":"module","private":true}\n');
+      writeFileSync(join(root, 'playwright.config.mjs'), 'export default {testDir:".",workers:1,retries:0,use:{headless:true}};\n');
+      writeFileSync(join(root, 'automatic.spec.mjs'), [
+        "import { test, expect } from '@playwright/test';",
+        "test('plain import owns the witnessed page fixtures', async ({ page, surface, browserPages }) => {",
+        '  expect(browserPages).toBeUndefined();',
+        '  expect(surface).toBeUndefined();',
+        "  await page.goto('data:text/html,<h1>automatic fixture</h1>');",
+        "  await expect(page.locator('h1')).toHaveText('automatic fixture');",
+        '});',
+      ].join('\n'));
+      // Native Playwright rejects surface/browserPages as unknown fixtures.
+      // No witness is needed for registration; real proxy traffic is covered
+      // by the supervised browser suites and consumer witnessed proof.
+      const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GATEFORGE_')));
+      const child = spawnSync(process.execPath, [join(root, 'node_modules/playwright/cli.js'), 'test', '--reporter=line'], {
+        cwd: root,
+        encoding: 'utf8',
+        timeout: 30_000,
+        env: { ...env, GATEFORGE_PLAYWRIGHT_CONFIG_DIR: root, NODE_OPTIONS: autoSessionNodeOptions(undefined) },
+      });
+      expect(child.error).toBeUndefined();
+      expect(child.status, child.stderr + child.stdout).toBe(0);
+      expect(child.stdout).toContain('1 passed');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 60_000);
   it('fails closed with the selected runner and cause when its fixture cannot load', () => {
     const root = mkdtempSync(join(tmpdir(), 'gateforge-preload-missing-runner-'));
     try {
