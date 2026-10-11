@@ -2,6 +2,9 @@
 
 ## 0.15.0 (unreleased)
 
+- Automatic witnessed fixture preloads recognize Playwright 1.60's separate
+  worker and loader fork entries as well as 1.58's shared process entry;
+  binding failures fail loud in those children without loading app/helper processes.
 - Witnesses of runs whose bound options request response shapes no longer
   refuse the supervisor's PRE-run observe and server-e2e declarations with
   409: the run-level `http.openapi` record sealed at bind time is run

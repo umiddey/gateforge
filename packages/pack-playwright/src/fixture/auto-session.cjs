@@ -5,7 +5,8 @@
 const entry = (process.argv[1] ?? '').replaceAll('\\', '/');
 const runner = /\/node_modules\/(?:@playwright\/test|playwright)\/cli\.js$/.test(entry) &&
   process.argv[2] === 'test';
-const worker = /\/node_modules\/playwright\/lib\/common\/process\.js$/.test(entry);
+// 1.58 shares common/process.js; 1.60 has separate worker and loader entries.
+const worker = /\/node_modules\/playwright\/lib\/(?:common\/process|worker\/workerProcessEntry|loader\/loaderProcessEntry)\.js$/.test(entry);
 if (!runner && !worker) return;
 const Module = require('node:module');
 const path = require('node:path');

@@ -10,6 +10,63 @@ import { supervisedRunnerChildEnv } from '../src/discovery/supervised-run.js';
 
 const hook = fileURLToPath(new URL('../dist/fixture/auto-session.cjs', import.meta.url));
 describe('witnessed Playwright preload environment', () => {
+  it.each([
+    'node_modules/playwright/lib/common/process.js',
+    'node_modules/playwright/lib/worker/workerProcessEntry.js',
+    'node_modules/playwright/lib/loader/loaderProcessEntry.js',
+  ])('fails loud rather than skipping the fixture in fork entry %s', (entry) => {
+    const root = mkdtempSync(join(tmpdir(), 'gateforge-preload-fork-'));
+    try {
+      const script = join(root, entry);
+      mkdirSync(join(script, '..'), { recursive: true });
+      writeFileSync(script, "console.log('worker continued without fixture');\n");
+      // Select this deliberately incomplete consumer install, not the pack fallback.
+      writeFileSync(join(root, 'node_modules/playwright/cli.js'), '');
+      const child = spawnSync(process.execPath, [script], {
+        cwd: root,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          GATEFORGE_WITNESS_URL: 'http://127.0.0.1:9',
+          GATEFORGE_PLAYWRIGHT_CONFIG_DIR: root,
+          NODE_OPTIONS: autoSessionNodeOptions(undefined),
+        },
+      });
+      expect(child.error).toBeUndefined();
+      expect(child.status).not.toBe(0);
+      expect(child.stderr).toContain(`gateforge auto-session: cannot load the witnessed fixture for runner ${script}`);
+      expect(child.stderr).toContain("Cannot find module 'playwright/test'");
+      expect(child.stdout).not.toContain('worker continued without fixture');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+  it.each(['app/server.js', 'node_modules/playwright/helper.js', 'node_modules/playwright/cli.js'])(
+    'leaves unrelated process %s untouched even with inherited worker metadata', (entry) => {
+      const root = mkdtempSync(join(tmpdir(), 'gateforge-preload-helper-'));
+      try {
+        const script = join(root, entry);
+        mkdirSync(join(script, '..'), { recursive: true });
+        writeFileSync(script, "console.log('untouched helper');\n");
+        const child = spawnSync(process.execPath, [script], {
+          cwd: root,
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            TEST_WORKER_INDEX: '1',
+            GATEFORGE_WITNESS_URL: 'http://127.0.0.1:9',
+            GATEFORGE_PLAYWRIGHT_CONFIG_DIR: root,
+            NODE_OPTIONS: autoSessionNodeOptions(undefined),
+          },
+        });
+        expect(child.error).toBeUndefined();
+        expect(child.status, child.stderr).toBe(0);
+        expect(child.stdout.trim()).toBe('untouched helper');
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
   it('fails closed with the selected runner and cause when its fixture cannot load', () => {
     const root = mkdtempSync(join(tmpdir(), 'gateforge-preload-missing-runner-'));
     try {

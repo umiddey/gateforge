@@ -28,7 +28,7 @@ const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
 const BUILT_PACKAGES = ['core', 'witness', 'pack-playwright'] as const;
 
 /**
- * Compiles one workspace package into its dist with its build tsconfig.
+ * Builds one workspace package, including its shipped non-TypeScript assets.
  *
  * Args:
  *   name (string): the package directory under `packages/`.
@@ -37,18 +37,18 @@ const BUILT_PACKAGES = ['core', 'witness', 'pack-playwright'] as const;
  *   void: nothing; the dist is current on return.
  *
  * Throws:
- *   Error: when tsc exits nonzero or is killed (full compiler output).
+ *   Error: when the package build exits nonzero or is killed (full output).
  */
 function buildPackage(name: string): void {
-  const project = `packages/${name}/tsconfig.build.json`;
-  const result = spawnSync('npx', ['tsc', '-p', project], {
+  const workspace = `packages/${name}`;
+  const result = spawnSync('npm', ['run', 'build', '--workspace', workspace], {
     cwd: ROOT,
     encoding: 'utf8',
     timeout: 180_000,
   });
   if (result.status !== 0) {
     throw new Error(
-      `${project} build failed (exit ${String(result.status)}, signal ${String(result.signal)}):\n${result.stdout}${result.stderr}`,
+      `${workspace} build failed (exit ${String(result.status)}, signal ${String(result.signal)}):\n${result.stdout}${result.stderr}`,
     );
   }
 }
