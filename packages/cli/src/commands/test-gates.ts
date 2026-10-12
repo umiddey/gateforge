@@ -5031,6 +5031,9 @@ async function runSupervisedTestGatesInner(
     config.diagnostics?.hostLoad === true
       ? startHostLoadSampler(stateDir, (message) => writeLine(io.stderr, `warning: ${message}`))
       : null;
+  // The live envelope is read inside the finally below, while the spawned
+  // witness still serves it, and is consumed after the supervised window.
+  let liveAttestation: Attestation | null = null;
   try {
     // 6.5 WITNESSED pytest participants run INSIDE the supervised window
     // (server-witnessed persistence channel, GAP 2 fix): the drain is
@@ -5354,6 +5357,21 @@ async function runSupervisedTestGatesInner(
         }
       }
     }
+    // 8. Live attestation (same discipline as the legacy path). It is read
+    // while the spawned witness still serves it: a stopped witness refuses
+    // the read, so the stop below must come after it.
+    liveAttestation = await fetchWitnessAttestation(
+      io,
+      effectiveWitnessUrl,
+      runToken,
+      witnessVerifierKey,
+      expectedDigest === null
+        ? null
+        : { runId: manifest.runId, invocationId, inputDigest: expectedDigest },
+    );
+    if (liveAttestation !== null) {
+      persistLiveAttestation(stateDir, liveAttestation);
+    }
     if (spawnedWitness !== null) {
       // Graceful stop (the same contract as the consumer teardown): the
       // witness appends its attested manifest envelope at shutdown, so
@@ -5556,20 +5574,6 @@ async function runSupervisedTestGatesInner(
     } catch {
       changedInputs = true;
     }
-  }
-
-  // 8. Live attestation (same discipline as the legacy path).
-  const liveAttestation = await fetchWitnessAttestation(
-    io,
-    effectiveWitnessUrl,
-    runToken,
-    witnessVerifierKey,
-    expectedDigest === null
-      ? null
-      : { runId: manifest.runId, invocationId, inputDigest: expectedDigest },
-  );
-  if (liveAttestation !== null) {
-    persistLiveAttestation(stateDir, liveAttestation);
   }
 
   // 9. Evaluate + project supervision/mapping/inventory/lifecycle findings

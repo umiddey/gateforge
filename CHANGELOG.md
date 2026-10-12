@@ -2,6 +2,11 @@
 
 ## 0.15.0 (unreleased)
 
+- Supervised runs that spawn their own witness fetch the live attestation while
+  the witness still serves it, before the graceful stop. The fetch previously ran
+  after the stop, so those runs always reported `live attestation unavailable
+  (transport)` and sealed no live envelope. Re-seal refusals of tampered retained
+  evidence now name the sealed attestation digest check, which runs before the MAC check.
 - Witnessed browser routing requires `GATEFORGE_APP_BASE_URL` only when a
   page or browser context is used, preserving page-free supervised tests
   and their original integrity diagnostics.

@@ -1183,6 +1183,10 @@ policies:
           }
           const fullGateA = await runSupervisedCli(repo, ['test-gates', '--changed', '--scope', 'full', '--format', 'json'], env);
           expect(fullGateA.code, `full test-gates (phase A) stdout:\n${fullGateA.stdout}\nstderr:\n${fullGateA.stderr}`).toBe(1);
+          // The spawned witness must still be serving when the live envelope is
+          // fetched; a fetch after its stop is refused and leaves the report with
+          // no live attestation at all.
+          expect(fullGateA.stderr).not.toContain('live attestation unavailable (transport)');
           const fullReportA = JSON.parse(fullGateA.stdout) as {
             execution: {
               scope: string;
@@ -1202,7 +1206,7 @@ policies:
           expect(fullReportA.execution.repositoryDebt.unclaimed).toBeGreaterThan(500);
           expect(fullReportA.diagnosticContext).toMatchObject({
             scope: 'full',
-            evidenceState: 'witness-attestation-unavailable',
+            evidenceState: 'attested',
           });
           expect(fullReportA.diagnosticContext.candidateTreeId).toMatch(/^[0-9a-f]{40}$/);
           expect(fullReportA.diagnosticContext.inputDigest).toMatch(/^[0-9a-f]{64}$/);
