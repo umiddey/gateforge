@@ -5360,23 +5360,28 @@ async function runSupervisedTestGatesInner(
     // 8. Live attestation (same discipline as the legacy path). It is read
     // while the spawned witness still serves it: a stopped witness refuses
     // the read, so the stop below must come after it.
-    liveAttestation = await fetchWitnessAttestation(
-      io,
-      effectiveWitnessUrl,
-      runToken,
-      witnessVerifierKey,
-      expectedDigest === null
-        ? null
-        : { runId: manifest.runId, invocationId, inputDigest: expectedDigest },
-    );
-    if (liveAttestation !== null) {
-      persistLiveAttestation(stateDir, liveAttestation);
-    }
-    if (spawnedWitness !== null) {
-      // Graceful stop (the same contract as the consumer teardown): the
-      // witness appends its attested manifest envelope at shutdown, so
-      // the durable evidence channel is sealed before evaluation.
-      await stopWitnessProcess(spawnedWitness);
+    // The stop sits in its own finally: a throwing read or persist must
+    // still shut the spawned witness down, and the error still propagates.
+    try {
+      liveAttestation = await fetchWitnessAttestation(
+        io,
+        effectiveWitnessUrl,
+        runToken,
+        witnessVerifierKey,
+        expectedDigest === null
+          ? null
+          : { runId: manifest.runId, invocationId, inputDigest: expectedDigest },
+      );
+      if (liveAttestation !== null) {
+        persistLiveAttestation(stateDir, liveAttestation);
+      }
+    } finally {
+      if (spawnedWitness !== null) {
+        // Graceful stop (the same contract as the consumer teardown): the
+        // witness appends its attested manifest envelope at shutdown, so
+        // the durable evidence channel is sealed before evaluation.
+        await stopWitnessProcess(spawnedWitness);
+      }
     }
     try {
       hostLoadCollector?.stop();
