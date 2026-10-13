@@ -56,13 +56,18 @@ jobs:
       - name: Install locked dependencies
         run: npm ci
 
+      - name: Build workspaces
+        run: npm run build --workspaces --if-present
+
       - name: Assert exact Gateforge engine pin
-        env:
-          GATEFORGE_VERSION: '0.4.1'
         run: |
+          # The CLI reports the version from packages/cli/package.json at runtime,
+          # so that manifest is the exact pin; no hand-maintained literal to drift.
+          expected="$(node -p "require('./packages/cli/package.json').version")"
           actual="$(node_modules/.bin/gateforge --version)"
-          echo "gateforge engine ${actual} (pinned ${GATEFORGE_VERSION})"
-          test "${actual}" = "${GATEFORGE_VERSION}"
+          echo "gateforge engine ${actual} (pinned ${expected})"
+          test -n "${expected}"
+          test "${actual}" = "${expected}"
 
       - name: Run supervised strict gate
         env:
