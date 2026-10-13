@@ -191,6 +191,8 @@ export {
   existingRepoFile,
   PLAYWRIGHT_CONFIG_NAMES,
   CONFIG_SEARCH_PRUNED_DIRS,
+  CONFIG_SEARCH_MAX_DEPTH,
+  isConfigSearchDirectory,
   untrustedEnv,
   reconciliationKey,
   splitPytestNodeId,
@@ -328,3 +330,4 @@ export {
   SERVER_E2E_TEST_KIND,
   DEFAULT_REQUEST_TIMEOUT_MS,
 } from './constants.js';
+export { autoSessionNodeOptions } from './fixture/auto-session-env.js';

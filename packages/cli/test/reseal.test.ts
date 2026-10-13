@@ -478,6 +478,26 @@ describe('test-only re-seal change classification', () => {
     });
   });
 
+  it('reads depth-two dependency projects from the sealed tree', async () => {
+    await withTempRepo({}, async (repo) => {
+      const catalog = ['apps/web/e2e/a.spec.ts', 'apps/web/e2e/prepare-auth.ts'];
+      repo.writeFiles({
+        'apps/web/e2e/a.spec.ts': SPEC,
+        'apps/web/e2e/prepare-auth.ts': SPEC,
+        'apps/web/playwright.config.ts': `export default { projects: [
+          { name: 'setup', testDir: './e2e', testMatch: 'prepare-auth.ts' },
+          { name: 'chromium', testDir: './e2e', testMatch: '*.spec.ts', dependencies: ['setup'] },
+        ] };`,
+      });
+      repo.commitFiles({}, 'base');
+      const parent = treeOf(repo);
+      repo.commitFiles({ 'apps/web/e2e/a.spec.ts': `${SPEC}\n// fix\n` }, 'fix');
+      const classification = classify(repo, parent, treeOf(repo), catalog);
+      expect(classification.eligible).toBe(true);
+      expect(classification.affectedTestFiles).toEqual(catalog);
+    });
+  });
+
   it('reads a literal dynamic import as an ordinary import edge', async () => {
     await withTempRepo({}, async (repo) => {
       repo.writeFiles({

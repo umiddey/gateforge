@@ -79,10 +79,11 @@ export const HTTP_EXCHANGES_KIND = 'http.exchanges';
 export const HTTP_OPENAPI_KIND = 'http.openapi';
 
 /**
- * Upper bound on the exchanges one `http.observed` record carries. A
- * session that drove more gets the first CAP exchanges in observation
- * order plus `truncated: true` in the payload: the cap can only hide
- * an exchange (fail-closed), never invent one.
+ * Upper bound on the non-asset exchanges one `http.observed` record
+ * carries. A session that drove more gets the first CAP non-asset
+ * exchanges in observation order plus `truncated: true`: the cap can
+ * only hide an exchange (fail-closed), never invent one. The ledger's
+ * `http.exchanges` snapshots retain their all-destination cap.
  */
 export const OBSERVED_EXCHANGES_CAP = 500;
 export const KNOWN_RECORD_KINDS: readonly string[] = [
@@ -236,15 +237,6 @@ export const SERVER_E2E_TEST_KIND = 'server-e2e';
  */
 export const OBSERVE_CHANNEL = 'observe';
 
-/**
- * Payload discriminant for run-scoped direct API exchanges. These records
- * are diagnostic only and can never satisfy a claim. Mirrors
- * `DIRECT_CHANNEL` in core's `pack-verifiers.ts`.
- */
-export const DIRECT_CHANNEL = 'direct';
-
-/** Upper bound on the distinct direct API exchanges kept for diagnosis. */
-export const DIRECT_EXCHANGES_CAP = 8;
 
 /** The mapping kind that unlocks the Observe channel. */
 export const OBSERVED_E2E_TEST_KIND = 'observed-e2e';

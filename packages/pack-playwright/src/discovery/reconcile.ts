@@ -43,7 +43,7 @@ import { fileURLToPath } from 'node:url';
 import { buildRunnerChildEnv } from './runner-env.js';
 import { CLAIM_ANNOTATION_TYPE, ENV_PLAYWRIGHT_CONFIG_DIR } from '../constants.js';
 import { localPlaywrightCliCandidates } from '../runner-resolution.js';
-import { CONFIG_SEARCH_PRUNED_DIRS, PLAYWRIGHT_CONFIG_NAMES } from './config-locations.js';
+import { CONFIG_SEARCH_MAX_DEPTH, isConfigSearchDirectory, PLAYWRIGHT_CONFIG_NAMES } from './config-locations.js';
 import type { Location } from '@gate-forge/core';
 import {
   PROJECT_GRAPH_PATH_ENV,
@@ -234,9 +234,9 @@ export function untrustedEnv(env: NodeJS.ProcessEnv, discoveryStateDir?: string)
 /**
  * Enumerates EVERY playwright config the search space contains, in the
  * order the choice is made: repo-root configs first (in
- * {@link PLAYWRIGHT_CONFIG_NAMES} order), then ONE directory level
- * deep (immediate subdirectories, dependency/build/VCS/runner
- * directories pruned, alphabetically).
+ * {@link PLAYWRIGHT_CONFIG_NAMES} order), then TWO directory levels
+ * deep (breadth-first, dependency/build/VCS/runner/hidden/Python
+ * directories pruned at every level, alphabetically).
  *
  * Enumeration runs exactly one config, so a repo with several configs
  * is inventoried as a subset. Listing them all is what lets that
@@ -254,25 +254,30 @@ export function findPlaywrightConfigs(cwd: string): string[] {
   for (const name of PLAYWRIGHT_CONFIG_NAMES) {
     if (existsSync(join(cwd, name))) found.push(name);
   }
-  let names: string[];
-  try {
-    names = readdirSync(cwd);
-  } catch {
-    return found; // unreadable root: the root-level search already came up empty
-  }
-  const subdirs = names
-    .filter((name) => CONFIG_SEARCH_PRUNED_DIRS[name] !== true)
-    .filter((name) => {
+  let directories = [''];
+  for (let depth = 0; depth < CONFIG_SEARCH_MAX_DEPTH; depth += 1) {
+    const next: string[] = [];
+    for (const directory of directories) {
+      let names: string[];
       try {
-        return statSync(join(cwd, name)).isDirectory();
+        names = readdirSync(join(cwd, directory));
       } catch {
-        return false; // unreadable entry: invisible, never a search failure
+        continue; // unreadable directory: invisible, never a search failure
       }
-    })
-    .sort();
-  for (const dir of subdirs) {
-    for (const name of PLAYWRIGHT_CONFIG_NAMES) {
-      if (existsSync(join(cwd, dir, name))) found.push(`${dir}/${name}`);
+      for (const name of names.filter(isConfigSearchDirectory).sort()) {
+        const path = directory === '' ? name : `${directory}/${name}`;
+        try {
+          if (statSync(join(cwd, path)).isDirectory()) next.push(path);
+        } catch {
+          // Unreadable entry: invisible.
+        }
+      }
+    }
+    directories = next.sort();
+    for (const directory of directories) {
+      for (const name of PLAYWRIGHT_CONFIG_NAMES) {
+        if (existsSync(join(cwd, directory, name))) found.push(`${directory}/${name}`);
+      }
     }
   }
   return found;
@@ -280,8 +285,8 @@ export function findPlaywrightConfigs(cwd: string): string[] {
 
 /**
  * Finds the ONE consumer playwright config enumeration runs: at the
- * repo root first, then — only when no root-level config exists — ONE
- * directory level deep (see {@link findPlaywrightConfigs}). Returns
+ * repo root first, then — only when no root-level config exists — TWO
+ * directory levels deep (see {@link findPlaywrightConfigs}). Returns
  * the repo-relative posix path (`'playwright.config.ts'`, or
  * `'e2e/playwright.config.ts'` for a subdirectory project), or null
  * when none exists.

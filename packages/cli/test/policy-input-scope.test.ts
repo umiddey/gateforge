@@ -22,7 +22,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { loadConfig, withTempRepo, type TempRepo } from '@gate-forge/core';
-import { configYml, installFixture, POLICIES_YML, runCli } from './helpers.js';
+import { configYml, installFixture, POLICIES_YML, runCli, stubPlaywrightFiles } from './helpers.js';
 import { ADAPTER, SPECS, STUB_CLI } from './reseal-e2e-fixture.js';
 import { trustedPolicyDigestForConfig } from '../src/execution.js';
 import {
@@ -104,7 +104,7 @@ async function installAndAdopt(
     '.gateforge/adapters/orders.mjs': ADAPTER,
     '.gateforge.yml':
       `enforcement:\n  strictE2E: true\n${adoptedDebt === null ? '' : `  adoptedDebt: ${adoptedDebt}\n`}${configYml()}`,
-    'node_modules/playwright/cli.js': STUB_CLI,
+    ...stubPlaywrightFiles(STUB_CLI),
     '.gitignore': baseIgnore,
   });
   repo.commitFiles({}, 'base');

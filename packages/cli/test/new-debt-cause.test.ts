@@ -29,6 +29,7 @@
  * - the JSON `newDebt` document is untouched: the count of newly-unproven
  *   obligations really is 0, and that is a fact, not a message.
  */
+import { stubPlaywrightFiles } from './helpers.js';
 import { describe, expect, it } from 'vitest';
 import { loadConfig, withTempRepo, type TempRepo } from '@gate-forge/core';
 import {
@@ -120,7 +121,7 @@ async function installAdoptedRepository(repo: TempRepo, appUrl: string): Promise
     '.gateforge/adapters/refunds.mjs': evidenceAdapter(appUrl),
     ...Object.fromEntries(ADOPTED_NAMES.map((name) => [`src/${name}.txt`, `${name} fixture.table\n`])),
     ...Object.fromEntries(ADOPTED_NAMES.map((name) => [`.gateforge/adapters/${name}.mjs`, evidenceAdapter(appUrl)])),
-    'node_modules/playwright/cli.js': evidenceStubCli(ADOPTED_NAMES),
+    ...stubPlaywrightFiles(evidenceStubCli(ADOPTED_NAMES)),
   });
   repo.commitFiles({}, 'existing product code, no gate yet');
 

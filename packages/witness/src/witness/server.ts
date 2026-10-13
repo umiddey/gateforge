@@ -161,6 +161,7 @@ import {
   BehaviorCatalogSchema,
   BEHAVIOR_CASE_KIND,
   enumerationDigestOf,
+  httpExchangeKind,
   interpretObservedPath,
   pathMatchesShape,
   recordIdOf,
@@ -185,8 +186,6 @@ import {
   OBSERVED_KIND,
   PERSISTENCE_KIND,
   RUN_HEADER,
-  DIRECT_CHANNEL,
-  DIRECT_EXCHANGES_CAP,
   VERIFIER_HEADER,
 } from '../constants.js';
 import { PageObserverRegistrationError, registerPageObserver, sweepPageVisits } from './page-observer-registration.js';
@@ -1428,8 +1427,8 @@ function sealPageObservationRecords(state: WitnessState, sessionId: string, outc
 
 /**
  * Issues the session's ONE claim-free `http.exchanges` record (0.14
- * WP2): the same transport snapshot the per-claim `http.observed`
- * records carry (watermark, dedup, cap, `truncated`), bound to the
+ * WP2): the transport snapshot including assets (watermark, dedup, cap,
+ * `truncated`), bound to the
  * SESSION identity instead of an obligation so no claim can ever select
  * it. Only a session that sealed as PASSED retains its exchanges — the
  * same non-passing rule {@link sealPageObservationRecords} applies to
@@ -2621,10 +2620,6 @@ async function handleRequest(
     }
     if (req.method === 'POST' && path === '/sessions/page-origins') {
       await handleSessionPageOrigins(state, res, (await readBody(req)) as Record<string, unknown>);
-      return;
-    }
-    if (req.method === 'POST' && path === '/sessions/direct-exchanges') {
-      await handleSessionDirectExchanges(state, res, (await readBody(req)) as Record<string, unknown>);
       return;
     }
 
@@ -4015,8 +4010,6 @@ async function handleSessionOpen(
     proxyUrl: null,
     proxyServer: null,
     claims,
-    directExchanges: [],
-    directRecordsIssued: new Set(),
     // The registered expected-set identity this session was minted for
     // (enforcement-review fix 2b); null when no expected set is bound.
     registered:
@@ -4280,43 +4273,6 @@ async function handleSessionPageOrigins(
   sendJson(res, 200, { recorded: true as const });
 }
 
-/** Stores bounded, deduplicated direct API exchanges on their session. */
-async function handleSessionDirectExchanges(
-  state: WitnessState,
-  res: ServerResponse,
-  body: Record<string, unknown>,
-): Promise<void> {
-  if (!isPlainObject(body)) throw new HttpError(400, 'direct exchange report body must be an object');
-  const session = requireOpenSession(state, body);
-  const reported = body['exchanges'];
-  if (!Array.isArray(reported) || reported.length === 0) {
-    throw new HttpError(400, 'direct exchange report requires at least one exchange');
-  }
-  const exchanges = reported.map((item) => {
-    if (
-      !isPlainObject(item) ||
-      typeof item['method'] !== 'string' ||
-      !/^[A-Z]+$/.test(item['method']) ||
-      typeof item['url'] !== 'string' ||
-      item['url'].length === 0 ||
-      typeof item['status'] !== 'number' ||
-      !Number.isInteger(item['status']) ||
-      item['status'] < 100 ||
-      item['status'] > 599
-    ) {
-      throw new HttpError(400, 'each direct exchange must have an uppercase method, URL, and HTTP status');
-    }
-    return { method: item['method'], url: item['url'], status: item['status'] };
-  });
-  for (const exchange of exchanges) {
-    if (session.directExchanges.some((prior) =>
-      prior.method === exchange.method && prior.url === exchange.url && prior.status === exchange.status
-    )) continue;
-    if (session.directExchanges.length >= DIRECT_EXCHANGES_CAP) break;
-    session.directExchanges.push(exchange);
-  }
-  sendJson(res, 200, { recorded: true as const, kept: session.directExchanges.length });
-}
 
 
 /**
@@ -5754,18 +5710,8 @@ async function handleObserveFinalize(
   // transport record carries. Persistence-vs-persistence consumption is
   // untouched: it still matches against the LIVE log, so one exchange
   // can never credit two persistence claims.
-  if (session.directExchanges.length > 0) {
-    for (const claimId of session.claims) {
-      if (session.directRecordsIssued.has(claimId)) continue;
-      issueRecord(state, claimId, HTTP_OBSERVED_KIND, session.testId, {
-        channel: DIRECT_CHANNEL,
-        exchanges: session.directExchanges.map((exchange) => ({ ...exchange })),
-      }, 'engine-observed');
-      session.directRecordsIssued.add(claimId);
-    }
-  }
 
-  const transport = transportSnapshot(state, session);
+  const transport = transportSnapshot(state, session, false);
   const claims = session.claims.filter((claim) => state.observeDeclarations?.has(claim));
   for (const claimId of claims) {
     const outcome = await finalizeObserveClaim(state, session, claimId, transport);
@@ -5835,13 +5781,15 @@ interface TransportExchange {
  * persistence: an exchange that completed before the trusted context
  * bound predates this invocation and never travels. An EMPTY snapshot
  * is a typed `missing-traffic` note at the call site, never a record.
+ * Observe claims exclude assets before dedup/cap; claim-free ledger
+ * snapshots retain them under their existing discipline.
  */
 interface TransportSnapshot {
   readonly exchanges: ReadonlyArray<TransportExchange>;
   readonly truncated: boolean;
 }
 
-function transportSnapshot(state: WitnessState, session: TestSession): TransportSnapshot {
+function transportSnapshot(state: WitnessState, session: TestSession, includeAssets = true): TransportSnapshot {
   const watermark = state.runContext === null ? 0 : state.observedSeqAtBind;
   // key -> position in `exchanges`, so a repeat can upgrade its shape in place.
   const seen = new Map<string, number>();
@@ -5849,6 +5797,7 @@ function transportSnapshot(state: WitnessState, session: TestSession): Transport
   let truncated = false;
   for (const exchange of state.observed) {
     if (exchange.sessionId !== session.sessionId || exchange.seq <= watermark) continue;
+    if (!includeAssets && httpExchangeKind(exchange.fetchDest) === 'asset') continue;
     const key = `${exchange.method} ${exchange.path} ${String(exchange.status)} ${exchange.initiator ?? 'page'} ${exchange.fetchDest ?? ''} ${exchange.resourceType ?? ''}`;
     const at = seen.get(key);
     if (at !== undefined) {
@@ -5882,7 +5831,7 @@ function transportSnapshot(state: WitnessState, session: TestSession): Transport
  * Applies the SAME snapshot discipline `transportSnapshot` enforces —
  * dedup by `(method, url, status)`, cap at {@link OBSERVED_EXCHANGES_CAP}
  * with `truncated: true` past the cap — to an already-captured exchange
- * list (the page sweep's visits).
+ * list. Ledger callers retain assets; Observe callers must exclude them.
  */
 function cappedExchangeSnapshot(
   exchanges: ReadonlyArray<{
@@ -5893,11 +5842,13 @@ function cappedExchangeSnapshot(
     resourceType?: string | null;
     resourceTypeConflict?: boolean;
   }>,
+  includeAssets = true,
 ): TransportSnapshot {
   const seen: Record<string, true> = Object.create(null) as Record<string, true>;
   const kept: TransportExchange[] = [];
   let truncated = false;
   for (const exchange of exchanges) {
+    if (!includeAssets && httpExchangeKind(exchange.fetchDest) === 'asset') continue;
     const key = `${exchange.method} ${exchange.url} ${String(exchange.status)} ${exchange.fetchDest ?? ''} ${exchange.resourceType ?? ''}`;
     if (key in seen) continue;
     seen[key] = true;

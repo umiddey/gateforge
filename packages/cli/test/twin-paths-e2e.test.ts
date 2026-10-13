@@ -53,14 +53,14 @@ const UNLINKED_TITLE = 'lists open items fast';
  * to link the pair, and a title built from an environment variable is
  * not a title any enumeration can see.
  */
-function twinSpec(witnessedTitle: string, rawTitle: string, rawPath: string, rawPlain = false): string {
+function twinSpec(witnessedTitle: string, rawTitle: string, rawPath: string, rawPlain = false, rawUnhooked = false): string {
   return `import { test as gateforgeTest, expect } from '@gate-forge/pack-playwright';
-import { test as plainTest } from 'playwright/test';
+import { test as plainTest } from '${rawUnhooked ? '../node_modules/playwright/test.mjs' : 'playwright/test'}';
 
 const test = gateforgeTest;
-// A plain Playwright test opens no witness session: the common way a
-// repository writes its raw twin.
-const rawTest = ${rawPlain ? 'plainTest' : 'gateforgeTest'};
+// Plain package imports are auto-session witnessed; a direct module path
+// bypasses specifier interception and retains the uninstrumented case.
+const rawTest = ${rawPlain || rawUnhooked ? 'plainTest' : 'gateforgeTest'};
 const appBase = process.env.GATEFORGE_APP_BASE_URL;
 const rawPath = '${rawPath}';
 
@@ -85,14 +85,14 @@ interface FixtureApp {
   /** Its loopback origin. */
   url: string;
   /** Stops the process. */
-  stop: () => void;
+  stop: () => Promise<void>;
 }
 
 /** Starts the twin fixture app as a child; resolves its loopback origin. */
 async function startTwinApp(): Promise<FixtureApp> {
   const child = spawn(process.execPath, [join(ROOT, 'packages/cli/test/fixtures/twin-app/server.mjs')], {
     cwd: ROOT,
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: ['pipe', 'pipe', 'pipe'],
   });
   let stdout = '';
   const url = await new Promise<string>((resolveUrl, rejectUrl) => {
@@ -113,7 +113,15 @@ async function startTwinApp(): Promise<FixtureApp> {
       rejectUrl(new Error(`the twin fixture app exited early (code ${String(code)}): ${stdout}`));
     });
   });
-  return { url, stop: () => child.kill('SIGTERM') };
+  return {
+    url,
+    stop: async () => {
+      if (child.exitCode !== null || child.signalCode !== null) return;
+      const exited = once(child, 'exit');
+      child.kill('SIGTERM');
+      await exited;
+    },
+  };
 }
 
 /** The json report `test-gates --format json` printed. */
@@ -150,7 +158,20 @@ function stableReport(report: TwinReport): unknown {
     run: undefined,
     diagnosticContext: undefined,
     verdicts: report.verdicts?.map((verdict) => ({ ...verdict, recordIds: verdict.recordIds.length })),
+    uiLedger: stableUiLedger(report['uiLedger'] as { rows: Array<{ testId: string; step: string }>; truncatedTestIds?: string[] } | undefined),
   };
+}
+
+/**
+ * The UI ledger keyed by each test's step sequence instead of its runner
+ * id: the unlinked run renames the raw twin, and Playwright derives the id
+ * from the title, so only that id may differ — every test's steps may not.
+ */
+function stableUiLedger(ledger: { rows: Array<{ testId: string; step: string }>; truncatedTestIds?: string[] } | undefined): unknown {
+  if (ledger === undefined) return undefined;
+  const byTest = new Map<string, string[]>();
+  for (const row of ledger.rows) byTest.set(row.testId, [...(byTest.get(row.testId) ?? []), row.step]);
+  return { tests: [...byTest.values()].map((steps) => steps.join('\n')).sort(), truncated: ledger.truncatedTestIds?.length ?? 0 };
 }
 
 /** The state directory a run wrote (the fixture's, gitignored). */
@@ -201,8 +222,10 @@ interface RunShape {
   rawTitle: string;
   /** The witnessed twin's own title. */
   witnessedTitle: string;
-  /** Whether the raw twin is a plain Playwright test (no Gateforge fixture). */
+  /** Whether the raw twin uses a plain package import (auto-session witnessed). */
   rawPlain?: boolean;
+  /** Whether the raw twin bypasses interception with a direct module path. */
+  rawUnhooked?: boolean;
 }
 
 /** `advisory` twin coverage: the reported finding, exit code untouched. */
@@ -244,7 +267,7 @@ ${enforcement === null ? '' : `enforcement:\n${enforcement}\n`}`;
 function installRepo(repo: TempRepo, shape: RunShape): void {
   installStrictFixture(repo, {
     'specs/crud.spec.js': CRUD_SPEC,
-    'specs/items.spec.js': twinSpec(shape.witnessedTitle, shape.rawTitle, shape.rawPath, shape.rawPlain),
+    'specs/items.spec.js': twinSpec(shape.witnessedTitle, shape.rawTitle, shape.rawPath, shape.rawPlain, shape.rawUnhooked),
   });
   repo.git(['add', '-A']);
   repo.git(['commit', '--no-gpg-sign', '--quiet', '-m', 'twin path fixture']);
@@ -261,7 +284,7 @@ function installRepo(repo: TempRepo, shape: RunShape): void {
 function reshapeRepo(repo: TempRepo, shape: RunShape): void {
   repo.writeFiles({
     '.gateforge.yml': configYaml(shape.enforcement),
-    'specs/items.spec.js': twinSpec(shape.witnessedTitle, shape.rawTitle, shape.rawPath, shape.rawPlain),
+    'specs/items.spec.js': twinSpec(shape.witnessedTitle, shape.rawTitle, shape.rawPath, shape.rawPlain, shape.rawUnhooked),
   });
 }
 
@@ -346,7 +369,7 @@ describe('twin path coverage (E64): a green run that covered a different path', 
         });
       } finally {
         await proxy.stop();
-        app.stop();
+        await app.stop();
       }
     });
   }, 600_000);
@@ -371,13 +394,37 @@ describe('twin path coverage (E64): a green run that covered a different path', 
         expect(shapes.twins.filter((twin) => twin.shapes.length > 0).length, JSON.stringify(shapes)).toBeGreaterThan(1);
       } finally {
         await proxy.stop();
-        app.stop();
+        await app.stop();
       }
     });
   }, 600_000);
 
-  it('says a pair was not compared when its raw twin is a plain Playwright test', async () => {
+  it('compares a plain-import raw twin and finds its divergent path', async () => {
     const plain: RunShape = { ...DIVERGENT, rawPlain: true };
+    await withTempRepo({}, async (repo) => {
+      installRepo(repo, plain);
+      const app = await startTwinApp();
+      const proxy = await startAttestationProxy(app.url, FINGERPRINT);
+      try {
+        const run = await runFixture(repo, proxy.url, plain);
+        const report = parseReport(run);
+        expect(run.code, `${run.stdout}\n${run.stderr}`).toBe(0);
+        expect(divergences(report)).toHaveLength(2);
+        expect(run.stderr).not.toContain('twin pair not compared');
+        const shapes = JSON.parse(readFileSync(join(stateDir(repo), 'twin-shapes.json'), 'utf8')) as TwinShapesDocument;
+        expect(shapes.twins.find((twin) => twin.logicalKey.endsWith(`:${RAW_TITLE}`))).toMatchObject({
+          observationOnly: true,
+          shapes: expect.arrayContaining([{ method: 'GET', route: '/api/items', query: { tab: 'all' } }]),
+        });
+      } finally {
+        await proxy.stop();
+        await app.stop();
+      }
+    });
+  }, 600_000);
+
+  it('says a pair was not compared when its raw twin bypasses auto-session interception', async () => {
+    const plain: RunShape = { ...DIVERGENT, rawUnhooked: true };
     await withTempRepo({}, async (repo) => {
       installRepo(repo, plain);
       const app = await startTwinApp();
@@ -392,10 +439,13 @@ describe('twin path coverage (E64): a green run that covered a different path', 
         expect(run.stderr).toContain(
           `test-gates: twin pair not compared: the raw test 'playwright:chromium:specs/items.spec.js:${RAW_TITLE}' sent no request through the witness`,
         );
-        expect(run.stderr).toContain('runs with the Gateforge test fixture');
+        expect(run.stderr).toContain('use a supported Playwright test import');
+        const shapes = JSON.parse(readFileSync(join(stateDir(repo), 'twin-shapes.json'), 'utf8')) as TwinShapesDocument;
+        expect(shapes.twins.some((twin) => twin.logicalKey.endsWith(`:${RAW_TITLE}`))).toBe(false);
+        expect(shapes.twins.some((twin) => twin.logicalKey.endsWith(`:${WITNESSED_TITLE}`) && twin.shapes.length > 0)).toBe(true);
       } finally {
         await proxy.stop();
-        app.stop();
+        await app.stop();
       }
     });
   }, 600_000);
@@ -413,7 +463,7 @@ describe('twin path coverage (E64): a green run that covered a different path', 
         // Reset the stateful fixture app so both runs observe identical app
         // state; the ledger faithfully retains document paths it sees.
         proxy.stop();
-        app.stop();
+        await app.stop();
         app = await startTwinApp();
         proxy = await startAttestationProxy(app.url, FINGERPRINT);
         const unlinked = await runFixture(repo, proxy.url, { ...DIVERGENT, rawTitle: UNLINKED_TITLE });
@@ -431,7 +481,7 @@ describe('twin path coverage (E64): a green run that covered a different path', 
         expect(unlinkedReport.advisories ?? []).toEqual([]);
       } finally {
         proxy.stop();
-        app.stop();
+        await app.stop();
       }
     });
   }, 900_000);
@@ -456,7 +506,7 @@ describe('twin path coverage (E64): a green run that covered a different path', 
         expect(report.execution?.selectedTests?.failed, run.stderr).toBe(0);
       } finally {
         await proxy.stop();
-        app.stop();
+        await app.stop();
       }
     });
   }, 600_000);
@@ -486,7 +536,7 @@ describe('twin path coverage (E64): a green run that covered a different path', 
         expect(stateText, 'no state file may name a value the owner never allowlisted').not.toContain(nonce.nonce);
       } finally {
         await proxy.stop();
-        app.stop();
+        await app.stop();
       }
     });
   }, 600_000);
@@ -548,7 +598,7 @@ describe('twin path coverage (E64): a green run that covered a different path', 
         rmSync(externalDir, { recursive: true, force: true });
         rmSync(join(keyFile, '..'), { recursive: true, force: true });
         await proxy.stop();
-        app.stop();
+        await app.stop();
       }
     });
   }, 600_000);

@@ -20,6 +20,14 @@ export type HttpLedgerResolution = 'match' | 'nomatch' | 'ambiguous' | 'incomple
 /** Whether the observed request represents API, page, asset or unknown traffic. */
 export type HttpLedgerKind = 'api' | 'page' | 'asset' | 'unknown';
 
+/** The shared Sec-Fetch-Dest convention for ledger rows and transport snapshots. */
+export function httpExchangeKind(fetchDest: unknown): HttpLedgerKind {
+  if (fetchDest === 'empty') return 'api';
+  if (fetchDest === 'document' || fetchDest === 'iframe') return 'page';
+  if (fetchDest === null || fetchDest === undefined) return 'unknown';
+  return 'asset';
+}
+
 /** The witness's body-vs-model verdict as the ledger shows it (0.14 WP4). */
 export type HttpLedgerShape = 'ok' | 'mismatch' | 'unchecked' | 'refused';
 
@@ -33,6 +41,8 @@ export interface HttpLedgerRow {
   path: string;
   /** The observed response status. */
   status: number;
+  /** Test-code transport is measurable, but never UI claim evidence. */
+  initiator?: 'test-code';
   /** Sec-Fetch-Dest classification; only `api` may produce R2/R3 findings. */
   kind: HttpLedgerKind;
   /** The serving route's resource id, or null when unresolved. */
@@ -160,15 +170,7 @@ export function buildHttpLedger(
       const interpreted = interpretObservedPath(url);
       const path = interpreted.ok ? interpreted.path : (url.split(/[?#]/, 1)[0] ?? url);
       const shape = ledgerShapeOf(exchange['shape']);
-      const fetchDest = exchange['fetchDest'];
-      const kind: HttpLedgerKind =
-        fetchDest === 'empty'
-          ? 'api'
-          : fetchDest === 'document' || fetchDest === 'iframe'
-            ? 'page'
-            : fetchDest === null || fetchDest === undefined
-              ? 'unknown'
-              : 'asset';
+      const kind = httpExchangeKind(exchange['fetchDest']);
       const resolution =
         httpRoutes === null || httpRoutes === undefined || httpRoutes.length === 0
           ? { status: 'incomplete' as const, reason: 'route inventory unavailable' }
@@ -178,6 +180,7 @@ export function buildHttpLedger(
         method: method.toUpperCase(),
         path,
         status,
+        ...(exchange['initiator'] === 'test-code' ? { initiator: 'test-code' as const } : {}),
         kind,
         route: resolution.status === 'match' ? resolution.matched.resourceId : null,
         resolution: resolution.status,

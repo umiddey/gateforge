@@ -139,9 +139,21 @@ run), `2` config/usage error. `tests diagnose` has its own advisory contract
   `enforcement doctor` fails the `playwright-projects` row — `test-gates`
   needs a named project.
 - Gateforge reads the FIRST of `playwright.config.{ts,mts,cts,js,mjs,cjs}`
-  at the repository root; a suffixed config such as
+  at the repository root, then up to two directory levels down (breadth-first,
+  alphabetical, hidden/dependency/build/Python directories pruned). Multiple
+  configs are disclosed, but only the first is inventoried. A suffixed config such as
   `playwright.config.e2e.js` is not read — rename it to
   `playwright.config.js` if it is the suite to prove.
+- If the supervised Playwright child reports missing/malformed/empty outcomes,
+  or all-skipped outcomes with a failed exit, `test-gates` prints
+  `RUNNER_STARTUP_FAILED`, its exit code and a bounded stderr excerpt even
+  with `--result-only`. JSON includes `diagnosticContext.runnerStartup`
+  (`cause`, `processExit`, `stderr`). The excerpt contains at most 20 lines
+  and 8192 characters; lines echoing `GATEFORGE_*TOKEN*` variables are redacted.
+  `GATEFORGE_DEBUG_RUNNER=1` additionally echoes child stdout/stderr live
+  to the parent's stderr. These diagnostics never count as execution evidence.
+  Successful all-skipped runs retain their ordinary outcome envelope, not a
+  startup failure diagnostic.
 - Run-state hygiene is enforced, not forgiven: a committed run-state
   directory or include globs that omit the spec directories fail closed —
   gitignore `.gateforge/test-gates/` and include the spec globs.

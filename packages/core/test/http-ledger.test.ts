@@ -32,6 +32,7 @@ interface ExchangeFixture {
   url: string;
   status: number;
   fetchDest?: string | null;
+  initiator?: string;
 }
 
 /** One witnessed, provenance-valid http.exchanges record. */
@@ -74,6 +75,17 @@ function exchangesRecord(
 }
 
 describe('buildHttpLedger — every witnessed exchange becomes one row', () => {
+  it('retains only the recognized test-code initiator without dropping those exchanges', () => {
+    const ledger = buildHttpLedger([exchangesRecord('tests/api', [
+      { method: 'GET', url: '/x', status: 200, initiator: 'test-code' },
+      { method: 'GET', url: '/nowhere', status: 404, initiator: 'invented' },
+    ])], INVENTORY);
+    expect(ledger.rows).toEqual([
+      { testId: 'tests/api', method: 'GET', path: '/nowhere', status: 404, kind: 'api', route: null, resolution: 'nomatch' },
+      { testId: 'tests/api', method: 'GET', path: '/x', status: 200, initiator: 'test-code', kind: 'api', route: 'http.endpoint:GET /x', resolution: 'match' },
+    ]);
+  });
+
   it('attributes a served path through the one resolver and reports unserved as nomatch', () => {
     const ledger = buildHttpLedger(
       [

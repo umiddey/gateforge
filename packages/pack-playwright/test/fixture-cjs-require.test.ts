@@ -65,8 +65,8 @@ interface StubPage {
   readonly handlers: number;
   /** Drives the installed route handler once for `url`. */
   drive(url: string, resourceType?: string): Promise<void>;
-  /** Each continue call, including the forwarded URL and request headers. */
-  readonly continued: ReadonlyArray<{ url: string | undefined; headers: Record<string, string> | undefined }>;
+  /** Each fallback call, including the forwarded URL and request headers. */
+  readonly fallenBack: ReadonlyArray<{ url: string | undefined; headers: Record<string, string> | undefined }>;
 }
 
 /**
@@ -76,7 +76,7 @@ interface StubPage {
  */
 function stubPage(): StubPage {
   const handlers: Array<(route: PlaywrightTest.Route) => Promise<void>> = [];
-  const continued: Array<{ url: string | undefined; headers: Record<string, string> | undefined }> = [];
+  const fallenBack: Array<{ url: string | undefined; headers: Record<string, string> | undefined }> = [];
   return {
     page: {
       route(_pattern: string, handler: (route: PlaywrightTest.Route) => Promise<void>): void {
@@ -86,7 +86,7 @@ function stubPage(): StubPage {
     get handlers(): number {
       return handlers.length;
     },
-    continued,
+    fallenBack,
     async drive(url: string, resourceType = 'document'): Promise<void> {
       const handler = handlers[0];
       if (handler === undefined) throw new Error('no route handler was installed');
@@ -96,8 +96,8 @@ function stubPage(): StubPage {
           resourceType: () => resourceType,
           headers: () => ({ 'x-existing': 'kept' }),
         }),
-        continue: async (options?: { url?: string; headers?: Record<string, string> }) => {
-          continued.push({ url: options?.url, headers: options?.headers });
+        fallback: async (options?: { url?: string; headers?: Record<string, string> }) => {
+          fallenBack.push({ url: options?.url, headers: options?.headers });
         },
       } as unknown as PlaywrightTest.Route);
     },
@@ -139,7 +139,7 @@ describe('CommonJS suites can build on the fixture (plan 0.9.2 E1)', () => {
     await stub.drive(`${APP_ORIGIN}/dashboard?tab=1`, 'document');
     await stub.drive('https://cdn.example.test/asset.js', 'script');
     expect(stub.handlers).toBe(1);
-    expect(stub.continued).toEqual([
+    expect(stub.fallenBack).toEqual([
       {
         url: `${SESSION_ORIGIN}/dashboard?tab=1`,
         headers: { 'x-existing': 'kept', 'x-gateforge-resource-type': 'document' },

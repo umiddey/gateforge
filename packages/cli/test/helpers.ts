@@ -19,6 +19,24 @@ import { runPipeline } from '../src/pipeline.js';
 import { httpRoutesView, resolveStateDir } from '../src/state.js';
 import { setSection } from '../src/yaml-section.js';
 
+/**
+ * A CLI stub still models Playwright's public test entry beside its CLI.
+ * These suites drive their own protocol; executing a test body through this
+ * entry is an error, but the witnessed fixture must be able to extend it.
+ */
+export function stubPlaywrightFiles(cli: string, dependencyRoot = 'node_modules'): Record<string, string> {
+  return {
+    [`${dependencyRoot}/playwright/cli.js`]: cli,
+    [`${dependencyRoot}/playwright/test.js`]: [
+      "function test() { throw new Error('CLI stub does not execute Playwright test bodies'); }",
+      'test.extend = () => test;',
+      "function expect() { throw new Error('CLI stub does not execute Playwright assertions'); }",
+      'module.exports = { test, expect };',
+      '',
+    ].join('\n'),
+  };
+}
+
 /** The fixed clock all fixture configs use (deterministic verdicts). */
 export const FIXED_AT = '2026-01-01T00:00:00.000Z';
 

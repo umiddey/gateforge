@@ -4,7 +4,7 @@
  * subdirectory (`e2e/` with its own `playwright.config.ts` and its own
  * `node_modules/playwright`, at its own version). Covered here:
  *
- * - config discovery: root first, then one directory level deep
+ * - config discovery: root first, then two directory levels deep
  *   (pruned dirs skipped, alphabetical first match, repo-relative path);
  * - native enumeration runs the way the OWNER runs it: from the config
  *   directory, with the CLI found in THAT directory (subdir candidates,
@@ -29,6 +29,7 @@ import { parseConfig, type GateforgeConfig } from '@gate-forge/core';
 import {
   discoverTestCatalog,
   findPlaywrightConfig,
+  findPlaywrightConfigs,
   listNativePlaywrightTests,
   reconciliationKey,
   scanTestFiles,
@@ -148,7 +149,7 @@ function readInvocation(recordPath: string): { cwd: string; argv: string[] } {
   return JSON.parse(readFileSync(recordPath, 'utf8')) as { cwd: string; argv: string[] };
 }
 
-describe('findPlaywrightConfig (root first, then one level deep)', () => {
+describe('findPlaywrightConfig (root first, then two levels deep)', () => {
   it('finds a root-level config first and returns its repo-relative path', () => {
     const root = makeTempDir();
     writeTree(root, {
@@ -187,7 +188,37 @@ describe('findPlaywrightConfig (root first, then one level deep)', () => {
     expect(findPlaywrightConfig(root)).toBe('scenarios/playwright.config.mts');
   });
 
-  it('returns null when neither the root nor one level deep has a config', () => {
+  it('searches two levels breadth-first and reports every eligible config', () => {
+    const root = makeTempDir();
+    writeTree(root, {
+      'apps/web/playwright.config.ts': 'export default {};\n',
+      'z/e2e/playwright.config.js': 'export default {};\n',
+    });
+    expect(findPlaywrightConfig(root)).toBe('apps/web/playwright.config.ts');
+    writeTree(root, { 'z/playwright.config.ts': 'export default {};\n' });
+    expect(findPlaywrightConfig(root)).toBe('z/playwright.config.ts');
+    writeTree(root, { 'playwright.config.ts': 'export default {};\n' });
+    expect(findPlaywrightConfigs(root)).toEqual([
+      'playwright.config.ts', 'z/playwright.config.ts',
+      'apps/web/playwright.config.ts', 'z/e2e/playwright.config.js',
+    ]);
+  });
+
+  it('prunes dependency, hidden and Python directories at every level', () => {
+    const root = makeTempDir();
+    const pruned = ['node_modules', 'dist', '.cache', '.venv', 'venv', '__pycache__',
+      '.git', 'test-results', 'coverage', 'build'];
+    for (const directory of pruned) {
+      writeTree(root, {
+        [`${directory}/web/playwright.config.ts`]: 'export default {};\n',
+        [`apps/${directory}/playwright.config.ts`]: 'export default {};\n',
+      });
+    }
+    writeTree(root, { 'apps/web/playwright.config.ts': 'export default {};\n' });
+    expect(findPlaywrightConfigs(root)).toEqual(['apps/web/playwright.config.ts']);
+  });
+
+  it('returns null when neither the root nor two levels deep has a config', () => {
     const root = makeTempDir();
     writeTree(root, { 'e2e/scenarios/x.spec.ts': SPEC, 'src/app.ts': 'export const app = 1;\n' });
     expect(findPlaywrightConfig(root)).toBe(null);

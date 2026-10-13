@@ -1,5 +1,84 @@
 # Changelog
 
+## 0.15.0 (unreleased)
+
+- Supervised runs that spawn their own witness fetch the live attestation while
+  the witness still serves it, before the graceful stop. The fetch previously ran
+  after the stop, so those runs always reported `live attestation unavailable
+  (transport)` and sealed no live envelope. Re-seal refusals of tampered retained
+  evidence now name the sealed attestation digest check, which runs before the MAC check.
+- Witnessed browser routing requires `GATEFORGE_APP_BASE_URL` only when a
+  page or browser context is used, preserving page-free supervised tests
+  and their original integrity diagnostics.
+- Test-owned Playwright API request contexts route app-origin calls through
+  the current session proxy, including redirects, exposing witnessed
+  `httpLedger` rows marked `initiator: test-code` without satisfying UI
+  claims. Non-app origins, setup contexts and page/context-owned request
+  objects remain direct; the obsolete API exchange self-report channel is removed.
+- Playwright reports retain per-test runner-observed UI actions and assertions
+  as a report-only `uiLedger` in full supervised runs as well as selection
+  reports, distinguishing journeys with identical HTTP traffic. Locator-free
+  keyboard and mouse input is retained alongside locator actions and assertions.
+  Signatures ignore source locations and normalize UUIDs/long digit runs;
+  each attempt is capped at 500 unique steps with truncation disclosed.
+- `enforcement doctor` runs repository hooks only with `--hook-mutation`,
+  once in an isolated copy at low priority. Its 120 s deadline kills the
+  whole process tree, avoiding default full-hook workloads and orphaned
+  formatter processes after a timeout.
+- Witnessed Playwright sessions also route pages from consumer-created browser
+  contexts and `browser.newPage()`, including overridden context/page fixtures
+  and popups. Consumer context routes retain the session rewrite; test-scoped
+  hooks are removed at teardown so later contexts cannot reuse a prior session.
+- Supervised Playwright runs with missing/malformed/empty outcomes, or only
+  skipped outcomes and a failed exit, report
+  `RUNNER_STARTUP_FAILED`, the child exit code and the first 20 stderr lines
+  (8192 characters maximum, Gateforge token echoes redacted). JSON reports retain this
+  diagnostic; debug output drains child stderr before returning.
+  Successful all-skipped runs retain their existing execution envelope and
+  are not misclassified as runner startup failures.
+- Playwright config discovery searches two directory levels breadth-first,
+  retaining root-first selection and multiple-config disclosure. Hidden,
+  dependency, build and Python environment directories are pruned at every
+  level; sealed-tree re-sealing uses the same convention.
+- Observe-channel HTTP claim snapshots exclude static assets before deduplication
+  and the 500-exchange cap, using the ledger's existing request classification.
+  Unmatched truncated records stay blocking as missing with a cap diagnostic,
+  rather than blaming an unrelated endpoint; retained matches still satisfy.
+  Claim-free `http.exchanges` ledger snapshots keep their existing semantics.
+- Witnessed Playwright runs automatically use the existing Gateforge fixture
+  for consumer `@playwright/test` imports, including CommonJS, ESM, TypeScript,
+  project extensions and root `test.test` calls, without editing specs.
+  Direct API calls remain diagnostics, never browser evidence. Execution results
+  and report execution summaries include `measuredTests` (tests with witness
+  sessions) and `executedTests`; ordinary unwitnessed runs stay unchanged.
+- Session proxy routing yields to consumer context routes, preserving fulfilled
+  stubs and retaining the session rewrite when those handlers continue requests.
+  A later consumer page route that continues directly still takes precedence:
+  its outcome is unchanged, but that request bypasses session attribution.
+- The automatic Playwright preload activates only in the test runner and its
+  forked test processes; inherited options leave application servers and helper
+  Node commands untouched, without loading the fixture or redirecting imports.
+- Automatic root-module forwarding uses a separate test wrapper, preserving the
+  explicit Gateforge fixture's own API when plain and explicit imports coexist.
+- Automatic preload binding failures name the selected runner and underlying
+  cause, and stop the child rather than continuing without witnessed fixtures.
+- Shared CLI stub installs include Playwright's public `test` entry alongside
+  the CLI, so automatic fixture loading exercises the same install shape.
+- Strict supervised result-contract tests pin both `executedTests` and
+  `measuredTests` in the sealed execution result's exact key set.
+- Automatic witnessed sessions also cover the equivalent `playwright/test`
+  entry in CommonJS, ESM and project re-exporting helpers, preserving root
+  test properties and extension hooks without redirecting the plain library.
+- Page-observation diagnostics now describe session-backed observation instead
+  of claiming plain-import tests require an explicit fixture. Clean passing
+  auto-session tests retain their page records under the same witness rules.
+  Twin comparison advice accepts both supported Playwright package imports
+  and the explicit fixture; uninstrumented or zero-traffic twins remain
+  explicitly not compared.
+- ESM `playwright/test` imports preserve that entry's native named exports even
+  when a consumer's `@playwright/test` is a CommonJS-only shim. ESM and CommonJS
+  helpers share the same automatic fixture test wrapper and witness session.
+
 ## 0.14.0
 
 Theme: In the witnessed run, Gateforge checks the API calls your UI actually

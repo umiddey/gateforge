@@ -156,14 +156,14 @@ interface FixtureApp {
   /** Its loopback origin. */
   url: string;
   /** Stops the process. */
-  stop: () => void;
+  stop: () => Promise<void>;
 }
 
 /** Starts the timing-chaos fixture app as a child; resolves its origin. */
 async function startRaceApp(): Promise<FixtureApp> {
   const child = spawn(process.execPath, [join(ROOT, 'packages/cli/test/fixtures/race-app/server.mjs')], {
     cwd: ROOT,
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: ['pipe', 'pipe', 'pipe'],
   });
   let stdout = '';
   const url = await new Promise<string>((resolveUrl, rejectUrl) => {
@@ -184,7 +184,15 @@ async function startRaceApp(): Promise<FixtureApp> {
       rejectUrl(new Error(`the race fixture app exited early (code ${String(code)}): ${stdout}`));
     });
   });
-  return { url, stop: () => child.kill('SIGTERM') };
+  return {
+    url,
+    stop: async () => {
+      if (child.exitCode !== null || child.signalCode !== null) return;
+      const exited = once(child, 'exit');
+      child.kill('SIGTERM');
+      await exited;
+    },
+  };
 }
 
 /** The json report `test-gates --format json` printed. */
@@ -331,7 +339,7 @@ describe('timing chaos (E63): a stale-response race, on purpose', () => {
         expect(existsSync(repo.path('.gateforge/test-gates/receipt.json'))).toBe(false);
       } finally {
         await proxy.stop();
-        app.stop();
+        await app.stop();
       }
     });
   }, 300_000);
@@ -434,7 +442,7 @@ ${probe.stderr}`).not.toBe('');
         expect(existsSync(repo.path('.gateforge/test-gates/receipt.json'))).toBe(false);
       } finally {
         await proxy.stop();
-        app.stop();
+        await app.stop();
       }
     });
   }, 600_000);
@@ -463,7 +471,7 @@ ${probe.stderr}`).not.toBe('');
         expect((report.chaos?.schedule ?? []).length, JSON.stringify(report.chaos?.schedule)).toBeGreaterThan(0);
       } finally {
         await proxy.stop();
-        app.stop();
+        await app.stop();
       }
     });
   }, 300_000);
@@ -513,7 +521,7 @@ ${probe.stderr}`).not.toBe('');
         expect(stableReport(withoutChaos as ChaosReport)).toEqual(stableReport(normalReport));
       } finally {
         await proxy.stop();
-        app.stop();
+        await app.stop();
       }
     });
   }, 600_000);
@@ -579,7 +587,7 @@ ${probe.stderr}`).not.toBe('');
         );
       } finally {
         await proxy.stop();
-        app.stop();
+        await app.stop();
       }
     });
   }, 600_000);
@@ -810,7 +818,7 @@ describe('timing chaos with your own witness: the run owns the plan', () => {
         });
       } finally {
         await proxy.stop();
-        app.stop();
+        await app.stop();
       }
     });
   }, 900_000);

@@ -88,7 +88,7 @@ commands:
                                          write/process boundary (ADR 0005 D1)
   key create|import-env|rotate|retire     owner-only verifier-key ceremony; stores keys outside the repo
         --file PATH --confirm             key IDs are safe to log; key material is never printed
-  enforcement doctor [--json]            honest enforcement diagnostics: hook activation, runner/observer readiness,
+  enforcement doctor [--json] [--hook-mutation]  honest enforcement diagnostics: hook activation, runner/observer readiness,
                                          trusted binary/policy ownership, snapshot mode, standard/managed boundary
   enforcement pin --pin-file PATH [--confirm]  write the STAGED revision's approved policy digest into an env file
                                          OUTSIDE the repo (mode 0600); preview by default (NOT --env-file: node owns it)

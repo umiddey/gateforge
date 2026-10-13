@@ -909,6 +909,21 @@ describe('transport Observe channel (plan 0.9.2 item D)', () => {
 
   const MATCHING = [{ method: 'GET', url: '/accounts/456', status: 200 }];
 
+  it('a truncated Observe record without a match is missing with the cap reason', () => {
+    const observed = observedRecord(transportObligation.id, {
+      truncated: true,
+      exchanges: [{ method: 'GET', url: '/login', status: 200 }],
+    });
+    const outcome = httpOutcome(transportObligation, [observed]);
+    expect(outcome.verdict).toBe('missing');
+    expect(outcome.reason).toContain('record truncated at 500 exchanges; the claimed call may lie past the cap');
+  });
+
+  it('a truncated Observe record with a matching exchange still satisfies', () => {
+    const observed = observedRecord(transportObligation.id, { truncated: true, exchanges: MATCHING });
+    expect(httpOutcome(transportObligation, [observed]).verdict).toBe('satisfied');
+  });
+
   it('I6 (a): a satisfied engine path is returned verbatim, observe record present or not', () => {
     const request = record(transportObligation.id, {
       kind: 'http.request',

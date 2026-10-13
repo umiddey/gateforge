@@ -50,6 +50,7 @@
  * receipt against a stub runner and the real witness, `check --staged`
  * verifies it.
  */
+import { stubPlaywrightFiles } from './helpers.js';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
@@ -165,7 +166,7 @@ async function installUngated(repo: TempRepo, appUrl: string): Promise<void> {
     '.gateforge/adapters/refunds.mjs': evidenceAdapter(appUrl),
     ...Object.fromEntries(ADOPTED_NAMES.map((name) => [`src/${name}.txt`, `${name} fixture.table\n`])),
     ...Object.fromEntries(ADOPTED_NAMES.map((name) => [`.gateforge/adapters/${name}.mjs`, evidenceAdapter(appUrl)])),
-    'node_modules/playwright/cli.js': evidenceStubCli(ADOPTED_NAMES),
+    ...stubPlaywrightFiles(evidenceStubCli(ADOPTED_NAMES)),
   });
   repo.commitFiles({}, 'existing product code, no gate yet');
 }

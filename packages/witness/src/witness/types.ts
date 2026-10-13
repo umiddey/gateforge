@@ -516,10 +516,6 @@ export interface TestSession {
    * supervisor writes claims.json from what the witness registered.
    */
   claims: string[];
-  /** Session-owned direct API calls, retained only for non-crediting diagnosis. */
-  directExchanges: Array<{ method: string; url: string; status: number }>;
-  /** Claim ids for which this session has already stamped its diagnostic record. */
-  directRecordsIssued: Set<string>;
   /**
    * The registered expected-set identity this session was minted for
    * (enforcement-review fix 2a/2b); null when the run has no registered
@@ -1233,35 +1229,6 @@ export interface SessionPageOriginResponse {
   recorded: true;
 }
 
-/** One direct API exchange the fixture observed (diagnostic only). */
-export interface DirectExchangeReport {
-  /** Uppercase HTTP method of the call. */
-  method: string;
-  /** The URL as the call resolved (absolute, or a bare path without a base). */
-  url: string;
-  /** The response status the app answered. */
-  status: number;
-}
-
-/**
- * `POST /sessions/direct-exchanges` request. The fixture reports all direct
- * app-origin API calls; they never ride the session proxy and can never
- * satisfy a claim. The report is run-scoped and diagnostic only.
- */
-export interface SessionDirectExchangesRequest {
-  /** The session the report rides (its own credential; run-scoped storage). */
-  sessionId: string;
-  /** The session's witness-issued secret; authorizes this call alone. */
-  sessionToken: string;
-  /** The direct exchanges observed since the last call. */
-  exchanges: DirectExchangeReport[];
-}
-
-/** `POST /sessions/direct-exchanges` response: how many exchanges are kept. */
-export interface SessionDirectExchangesResponse {
-  recorded: true;
-  kept: number;
-}
 
 /**
  * `POST /sessions/page-observer`: fixture registers its witnessed Chromium

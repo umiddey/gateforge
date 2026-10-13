@@ -11,7 +11,7 @@ export * from './inference.js';
 export * from './reconcile.js';
 export * from './prepare-barrier.js';
 export { localPlaywrightCliCandidates } from '../runner-resolution.js';
-export { CONFIG_SEARCH_PRUNED_DIRS, PLAYWRIGHT_CONFIG_NAMES } from './config-locations.js';
+export { CONFIG_SEARCH_MAX_DEPTH, CONFIG_SEARCH_PRUNED_DIRS, isConfigSearchDirectory, PLAYWRIGHT_CONFIG_NAMES } from './config-locations.js';
 export * from './runner-config-paths.js';
 export * from './pytest-adapter.js';
 export * from './discover.js';

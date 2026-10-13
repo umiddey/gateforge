@@ -51,7 +51,7 @@
     "!**/*.pyo"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && cp src/fixture/auto-session*.cjs src/fixture/auto-session*.mjs dist/fixture/",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"
   },

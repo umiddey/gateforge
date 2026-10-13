@@ -65,8 +65,8 @@ interface StubPage {
   readonly handlers: number;
   /** Drives the installed route handler once for `url`. */
   drive(url: string): Promise<void>;
-  /** Every `route.continue()` the helper made; `url` undefined for a bare continue. */
-  readonly continued: ReadonlyArray<{ url: string | undefined }>;
+  /** Every route.fallback call; `url` is undefined for a bare fallback. */
+  readonly fallenBack: ReadonlyArray<{ url: string | undefined }>;
 }
 
 /**
@@ -77,7 +77,7 @@ interface StubPage {
  */
 function stubPage(): StubPage {
   const handlers: Array<(route: Route) => Promise<void>> = [];
-  const continued: Array<{ url: string | undefined }> = [];
+  const fallenBack: Array<{ url: string | undefined }> = [];
   return {
     page: {
       route(_pattern: string, handler: (route: Route) => Promise<void>): void {
@@ -87,14 +87,14 @@ function stubPage(): StubPage {
     get handlers(): number {
       return handlers.length;
     },
-    continued,
+    fallenBack,
     async drive(url: string): Promise<void> {
       const handler = handlers[0];
       if (handler === undefined) throw new Error('no route handler was installed');
       await handler({
         request: () => ({ url: () => url, method: () => 'GET', headers: () => ({}), resourceType: () => 'document' }),
-        continue: async (options?: { url: string }) => {
-          continued.push({ url: options?.url });
+        fallback: async (options?: { url: string }) => {
+          fallenBack.push({ url: options?.url });
         },
       } as unknown as Route);
     },
@@ -237,7 +237,7 @@ describe('a silent origin mismatch becomes a visible note (plan 0.9.2 F)', () =>
       await stub.drive(`${suiteOrigin.url}/dashboard`);
       await stub.drive(`${suiteOrigin.url}/api/accounts`);
       await reporter.settled();
-      expect(stub.continued).toEqual([{ url: undefined }, { url: undefined }]);
+      expect(stub.fallenBack).toEqual([{ url: undefined }, { url: undefined }]);
       // A real request to that origin — the traffic the run actually made.
       expect(await proxyExchange(suiteOrigin.url, 'GET', '/api/accounts')).toBe(200);
 
@@ -283,7 +283,7 @@ describe('a silent origin mismatch becomes a visible note (plan 0.9.2 F)', () =>
       await stub.drive(`${fixture.app.url}/api/accounts`);
       await reporter.settled();
       // Rewritten onto the session proxy — the exchange travels.
-      expect(stub.continued).toEqual([{ url: `${session.proxyUrl as string}/api/accounts` }]);
+      expect(stub.fallenBack).toEqual([{ url: `${session.proxyUrl as string}/api/accounts` }]);
       expect(await proxyExchange(session.proxyUrl as string, 'GET', '/api/accounts')).toBe(200);
 
       const done = await finalize(fixture.witness.url, session.sessionId);

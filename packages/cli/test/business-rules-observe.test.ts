@@ -47,7 +47,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { EvidenceRecordSchema, loadConfig, withTempRepo, type TempRepo } from '@gate-forge/core';
 import { trustedPolicyDigestForConfig } from '../src/execution.js';
-import { answersYml, businessRule, configYml, fixtureFingerprint, installFixture, PLUGIN_SOURCE, runCli } from './helpers.js';
+import { answersYml, businessRule, configYml, fixtureFingerprint, installFixture, PLUGIN_SOURCE, runCli, stubPlaywrightFiles } from './helpers.js';
 import {
   DEFAULT_EVIDENCE_NAMES,
   VERIFIER_KEY,
@@ -341,7 +341,7 @@ function installObserveRepo(
         }
       : {}),
     'playwright.config.mjs': "export default { testDir: 'e2e', projects: [{ name: 'chromium' }] };\n",
-    'node_modules/playwright/cli.js': observeStubCli(options.observeClaims),
+    ...stubPlaywrightFiles(observeStubCli(options.observeClaims)),
     '.gitignore': '.gateforge/test-gates/\nnode_modules/\n',
   });
 }
