@@ -46,18 +46,19 @@ describe('supervised run history', () => {
 
   it('appends test history only when the status changes and keeps disabled mode inert', () => {
     const stateDir = tempRoot();
+    const now = Date.parse('2026-09-28T13:00:00.000Z');
     const base = { finishedAt: '2026-09-28T12:00:00.000Z', testCount: 1 };
     recordRunHistory(stateDir, 14, { ...base, runId: 'r1', status: 'passed', failedCount: 0 }, [
       { logicalKey: 'tests/a.spec.ts::case', status: 'passed' },
-    ]);
+    ], now);
     recordRunHistory(stateDir, 14, { ...base, runId: 'r2', status: 'passed', failedCount: 0 }, [
       { logicalKey: 'tests/a.spec.ts::case', status: 'passed' },
-    ]);
+    ], now);
     recordRunHistory(stateDir, 14, { ...base, runId: 'r3', status: 'failed', failedCount: 1 }, [
       { logicalKey: 'tests/a.spec.ts::case', status: 'failed' },
-    ]);
+    ], now);
     expect(readFileSync(join(stateDir, 'history/tests.jsonl'), 'utf8').trim().split('\n')).toHaveLength(2);
-    recordRunHistory(stateDir, 'off', { ...base, runId: 'off', status: 'passed', failedCount: 0 }, []);
+    recordRunHistory(stateDir, 'off', { ...base, runId: 'off', status: 'passed', failedCount: 0 }, [], now);
     expect(queryRunHistory(join(stateDir, 'history'), { since: '2026-09-28T00:00:00.000Z' })).toHaveLength(3);
   });
 });
