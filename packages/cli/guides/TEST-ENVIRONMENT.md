@@ -160,7 +160,7 @@ Four rules decide what a run does with a declared state:
 - **A relative path is relative to the runner's working directory** —
   the directory holding the playwright config the run uses. That is the
   repository root for a root-level config and the project's own
-  directory for a config one level down, which is exactly the directory
+  directory for a config up to two levels down, which is exactly the directory
   your setup test wrote the file from: the artifact the dependent project
   reads is the artifact the setup project saved, wherever the config
   lives. The file need not exist before the run; the setup project creates
@@ -924,6 +924,7 @@ the re-sealed receipt names parent 9f2c… but the run state retains no parent r
 re-seal hop 1 claims a receipt parent but the run state retains a run-record (fail closed)
 re-seal hop 1's parent receipt does not authenticate with this keyring: … (fail closed)
 re-seal hop 2's parent receipt does not authenticate with this keyring: … (fail closed)
+re-seal hop 1's retained evidence does not recompute: its retained evidence does not match the attestation its document seals (fail closed)
 re-seal hop 1's retained evidence does not recompute: its evidence attestation does not verify with this keyring (fail closed)
 re-sealed receipt claims 561 carried test(s) but its chain holds 560 carried outcome(s)
 the re-sealed receipt carries 6 consecutive re-seals, past the bound of 5 — run the full suite
@@ -1216,13 +1217,19 @@ Link the pair in one of two ways, both read only when `twinPaths` is set:
   else next to a bare `X`. Two described raw tests under one label link
   nothing: name the pair with `twinOf`.
 
-Both tests must send their requests through the witness, so the raw twin
-runs with the Gateforge test fixture too (`test` from
-`@gate-forge/pack-playwright`); it then opens an observation-only session
-and issues nothing. A raw twin written as a plain Playwright test sends
-nothing through the witness: the pair is not compared, and the run says
-so on one line (`test-gates: twin pair not compared: the raw test '…'
-sent no request through the witness`), never as "the twins agree".
+Both tests must send their browser requests through the witness. Witnessed
+runs automatically instrument consumer `@playwright/test` and `playwright/test`
+imports; explicit `test` from `@gate-forge/pack-playwright` works too. A linked
+raw twin gets an observation-only session and issues no obligation evidence,
+regardless of which supported import it uses. Plain-import twins **are**
+compared, and their differing paths are reported.
+
+An uninstrumented test (for example, one importing Playwright's test module
+by a direct filesystem path rather than a supported package specifier), or
+a test sending no requests through its session proxy, has no witnessed shapes.
+The pair is not compared, and the run says so on one line
+(`test-gates: twin pair not compared: the raw test '…' sent no request through
+the witness`), never as "the twins agree".
 
 ```bash
 # A run with the pair linked reports the divergence and keeps its verdict:

@@ -64,6 +64,20 @@ wrapper: calling it without declaring it blocks with
 `FRONTEND_CALL_TARGET_UNRESOLVED` — removing wrapper support can never
 make a call silently disappear (red probe).
 
+The URL model also resolves, and only resolves, these finite shapes:
+a single-assignment `const` (a closer `let` stays unresolved), both
+branches of a conditional, a `const` object-literal lookup (every
+literal-keyed value; computed keys, spreads, and `let` tables stay
+unresolved), a destructured relative `import()` alias of a configured
+symbol or builder, and a same-file function whose returned expressions
+are a finite resolvable set. A `const` named `fetch` whose initializer
+is not the Fetch API is not a fetch call. A wrapper entry may name
+`parameter` (the endpoint argument; absent means the first parameter)
+and set `methodFromBody: true` when the body issues more than one
+concrete verb. The declaration may be a relative import, including a
+default export, and a JSX attribute of `parameter` is a callsite.
+Anything outside that set stays a typed unresolved entry.
+
 ### Instance baseURL joining (source-proven, fail-closed)
 
 Frontends commonly create one Axios client with a base path and then

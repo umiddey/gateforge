@@ -39,6 +39,8 @@ export {
  */
 export {
   buildHttpLedger,
+  httpExchangeKind,
+  type HttpLedgerKind,
   type HttpLedger,
   type HttpLedgerResolution,
   type HttpLedgerRow,
@@ -51,7 +53,9 @@ export {
  * `HTTP_CALL_UNRESOLVED`). Never a verdict input.
  */
 export {
+  channelHttpCallFindings,
   evaluateHttpCoverage,
+  httpCallFindingAdoptionForgivable,
   httpCallFindingEntries,
   httpResponseShapeEntries,
   HTTP_CALL_UNMATCHED,

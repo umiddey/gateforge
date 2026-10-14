@@ -53,6 +53,9 @@ export interface SpoolEvent {
   outcome?: string;
   /** testEnd only: 1-based attempt number (1 = first attempt). */
   attempt?: number;
+  /** Reporter-observed UI signature, report-only and bounded per attempt. */
+  uiSteps?: string[];
+  uiStepsTruncated?: boolean;
   /** The mapped/annotated obligation claims declared for this test. */
   claims?: string[];
   /**
@@ -99,6 +102,16 @@ export function spoolPathFor(stateDir: string, runId: string): string {
   return join(stateDir, SPOOL_DIR_NAME, runId, SPOOL_EVENTS_FILE);
 }
 
+/** Validates the optional UI signature at both spool boundaries. */
+export function uiStepFieldsOf(steps: unknown, truncated: unknown): Pick<SpoolEvent, 'uiSteps' | 'uiStepsTruncated'> {
+  if (!Array.isArray(steps) || !steps.every((step) => typeof step === 'string' && step.length > 0)) return {};
+  const unique = [...new Set<string>(steps)].sort();
+  return {
+    ...(unique.length === 0 ? {} : { uiSteps: unique.slice(0, 500) }),
+    ...(unique.length > 500 || truncated === true ? { uiStepsTruncated: true } : {}),
+  };
+}
+
 /**
  * Appends one lifecycle event to the run's spool (runner-side; the
  * reporter calls this). The event is sanitized: string fields are
@@ -129,6 +142,7 @@ export function appendSpoolEvent(spoolFile: string, event: SpoolEvent): void {
             // the trace grades not-passed.
             ...(typeof event.outcome === 'string' ? { outcome: event.outcome } : {}),
             attempt: Number.isInteger(event.attempt) && (event.attempt as number) >= 1 ? event.attempt : 1,
+            ...uiStepFieldsOf(event.uiSteps, event.uiStepsTruncated),
             // Additive diagnosis (failures only): the trusted side
             // screens the message against the credential shapes before
             // it is printed or written anywhere.
@@ -248,7 +262,15 @@ export function readSpoolEvents(
     if (typeof parsed !== 'object' || parsed === null) continue;
     const row = parsed as Record<string, unknown>;
     if (typeof row['kind'] !== 'string' || typeof row['testId'] !== 'string') continue;
-    events.push(parsed as unknown as SpoolEvent);
+    // Optional runner diagnostics are not trusted just because JSON parsed.
+    // Drop malformed UI fields without affecting lifecycle processing.
+    const ui = row['kind'] === 'testEnd' ? uiStepFieldsOf(row['uiSteps'], row['uiStepsTruncated']) : {};
+    delete row['uiSteps'];
+    delete row['uiStepsTruncated'];
+    events.push({
+      ...row,
+      ...ui,
+    } as unknown as SpoolEvent);
   }
   const trailing = lines[lines.length - 1] ?? '';
   // The runner is another process and may append after statSync but before

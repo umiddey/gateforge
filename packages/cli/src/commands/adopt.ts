@@ -65,6 +65,8 @@ import {
   adoptFamily,
   blockingEntryFingerprint,
   BLOCKING_VERDICTS,
+  HTTP_CALL_UNRESOLVED,
+  HTTP_ROUTE_NOT_INVENTORIED,
   classificationBlockedIdentity,
   loadAdoptionRecord,
   loadBaseline,
@@ -295,7 +297,10 @@ async function adoptWholeRepository(io: Io): Promise<number> {
     witnessVerifierKey: authority.witnessVerifierKey,
     witnessVerifierKeys: authority.witnessVerifierKeys,
     evidenceContext: authority.evidenceContext,
-  }).httpCoverage.findings;
+  }).httpCoverage.findings.filter(
+    (finding) =>
+      finding.code !== HTTP_ROUTE_NOT_INVENTORIED && finding.code !== HTTP_CALL_UNRESOLVED,
+  );
   // R1-9: adoption is plane-ordered. A plane-unresolved blocking
   // entry names a resource whose identity is NOT yet decided — a
   // plane answer changes it — so the red set captured now would
@@ -866,7 +871,10 @@ async function adoptHttpCallsFamily(io: Io, confirm: boolean): Promise<number> {
     witnessVerifierKeys: authority.witnessVerifierKeys,
     evidenceContext: authority.evidenceContext,
   });
-  const findings = evaluated.httpCoverage.findings;
+  const findings = evaluated.httpCoverage.findings.filter(
+    (finding) =>
+      finding.code !== HTTP_ROUTE_NOT_INVENTORIED && finding.code !== HTTP_CALL_UNRESOLVED,
+  );
   const sha = headSha(io.cwd);
 
   if (!confirm) {

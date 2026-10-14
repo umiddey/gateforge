@@ -33,5 +33,7 @@ main(process.argv.slice(2)) //
     // main catches and prints expected failures; anything escaping here
     // is an internal error and must never look like a clean run.
     process.stderr.write(`gateforge: internal error: ${error instanceof Error ? error.stack : String(error)}\n`);
-    process.exitCode = 2;
+    // Exit explicitly: a spawned witness child keeps the event loop alive
+    // after supervisor transport failures (ECONNRESET on expected-set).
+    process.exit(2);
   });

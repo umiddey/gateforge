@@ -45,7 +45,9 @@ export { canonicalJson } from './canonical-json.js';
  * findings and their finding-channel projection.
  */
 export {
+  channelHttpCallFindings,
   evaluateHttpCoverage,
+  httpCallFindingAdoptionForgivable,
   httpCallFindingEntries,
   httpResponseShapeEntries,
   HTTP_CALL_UNMATCHED,
@@ -1055,6 +1057,8 @@ export { interpretObservedPath, matchHttpRoute, resolveHttpRoute, pathMatchesSha
  */
 export {
   buildHttpLedger,
+  httpExchangeKind,
+  type HttpLedgerKind,
   type HttpLedger,
   type HttpLedgerResolution,
   type HttpLedgerRow,
@@ -1229,6 +1233,13 @@ export type { RunRecordRejection, RunRecordVerification } from './receipt/index.
  * and runner exit, each a typed §5.4 run cause. Any finding fails the
  * whole run; there is no selective pass out of a failed required suite.
  */
+export {
+  decodeTitlePath,
+  encodeTitlePath,
+  encodeTitlePathSegment,
+  parseRunnerLogicalKey,
+  runnerLogicalKey,
+} from './test-identity.js';
 export { superviseExecution, enumerationDigestOf, ENUMERATION_DOMAIN } from './supervision/index.js';
 /** Supervision types. */
 export type {

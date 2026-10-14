@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, readdirSync, readlinkSync, realpathSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import { isNormalizedRepoRelativePath, sha256Canonical } from '@gate-forge/core';
+import { pathIgnoredByGit } from './git-ignored.js';
 
 /** One owner-approved link from a candidate path to a dependency root. */
 export interface RuntimeReuseMount {
@@ -13,6 +14,47 @@ export interface RuntimeReuseMount {
   ownerRoot: string;
   /** Resolved dependency root reached through the owner-approved path. */
   sourceRoot: string;
+}
+
+/**
+ * Runner/tooling cache directories under an approved reuse root (e.g.
+ * `node_modules/.vite`). They are not installed package bytes and may
+ * change while a long supervised suite runs in the owner workspace.
+ */
+const RUNTIME_REUSE_EPHEMERAL_DIR_NAMES: Record<string, true> = {
+  '.cache': true,
+  '.turbo': true,
+  '.vite': true,
+  '.vite-temp': true,
+  '.vitest': true,
+};
+
+/** True for runner cache directory names omitted from reuse and candidate-tree digests. */
+export function isRuntimeReuseEphemeralDirName(name: string): boolean {
+  return RUNTIME_REUSE_EPHEMERAL_DIR_NAMES[name] === true;
+}
+
+/** Runner cache dirs under `node_modules/` (includes `.cache`). */
+const CANDIDATE_TREE_EPHEMERAL_OUTSIDE_NODE_MODULES: Record<string, true> = {
+  '.vite': true,
+  '.vite-temp': true,
+  '.vitest': true,
+  '.turbo': true,
+};
+
+/**
+ * True when a directory should be omitted from candidate-tree walks.
+ * Runner cache directory names are skipped only when Git ignores that
+ * path — tracked or untracked non-ignored bytes must stay bound.
+ */
+export function skipCandidateTreeCacheDirectory(workspace: string, parentRel: string, dirName: string): boolean {
+  const underNodeModules = parentRel === 'node_modules' || parentRel.startsWith('node_modules/');
+  const ephemeral =
+    (underNodeModules && isRuntimeReuseEphemeralDirName(dirName)) ||
+    CANDIDATE_TREE_EPHEMERAL_OUTSIDE_NODE_MODULES[dirName] === true;
+  if (!ephemeral) return false;
+  const rel = parentRel.length > 0 ? `${parentRel}/${dirName}` : dirName;
+  return pathIgnoredByGit(workspace, rel);
 }
 
 /** Error raised when a declared reuse boundary is not the link we approved. */
@@ -121,6 +163,7 @@ function collectEntries(
       throw new RuntimeReuseBoundaryError(`runtime reuse directory '${logicalPath}' is unreadable`);
     }
     for (const child of children) {
+      if (RUNTIME_REUSE_EPHEMERAL_DIR_NAMES[child] === true) continue;
       collectEntries(join(absolute, child), `${logicalPath}/${child}`, new Set([...active, resolved]), entries);
     }
     return;

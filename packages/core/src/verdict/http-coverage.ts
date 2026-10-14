@@ -25,8 +25,10 @@
  * (plan finding 13: an unmounted router is not a served route).
  *
  * NOTHING here changes a verdict: the rules add findings and one
- * summary, and the channel those findings block on is the owner's
- * declaration (`http.callFindings`), never this module's judgement.
+ * summary. Witnessed call findings (`HTTP_CALL_UNMATCHED` /
+ * `HTTP_CALL_AMBIGUOUS`) block on the owner's `http.callFindings`
+ * channel; `HTTP_CALL_UNRESOLVED` always blocks — the only escape is
+ * declaring the wrapper in `scan.httpClients` so the join resolves.
  */
 import { compareStrings } from '../graph/util.js';
 import { sha256Canonical } from '../canonical-json.js';
@@ -465,6 +467,55 @@ export function httpCallFindingEntries(findings: readonly HttpCallFinding[]): Bl
       nextAction: inventoryGap ? null : CAUSE_NEXT_ACTIONS[finding.code as CauseCode],
     };
   });
+}
+
+/**
+ * Splits graded call findings into the blocking set and the advisory
+ * channel. Inventory gaps are always advisory; unresolved static call
+ * sites always block; other call findings follow `http.callFindings`.
+ *
+ * Args:
+ *   findings: the run's NEW call findings (post-adoption filter).
+ *   mode: the owner's `http.callFindings` declaration.
+ *
+ * Returns:
+ *   blocking and advisories: disjoint entry lists in finding order.
+ */
+export function channelHttpCallFindings(
+  findings: readonly HttpCallFinding[],
+  mode: HttpCallFindingsMode,
+): { blocking: BlockingEntry[]; advisories: BlockingEntry[] } {
+  const entries = httpCallFindingEntries(findings);
+  const blocking: BlockingEntry[] = [];
+  const advisories: BlockingEntry[] = [];
+  for (let index = 0; index < findings.length; index++) {
+    const finding = findings[index];
+    const entry = entries[index];
+    if (finding === undefined || entry === undefined) continue;
+    if (finding.code === HTTP_ROUTE_NOT_INVENTORIED) {
+      advisories.push(entry);
+    } else if (finding.code === HTTP_CALL_UNRESOLVED || mode === 'block') {
+      blocking.push(entry);
+    } else {
+      advisories.push(entry);
+    }
+  }
+  return { blocking, advisories };
+}
+
+/**
+ * Whether an adopted baseline may forgive this call-finding entry.
+ * Unresolved static call sites never shrink — only `scan.httpClients`
+ * clears them.
+ *
+ * Args:
+ *   entry: one projected call finding.
+ *
+ * Returns:
+ *   boolean: false when adoption must not forgive the entry.
+ */
+export function httpCallFindingAdoptionForgivable(entry: BlockingEntry): boolean {
+  return entry.cause !== HTTP_CALL_UNRESOLVED;
 }
 
 /**

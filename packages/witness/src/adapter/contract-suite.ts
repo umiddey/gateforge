@@ -18,7 +18,12 @@
  * invents a verdict of its own, so a contract pass means the adapter
  * feeds the same enforcement point a Playwright run feeds.
  */
-import { superviseExecution, type PlannedInstanceInput, type RunnerExecutionEnvelope } from '@gate-forge/core';
+import {
+  parseRunnerLogicalKey,
+  superviseExecution,
+  type PlannedInstanceInput,
+  type RunnerExecutionEnvelope,
+} from '@gate-forge/core';
 import type {
   RunnerAdapter,
   RunnerChildEnvContext,
@@ -184,12 +189,7 @@ function sessionContext(overrides: Partial<RunnerChildEnvContext> = {}): RunnerC
  * did not plan — which is exactly what an unplanned run produces.
  */
 function identityOfOutcome(logicalKey: string): { file: string; titlePath: string[] } {
-  const hash = logicalKey.indexOf('#');
-  if (hash < 0) return { file: logicalKey, titlePath: [] };
-  return {
-    file: logicalKey.slice(0, hash),
-    titlePath: logicalKey.slice(hash + 1).split('>'),
-  };
+  return parseRunnerLogicalKey(logicalKey);
 }
 
 /** The identity key an enumerated test is joined on. */

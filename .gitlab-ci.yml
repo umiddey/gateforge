@@ -1,0 +1,2 @@
+include:
+  - local: '.gateforge/ci/gitlab-gateforge.yml'

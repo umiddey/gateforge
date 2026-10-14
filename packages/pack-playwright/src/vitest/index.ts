@@ -24,6 +24,7 @@
  */
 import { isAbsolute, relative } from 'node:path';
 import { getCurrentTest } from 'vitest/suite';
+import { runnerLogicalKey } from '@gate-forge/core';
 import { humanMessage } from '@gate-forge/core';
 import { onTestFinished } from 'vitest';
 import { appendSpoolEvent, spoolPathFor } from '../supervisor/spool.js';
@@ -113,7 +114,7 @@ function currentIdentity(): CurrentIdentity | null {
       : null;
   if (file === null) return null;
   const titlePath = titlePathOfCurrent(current);
-  return { file, titlePath, testId: `${file}#${titlePath.join('>')}` };
+  return { file, titlePath, testId: runnerLogicalKey(file, titlePath) };
 }
 
 /**

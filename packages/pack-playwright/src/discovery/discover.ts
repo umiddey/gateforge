@@ -52,7 +52,7 @@ import {
 import type { PytestCollectionResult } from './pytest-adapter.js';
 import { CypressRunnerAdapter } from './cypress-runner-adapter.js';
 import { VitestRunnerAdapter } from './vitest-runner-adapter.js';
-import type { RunnerTestIdentity } from '@gate-forge/witness/adapter';
+import type { RunnerEnumeration, RunnerTestIdentity } from '@gate-forge/witness/adapter';
 import {
   declaresNoNamedProject,
   fileDigest,
@@ -111,6 +111,8 @@ export interface DiscoverOptions {
   ) => Promise<PytestCollectionResult>;
   /** Native playwright `--list` timeout (default 60s). */
   playwrightTimeoutMs?: number;
+  /** Vitest `list` enumeration timeout (default: config or 120s). */
+  vitestEnumerationTimeoutMs?: number;
   /**
    * Optional veto over statically seeded candidates, forwarded to
    * {@link scanTestFiles} unchanged. It filters the seed only: the
@@ -359,7 +361,19 @@ export async function discoverTestCatalog(options: DiscoverOptions): Promise<Dis
     // never runs this: the catalog above is byte-identical to before.
     // pytest rows come from the diagnostics collection above.
     if (config.runner === 'vitest' || config.runner === 'cypress') {
-      const adapter = config.runner === 'vitest' ? new VitestRunnerAdapter() : new CypressRunnerAdapter();
+      const vitestEnumerationTimeoutMs =
+        options.vitestEnumerationTimeoutMs ??
+        (config.witness.enumerationTimeoutSeconds !== undefined
+          ? config.witness.enumerationTimeoutSeconds * 1000
+          : undefined);
+      const adapter =
+        config.runner === 'vitest'
+          ? new VitestRunnerAdapter(
+              vitestEnumerationTimeoutMs === undefined
+                ? {}
+                : { enumerationTimeoutMs: vitestEnumerationTimeoutMs },
+            )
+          : new CypressRunnerAdapter();
       const enumeration = await adapter.enumerate(cwd);
       runnerSummaries.push({
         runner: config.runner,
@@ -368,9 +382,18 @@ export async function discoverTestCatalog(options: DiscoverOptions): Promise<Dis
         detail: enumeration.detail,
       });
       if (enumeration.status === 'discovered') {
+        // The static scan already seeded rows for the same identities; the
+        // runner's own enumeration is authoritative (like playwright
+        // native-list over static-only). Drop the static row so finalize
+        // never sees duplicate logical keys.
         for (const test of enumeration.tests) {
           const row = builder.adapterRunnerEntry(config.runner, test);
-          if (row !== null) entries.push(row);
+          if (row === null) continue;
+          const key = row.logicalKey;
+          for (let index = entries.length - 1; index >= 0; index -= 1) {
+            if (entries[index]?.logicalKey === key) entries.splice(index, 1);
+          }
+          entries.push(row);
         }
       }
     }
@@ -727,7 +750,13 @@ class CatalogBuilder {
 
     for (const [key, staticEntry] of this.staticByKey) {
       if (matchedStaticKeys.has(key) || templateConsumed.has(key)) continue;
-      if (!isMember(staticEntry.file)) continue;
+      if (!isMember(staticEntry.file)) {
+        const zeroInstanceTemplate =
+          staticEntry.parameterIdentity === 'template' &&
+          this.native.status === 'discovered' &&
+          !this.native.instances.some((instance) => instance.file === staticEntry.file);
+        if (!zeroInstanceTemplate) continue;
+      }
       rows.push(this.staticOnlyRow(staticEntry));
     }
 
@@ -739,7 +768,10 @@ class CatalogBuilder {
     // cases at all.
     for (const [key, gap] of [...gapsByKey.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))) {
       if (enumeratedKeys.has(key)) continue;
-      if (!isMember(gap.file)) continue;
+      // A dynamic-title gap the static scan found in a file the runner
+      // never collects still blocks: scan roots can read helpers the
+      // runner's own selection ignores (0.13.9).
+      if (!isMember(gap.file) && gap.code !== 'dynamic-title') continue;
       if (gap.code === 'dynamic-title' && gap.facts !== undefined) {
         const unresolvedCallSites = this.scan.unresolved.filter(
           (candidate) =>
@@ -1157,6 +1189,133 @@ class CatalogBuilder {
       ),
     });
   }
+}
+
+/**
+ * Builds a runner-enumerated catalog row (same shape as
+ * {@link CatalogBuilder.adapterRunnerEntry}).
+ */
+function adapterRunnerEntryFromIdentity(
+  cwd: string,
+  runner: 'vitest' | 'cypress',
+  test: RunnerTestIdentity,
+): TestCatalogEntry | null {
+  const digest = fileDigest(cwd, test.file);
+  if (digest === null) return null;
+  const title = test.titlePath[test.titlePath.length - 1] ?? test.logicalKey;
+  return {
+    logicalKey: deriveLogicalKey({ runner, project: test.project, file: test.file, titlePath: [...test.titlePath] }),
+    runner,
+    project: test.project,
+    file: test.file,
+    titlePath: [...test.titlePath],
+    title,
+    sourceLocation: { file: test.file, line: 1, col: 0 },
+    parameterIdentity: test.frameworkId ?? test.logicalKey,
+    sourceDigest: digest,
+    discoveryStatus: 'discovered',
+    reconciliation: 'unavailable',
+    inferredKind: 'unknown',
+    kindSignals: [],
+    weakSignals: [],
+    rulesFired: [],
+    categorySignals: [],
+    suppressionSignals: [],
+  };
+}
+
+/** Recomputes {@link TestCatalog.inventoryComplete} from catalog rows alone. */
+function inventoryCompleteFromEntries(
+  entries: TestCatalogEntry[],
+  runnerSummaries: RunnerSummary[],
+  configuredRunner: 'vitest' | 'cypress' | 'playwright' | 'pytest',
+  parseErrors: CatalogParseError[],
+): boolean {
+  const diagnosticUnavailable = runnerSummaries.some(
+    (summary) => summary.runner !== 'playwright' && summary.status === 'unavailable',
+  );
+  return (
+    parseErrors.length === 0 &&
+    !diagnosticUnavailable &&
+    !entries.some(
+      (row) =>
+        (row.runner === 'playwright' || row.runner === configuredRunner) &&
+        row.discoveryStatus === 'unresolved' &&
+        row.informationalNote === undefined,
+    )
+  );
+}
+
+/**
+ * When discover-time vitest/cypress listing failed but the supervised
+ * gate's pre-run {@link RunnerAdapter.enumerate} succeeded, replace the
+ * stale static-only slice with the authoritative enumeration so
+ * `inventoryComplete` reflects what actually executed.
+ */
+export function refreshCatalogAfterRunnerEnumeration(
+  catalog: TestCatalog,
+  runner: 'vitest' | 'cypress',
+  enumeration: RunnerEnumeration,
+  cwd: string,
+): TestCatalog {
+  if (enumeration.status !== 'discovered') return catalog;
+  const priorSummary = catalog.runnerSummaries.find((summary) => summary.runner === runner);
+  if (priorSummary?.status === 'discovered') {
+    const staleConfiguredRunnerRows = catalog.entries.some(
+      (entry) =>
+        entry.runner === runner &&
+        entry.discoveryStatus === 'unresolved' &&
+        entry.informationalNote === undefined,
+    );
+    if (!staleConfiguredRunnerRows) return catalog;
+  }
+
+  const otherEntries = catalog.entries.filter((entry) => entry.runner !== runner);
+  const runnerEntries: TestCatalogEntry[] = [];
+  for (const test of enumeration.tests) {
+    const row = adapterRunnerEntryFromIdentity(cwd, runner, test);
+    if (row !== null) runnerEntries.push(row);
+  }
+  const entries = [...otherEntries, ...runnerEntries].sort(compareRows);
+
+  const runnerSummaries = catalog.runnerSummaries.some((summary) => summary.runner === runner)
+    ? catalog.runnerSummaries.map((summary) =>
+        summary.runner === runner
+          ? { ...summary, status: 'discovered' as const, detail: enumeration.detail }
+          : summary,
+      )
+    : [
+        ...catalog.runnerSummaries,
+        { runner, name: runner, status: 'discovered' as const, detail: enumeration.detail },
+      ];
+
+  const unresolved: CatalogUnresolved[] = entries
+    .filter((row) => row.discoveryStatus === 'unresolved' && row.unresolvedReason !== undefined)
+    .map((row) => ({
+      logicalKey: row.logicalKey,
+      code: row.unresolvedReason?.code ?? 'unknown',
+      detail: row.unresolvedReason?.detail ?? '',
+      location: row.sourceLocation,
+    }))
+    .sort(
+      (a, b) =>
+        compareLocations(a.location, b.location) || (a.code < b.code ? -1 : a.code > b.code ? 1 : 0),
+    );
+
+  const inventoryComplete = inventoryCompleteFromEntries(entries, runnerSummaries, runner, catalog.parseErrors);
+
+  return TestCatalogSchema.parse({
+    schemaVersion: catalog.schemaVersion,
+    entries,
+    unresolved,
+    parseErrors: catalog.parseErrors,
+    inventoryComplete,
+    runnerSummaries: [...runnerSummaries].sort(
+      (a, b) =>
+        (a.runner < b.runner ? -1 : a.runner > b.runner ? 1 : 0) ||
+        (a.name < b.name ? -1 : a.name > b.name ? 1 : 0),
+    ),
+  });
 }
 
 /** sha256 of empty bytes — placeholder ONLY when a digest is unreadable. */

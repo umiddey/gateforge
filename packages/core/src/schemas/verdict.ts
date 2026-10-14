@@ -100,8 +100,8 @@ export const CauseCodeSchema = z.enum([
   'BUSINESS_RULE_TEST_FAILING',
   // The HTTP call rules (0.14 WP3, plan §4.3 R2-R4): a call the
   // product makes that no route serves, several routes serve equally,
-  // or no static join could resolve. Report-only by default
-  // (`http.callFindings`); blocking only when the owner declares it.
+  // or no static join could resolve. Unmatched/ambiguous follow
+  // `http.callFindings`; unresolved static call sites always block.
   'HTTP_CALL_UNMATCHED',
   'HTTP_CALL_AMBIGUOUS',
   'HTTP_CALL_UNRESOLVED',
@@ -221,8 +221,8 @@ export const CAUSE_NEXT_ACTIONS: Readonly<Record<CauseCode, string>> = Object.fr
     'A witnessed call matches several routes equally: make the routes distinguishable ' +
     '(or record the router\'s registration order) so exactly one can answer the call',
   HTTP_CALL_UNRESOLVED:
-    'The static join cannot compute this call\'s URL: declare the wrapper/base URL in the ' +
-    'endpoint scan configuration so the call site resolves instead of staying invisible',
+    'Declare the fetch wrapper or URL builder in `scan.httpClients` in `.gateforge.yml` so this ' +
+    'call site resolves — an unresolvable frontend call is an application bug, not missing test debt',
   HTTP_RESPONSE_SHAPE_MISMATCH:
     'A witnessed response body does not match the response schema the app declares in its OpenAPI ' +
     'document: fix the handler so the body matches the declared model, or fix the declared schema if it is wrong',

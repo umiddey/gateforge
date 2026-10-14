@@ -52,6 +52,8 @@ import {
   type SupervisionFinding,
   type TestCatalog,
   type TracedTestInput,
+  parseRunnerLogicalKey,
+  runnerLogicalKey,
 } from '@gate-forge/core';
 import { QUARANTINE_DIR } from '@gate-forge/core';
 import { ADOPTION_RECORD_FILENAME } from '@gate-forge/core';
@@ -445,7 +447,7 @@ export function claimInjectionsFor(
 ): Record<string, string[]> {
   const catalogByKey = new Map(
     catalog.entries.map((entry) => [
-      `${entry.file}#${entry.titlePath.join('>')}`,
+      runnerLogicalKey(entry.file, entry.titlePath),
       entry.logicalKey,
     ]),
   );
@@ -457,7 +459,7 @@ export function claimInjectionsFor(
       // and never route this run's evidence.
       if (binding.origin !== 'sidecar') continue;
       for (const instance of binding.instances) {
-        const key = `${instance.file}#${instance.titlePath.join('>')}`;
+        const key = runnerLogicalKey(instance.file, instance.titlePath);
         // Only inject when the CURRENT catalog still enumerates the
         // instance — a stale binding injects nothing (stale mappings are
         // the resolver's typed problems, not silent injections).
@@ -802,7 +804,7 @@ export function planScopedExpectedSet(input: {
   // instance (stale bindings are the resolver's typed problems).
   const logicalKeyByCatalogKey = new Map(
     input.catalog.entries.map((entry) => [
-      `${entry.file}#${entry.titlePath.join('>')}`,
+      runnerLogicalKey(entry.file, entry.titlePath),
       entry.logicalKey,
     ]),
   );
@@ -821,7 +823,7 @@ export function planScopedExpectedSet(input: {
     for (const binding of bindings) {
       if (binding.origin !== 'sidecar' && binding.origin !== 'native') continue;
       for (const instance of binding.instances) {
-        const logicalKey = logicalKeyByCatalogKey.get(`${instance.file}#${instance.titlePath.join('>')}`);
+        const logicalKey = logicalKeyByCatalogKey.get(runnerLogicalKey(instance.file, instance.titlePath));
         if (logicalKey === undefined) continue;
         const entry = entryByLogicalKey.get(logicalKey);
         if (entry === undefined) continue;
@@ -897,6 +899,11 @@ export function planScopedExpectedSet(input: {
  * Returns:
  *   ExecutedOutcome[]: supervision-normalized executed outcomes.
  */
+/** File and title path from a runner `<file>#<title>` logical key (first `#` only). */
+function titlePathFromRunnerLogicalKey(logicalKey: string): { file: string; titlePath: string[] } {
+  return parseRunnerLogicalKey(logicalKey);
+}
+
 export function executedOutcomesOf(
   outcomesDoc: RunnerOutcomesDocument | null,
   plannedRows: readonly PlannedRow[],
@@ -910,9 +917,7 @@ export function executedOutcomesOf(
   );
   if (outcomesDoc === null) {
     return envelopeOutcomes.map((outcome) => {
-      const hash = outcome.logicalKey.indexOf('#');
-      const file = hash > 0 ? outcome.logicalKey.slice(0, hash) : outcome.logicalKey;
-      const titlePath = hash > 0 ? outcome.logicalKey.slice(hash + 1).split('>') : [];
+      const { file, titlePath } = titlePathFromRunnerLogicalKey(outcome.logicalKey);
       const key = `${outcome.project ?? '-'}\u0000${file}\u0000${titlePath.join('>')}`;
       return {
         logicalKey: logicalKeyByKey.get(key) ?? outcome.logicalKey,
@@ -926,12 +931,13 @@ export function executedOutcomesOf(
     });
   }
   return outcomesDoc.outcomes.map((row) => {
-    const key = `${row.project ?? '-'}\u0000${row.file}\u0000${row.titlePath.join('>')}`;
+    const titlePath = row.titlePath.filter((segment) => segment.length > 0);
+    const key = `${row.project ?? '-'}\u0000${row.file}\u0000${titlePath.join('>')}`;
     return {
-      logicalKey: logicalKeyByKey.get(key) ?? `${row.file}#${row.titlePath.join('>')}`,
+      logicalKey: logicalKeyByKey.get(key) ?? runnerLogicalKey(row.file, titlePath),
       project: row.project,
       file: row.file,
-      titlePath: [...row.titlePath],
+      titlePath,
       status: normalizeOutcomeStatus(row.status),
       attempt: row.attempt >= 1 ? row.attempt : 1,
       expectedFailure: row.expectedFailure === true,
@@ -1106,6 +1112,8 @@ export function sealExecutionResult(input: SealExecutionResultInput): SealedExec
     ...(input.claimInventory !== undefined ? { claimInventory: input.claimInventory } : {}),
     planned: input.plannedRows.map((row) => row.planned),
     outcomes: executed,
+    executedTests: new Set(executed.filter((outcome) => outcome.status !== 'skipped' && outcome.status !== 'fixme').map((outcome) => JSON.stringify([outcome.project, outcome.file, outcome.titlePath]))).size,
+    measuredTests: input.sessionTrace?.filter((test) => test.sessions.length > 0).length ?? 0,
     ...(input.enumerationDigest !== undefined ? { enumerationDigest: input.enumerationDigest } : {}),
     ...(input.sessionTrace !== undefined && input.sessionTrace !== null
       ? { sessionTrace: input.sessionTrace }

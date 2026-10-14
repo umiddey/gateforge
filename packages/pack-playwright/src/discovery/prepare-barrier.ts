@@ -145,7 +145,8 @@ export const FREEZE_REFUSAL_FILE = 'freeze-refusal.json';
  * `worker/workerMain.js` assigns `TEST_WORKER_INDEX` and
  * `TEST_PARALLEL_INDEX` AFTER the process booted, and
  * `runner/workerHost.js` spreads `FORCE_COLOR` and `DEBUG_COLORS` into
- * every worker's environment at spawn. `lib/common/process.js` computes
+ * every worker's environment at spawn. The fork bootstrap (1.58
+ * `lib/common/process.js`, bundled in 1.60's worker/loader entries) computes
  * the produced-environment diff against the worker's OWN boot
  * environment, so all four names appear in a produced diff without any
  * prerequisite having written them — a subtraction reset that touched

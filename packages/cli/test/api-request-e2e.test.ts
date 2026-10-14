@@ -22,8 +22,8 @@ import {
   GATEFORGE_YML,
 } from './witnessed-run-fixture.js';
 
-const TITLE_FIXTURE = 'fixture request uses direct API transport';
-const TITLE_IMPORTED = 'imported new context uses direct API transport';
+const TITLE_FIXTURE = 'fixture request uses witnessed test-code transport';
+const TITLE_IMPORTED = 'imported new context uses witnessed test-code transport';
 const TITLE_UI = 'API seed followed by browser UI request';
 const TITLE_SEED_ONLY = 'direct seed alone is not UI evidence';
 const TITLE_PAGE_REQUEST = 'page.request alone is not UI evidence';
@@ -79,6 +79,7 @@ export default defineConfig({
 `;
 
 const SPEC = `import { test as base, expect, request } from '@gate-forge/pack-playwright';
+import { request as directRequest } from 'playwright';
 
 const test = base.extend({});
 
@@ -92,6 +93,18 @@ test.beforeEach(async () => {
 test('${TITLE_FIXTURE}', async ({ request }) => {
   const response = await request.get('/api/items');
   expect(response.status()).toBe(200);
+  const direct = await directRequest.newContext({ baseURL: process.env.TEST_SERVICE_URL });
+  try {
+    for (const path of ['/api/redirect', '/api/not-found']) {
+      const observed = await request.get(path);
+      const expected = await direct.get(path);
+      expect(observed.status()).toBe(expected.status());
+      expect(await observed.body()).toEqual(await expected.body());
+      expect(observed.headers()).toEqual(expected.headers());
+    }
+  } finally {
+    await direct.dispose();
+  }
 });
 
 test('${TITLE_IMPORTED}', async () => {
@@ -228,6 +241,17 @@ async function startApiApp(): Promise<{
     const path = (request.url ?? '/').split('?')[0] ?? '/';
     requestsByPath.set(path, (requestsByPath.get(path) ?? 0) + 1);
     response.setHeader('x-gateforge-env-fingerprint', FINGERPRINT);
+    response.setHeader('date', 'Sat, 10 Oct 2026 00:00:00 GMT');
+    if (path === '/api/redirect') {
+      response.writeHead(302, { location: `http://${request.headers.host}/api/redirect-target` });
+      response.end();
+      return;
+    }
+    if (path === '/api/redirect-target') {
+      response.writeHead(200, { 'content-type': 'application/json', 'x-response-marker': 'redirected' });
+      response.end('{"redirected":true}');
+      return;
+    }
     if (request.method === 'GET' && path === '/') {
       response.setHeader('content-type', 'text/html');
       response.end('<button>Load items</button><button>Load async</button><div id="result"></div><script>window.appAsync=async()=>{await new Promise(r=>setTimeout(r,0));await fetch("/api/eval-app")};document.querySelectorAll("button")[0].onclick=async()=>{await fetch("/api/ui-items");document.querySelector("#result").textContent="Items loaded"};document.querySelectorAll("button")[1].onclick=async()=>{await new Promise(r=>setTimeout(r,0));await fetch("/api/app-async")}</script>');
@@ -310,7 +334,6 @@ function recordedExchangePaths(records: LedgerRecord[], testId?: string): string
     .filter(
       (record) =>
         record.kind === 'http.observed' &&
-        record.payload?.channel !== 'direct' &&
         (testId === undefined || record.testId === testId),
     )
     .flatMap((record) => record.payload?.exchanges ?? [])
@@ -472,6 +495,7 @@ tests:
           verdicts: Array<{ obligationId: string; verdict: string; reason?: string }>;
           execution: { selectedTests: { selected: number; passed: number; failed: number } };
           blocking?: Array<{ cause?: string; detail?: string; name?: string }>;
+          httpLedger?: { rows: Array<{ testId: string; path: string; status: number; initiator?: string }> };
         };
         const observed = `${run.stdout}\n${run.stderr}`;
         const records = JSON.parse(readFileSync(repo.path('.gateforge/test-gates/records.json'), 'utf8')) as LedgerRecord[];
@@ -509,9 +533,10 @@ tests:
           const verdict = report.verdicts.find((item) => item.obligationId === obligationId);
           expect(verdict, observed).toMatchObject({ verdict: 'missing' });
         }
-        for (const obligationId of [ITEMS_REQUEST, ITEMS_STATUS, SEED_ONLY_REQUEST, SEED_ONLY_STATUS]) {
+        expect(records.some((record) => record.payload?.channel === 'direct')).toBe(false);
+        for (const obligationId of [SEED_ONLY_REQUEST, SEED_ONLY_STATUS]) {
           const verdict = report.verdicts.find((item) => item.obligationId === obligationId);
-          expect(verdict?.reason ?? '', obligationId).toContain('the test called this endpoint directly from test code');
+          expect(verdict?.reason ?? '', obligationId).toContain('the request was started by test code');
         }
         // Chromium: evaluate is no longer refused when reading the code; the
         // runtime initiator rule refuses the requests it starts instead.
@@ -558,9 +583,14 @@ tests:
         expect(app.requestsByPath.get('/api/app-async')).toBe(1);
         expect(app.requestsByPath.get('/api/ui-items')).toBe(1);
         const recordedPaths = recordedExchangePaths(records);
-        for (const path of ['/api/items', '/api/seed-only', '/api/page-request', '/api/context-request']) {
+        for (const path of ['/api/page-request', '/api/context-request']) {
           expect(recordedPaths.some((exchangePath) => exchangePath.endsWith(path))).toBe(false);
         }
+        expect(recordedPaths.some((path) => path.endsWith('/api/seed-only'))).toBe(true);
+        expect(report.httpLedger?.rows).toContainEqual(
+          expect.objectContaining({ path: '/api/redirect-target', status: 200, initiator: 'test-code' }),
+        );
+        expect(report.httpLedger?.rows.some((row) => row.path === '/api/setup')).toBe(false);
         expect(recordedPaths.some((path) => path.endsWith('/api/ui-items'))).toBe(true);
         expect(recordedPaths.some((path) => path.endsWith('/api/eval-fetch'))).toBe(true);
         expect(recordedPaths.some((path) => path.endsWith('/api/eval-app'))).toBe(true);
@@ -570,6 +600,14 @@ tests:
           outcomes?: Array<{ testId?: string; titlePath?: string[] }>;
         };
         const uiTestId = outcomesDoc.outcomes?.find((item) => (item.titlePath ?? []).includes(TITLE_UI))?.testId;
+        for (const title of [TITLE_FIXTURE, TITLE_IMPORTED, TITLE_SEED_ONLY]) {
+          const testId = outcomesDoc.outcomes?.find((item) => (item.titlePath ?? []).includes(title))?.testId;
+          expect(testId, title).toBeDefined();
+          const path = title === TITLE_SEED_ONLY ? '/api/seed-only' : '/api/items';
+          expect(report.httpLedger?.rows, observed).toContainEqual(
+            expect.objectContaining({ testId, path, status: 200, initiator: 'test-code' }),
+          );
+        }
         expect(uiTestId, 'browser UI test id').toBeDefined();
         expect(
           recordedExchangePaths(records.filter((record) => record.testId === uiTestId)).some((path) =>

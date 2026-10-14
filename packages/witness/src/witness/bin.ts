@@ -22,6 +22,9 @@
  * Env surface:
  *   GATEFORGE_RUN_ID, GATEFORGE_RUN_TOKEN        (required; CLI contract)
  *   GATEFORGE_PROXY_TARGET, GATEFORGE_MOUNT_PATH (observation proxy)
+ *   GATEFORGE_ADDITIONAL_APP_ORIGINS              (declared second+ app
+ *                                                  origins: JSON array of
+ *                                                  loopback base URLs)
  *   GATEFORGE_STATE_DIR                          (manifest append at shutdown)
  *   GATEFORGE_ADAPTERS_DIR                       (default .gateforge/adapters)
  *   GATEFORGE_CLASSIFICATIONS                    (classifications YAML path)
@@ -50,6 +53,7 @@ import { parseChaosOptions } from './chaos.js';
 import { parseTwinShapePlan, type TwinShapePlan } from './twin-shapes.js';
 import {
   ENV_ADAPTER_BASE_URL,
+  ENV_ADDITIONAL_APP_ORIGINS,
   ENV_ADAPTERS_DIR,
   ENV_CHAOS_MAX_DELAY_MS,
   ENV_CHAOS_REORDER,
@@ -180,6 +184,47 @@ function parseTwinShapePlanOrFail(input: {
 }
 
 /**
+ * The DECLARED additional app origins (0.15.0), or a fail-closed startup
+ * error.
+ *
+ * A JSON array of absolute loopback base URLs, one per `.gateforge.yml`
+ * `additionalAppOrigins` entry the CLI resolved. Absent = the
+ * single-origin path, byte-identical. Malformed = the owner's wiring
+ * speaking nonsense, and starting anyway would give a run a session whose
+ * declared origins are quietly unwitnessed — the exact state this
+ * declaration exists to remove.
+ *
+ * Args:
+ *   raw: the raw env value (undefined when the CLI declared none).
+ *
+ * Returns:
+ *   string[]: the base URLs, in declaration order.
+ *
+ * Raises:
+ *   WitnessStartupError: on a malformed value.
+ */
+function parseAdditionalAppOrigins(raw: string | undefined): string[] {
+  if (raw === undefined || raw === '') return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new WitnessStartupError(
+      `${ENV_ADDITIONAL_APP_ORIGINS} must be a JSON array of base URLs: ${(error as Error).message}`,
+    );
+  }
+  if (!Array.isArray(parsed)) {
+    throw new WitnessStartupError(`${ENV_ADDITIONAL_APP_ORIGINS} must be a JSON array of base URLs`);
+  }
+  return parsed.map((entry) => {
+    if (typeof entry !== 'string' || entry === '') {
+      throw new WitnessStartupError(`${ENV_ADDITIONAL_APP_ORIGINS} entries must be non-empty base URL strings`);
+    }
+    return entry;
+  });
+}
+
+/**
  * Reads env + argv and starts the witness.
  *
  * Args:
@@ -220,6 +265,10 @@ export async function main(
     runId,
     token,
     proxyTarget: flagOrEnv(flags, 'proxy-target', env[ENV_PROXY_TARGET]),
+    // The owner's DECLARED additional app origins (0.15.0): each one an
+    // extra attested upstream with its own per-session proxy, all
+    // attributed to the same session. Absent is the single-origin path.
+    additionalAppOrigins: parseAdditionalAppOrigins(env[ENV_ADDITIONAL_APP_ORIGINS]),
     // Timing chaos (E63): the seeded release plan for proxied
     // responses. Environment-only (like the verifier key), absent in
     // every run that did not ask for chaos, and parsed fail-closed: a

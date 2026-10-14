@@ -79,10 +79,11 @@ export const HTTP_EXCHANGES_KIND = 'http.exchanges';
 export const HTTP_OPENAPI_KIND = 'http.openapi';
 
 /**
- * Upper bound on the exchanges one `http.observed` record carries. A
- * session that drove more gets the first CAP exchanges in observation
- * order plus `truncated: true` in the payload: the cap can only hide
- * an exchange (fail-closed), never invent one.
+ * Upper bound on the non-asset exchanges one `http.observed` record
+ * carries. A session that drove more gets the first CAP non-asset
+ * exchanges in observation order plus `truncated: true`: the cap can
+ * only hide an exchange (fail-closed), never invent one. The ledger's
+ * `http.exchanges` snapshots retain their all-destination cap.
  */
 export const OBSERVED_EXCHANGES_CAP = 500;
 export const KNOWN_RECORD_KINDS: readonly string[] = [
@@ -140,6 +141,15 @@ export const ENV_TWIN_QUERY_KEYS = 'GATEFORGE_TWIN_QUERY_KEYS';
 export const ENV_TWIN_INVENTORY = 'GATEFORGE_TWIN_INVENTORY';
 /** Observation proxy target (loopback base URL the proxy forwards to). */
 export const ENV_PROXY_TARGET = 'GATEFORGE_PROXY_TARGET';
+/**
+ * The owner's DECLARED additional app origins (0.15.0): a JSON array of
+ * loopback base URLs, one per `.gateforge.yml` `additionalAppOrigins` env
+ * var name. Set by `gateforge test-gates` from its trusted environment;
+ * absent means a single-origin run, byte-identical to every earlier
+ * witness. Each entry is an additional attested upstream with its own
+ * per-session observation proxy.
+ */
+export const ENV_ADDITIONAL_APP_ORIGINS = 'GATEFORGE_ADDITIONAL_APP_ORIGINS';
 /**
  * Observation-proxy mount prefix (e.g. `/api`): the browser-facing path
  * prefix a frontend dev proxy adds before backend routes. The proxy
@@ -236,15 +246,6 @@ export const SERVER_E2E_TEST_KIND = 'server-e2e';
  */
 export const OBSERVE_CHANNEL = 'observe';
 
-/**
- * Payload discriminant for run-scoped direct API exchanges. These records
- * are diagnostic only and can never satisfy a claim. Mirrors
- * `DIRECT_CHANNEL` in core's `pack-verifiers.ts`.
- */
-export const DIRECT_CHANNEL = 'direct';
-
-/** Upper bound on the distinct direct API exchanges kept for diagnosis. */
-export const DIRECT_EXCHANGES_CAP = 8;
 
 /** The mapping kind that unlocks the Observe channel. */
 export const OBSERVED_E2E_TEST_KIND = 'observed-e2e';

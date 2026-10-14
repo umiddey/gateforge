@@ -1275,6 +1275,44 @@ repo-root-relative. `changed.provider: auto` (the default) picks
 instant for deterministic reports; `system` (default) freezes it at run
 start.
 
+### A second app origin (`additionalAppOrigins`)
+
+A consumer whose tests drive a SECOND browser app — a platform admin console
+beside the tenant app — declares it in `.gateforge.yml`:
+
+```yaml
+additionalAppOrigins:
+  - E2E_PLATFORM_BASE_URL
+```
+
+Each entry is the NAME of an environment variable, never a base URL: the
+address stays operator-supplied (exactly as `GATEFORGE_APP_BASE_URL` is) and
+never enters a candidate-controlled file. An entry that is not an
+environment-variable name is a config error.
+
+What it changes: the witness opens one observation proxy per declared
+origin per test session (each attested loopback-only, like the primary
+target), and the Playwright fixture rewrites requests for each app origin
+onto that origin's own session proxy. One test driving two apps therefore
+keeps ONE session, ONE attribution and ONE exchange ledger, instead of the
+second app's traffic passing unwitnessed while the test still passes.
+
+What it does NOT change: endpoint→plane matching, the page route table, or
+what counts as proof. A test-code request on a declared origin is still
+marked `test-code` and still cannot satisfy a UI claim. An origin nobody
+declared is still reported as an unrouted origin and still blocks the claim,
+so declaring one app never silences the diagnostic for another.
+
+Resolution is fail-closed: a declared name the run environment does not set,
+or sets to something that is not an absolute `http(s)` base URL, refuses the
+run with a `UsageError` naming the variable. A silent skip would leave the
+suite driving an unwitnessed app behind a config that reads correct.
+
+Because the declaration lives in `.gateforge.yml`, it is inside the
+owner-approved policy digest like every other declaration there: widening
+the list moves the approved revision, so a candidate cannot widen its own
+app origins in the same commit that needs them.
+
 ### HTTP route source (`http.routeSource`)
 
 `.gateforge.yml` accepts:
@@ -1348,6 +1386,10 @@ Enforcement-relevant sections:
   `playwright` (the default when the key is absent), `pytest`, `vitest` or
   `cypress`. `check`, `next`, `tests`, `test-gates`, `doctor` and `init`
   all follow it. See `guides/RUNNER-NEUTRAL-EVIDENCE.md`.
+- `witness.enumerationTimeoutSeconds:` — optional wall-clock bound (seconds,
+  1–3600) for vitest `list` children during catalog construction and
+  `test-gates` enumeration. ABSENT = 120s. Raise it for large workspace
+  suites whose enumeration outlasts the default.
 - `project.paths.testTooling:` — globs the owner asserts are test/developer
   tooling (`scripts/e2e/**`, `tools/dev/**`). A changed file matching one is
   attributed `test-tooling:<file>`: scope-expanding exactly like test
@@ -2560,7 +2602,9 @@ expected context, every witnessed record demotes to claimed-tier
   `enforcement doctor` fails the `playwright-projects` row — `test-gates`
   needs a named project.
 - Gateforge reads the FIRST of `playwright.config.{ts,mts,cts,js,mjs,cjs}`
-  at the repository root; a suffixed config such as
+  at the repository root, then up to two directory levels down (breadth-first,
+  alphabetical, hidden/dependency/build/Python directories pruned). Multiple
+  configs are disclosed, but only the first is inventoried. A suffixed config such as
   `playwright.config.e2e.js` is not read — rename it to
   `playwright.config.js` if it is the suite to prove.
 - Run-state hygiene is enforced, not forgiven: a committed run-state
