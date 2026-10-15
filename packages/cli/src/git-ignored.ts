@@ -118,3 +118,55 @@ export function gitIgnoredPaths(root: string): GitIgnoredScope {
     skipsFile: (relativeFile) => files.has(relativeFile),
   };
 }
+
+/** Hard cap on batched `check-ignore --stdin` output. */
+const MAX_CHECK_IGNORE_OUTPUT_BYTES = 64 * 1024 * 1024;
+
+/** Deadline for a batched ignore query; slower git means no answer (fail closed). */
+const CHECK_IGNORE_TIMEOUT_MS = 20_000;
+
+/**
+ * True when Git ignores a single repo-relative path (untracked-only semantics).
+ *
+ * Args:
+ *   root: repository root.
+ *   relativePath: repo-relative posix path.
+ *
+ * Returns:
+ *   boolean: whether `git check-ignore` matched the path.
+ */
+export function pathIgnoredByGit(root: string, relativePath: string): boolean {
+  const result = spawnSync('git', ['--no-replace-objects', 'check-ignore', '--quiet', '--', relativePath], {
+    cwd: root,
+    encoding: 'utf8',
+  });
+  return result.status === 0;
+}
+
+/**
+ * Subset of `paths` that Git ignores, or null when Git could not answer.
+ *
+ * Args:
+ *   root: repository root.
+ *   paths: repo-relative posix paths.
+ *
+ * Returns:
+ *   Set<string> | null: ignored paths when Git answered; null on failure.
+ */
+export function pathsIgnoredByGitCheckIgnore(root: string, paths: readonly string[]): Set<string> | null {
+  if (paths.length === 0) return new Set();
+  const result = spawnSync('git', ['--no-replace-objects', 'check-ignore', '--stdin', '-z'], {
+    cwd: root,
+    encoding: 'utf8',
+    input: `${paths.join('\0')}\0`,
+    maxBuffer: MAX_CHECK_IGNORE_OUTPUT_BYTES,
+    timeout: CHECK_IGNORE_TIMEOUT_MS,
+  });
+  if (result.error !== undefined) return null;
+  if (result.status !== 0 && result.status !== 1) return null;
+  return new Set(
+    (result.stdout ?? '')
+      .split('\0')
+      .filter((path) => path.length > 0),
+  );
+}

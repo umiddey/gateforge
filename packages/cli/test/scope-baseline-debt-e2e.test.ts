@@ -19,7 +19,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { loadConfig, withTempRepo, type TempRepo } from '@gate-forge/core';
-import { configYml, installFixture, OBLIGATION_ACCOUNTS, runCli } from './helpers.js';
+import { configYml, installFixture, OBLIGATION_ACCOUNTS, runCli, stubPlaywrightFiles } from './helpers.js';
 import { ADAPTER, SPECS, STUB_CLI, VERIFIER_KEY } from './reseal-e2e-fixture.js';
 import { trustedPolicyDigestForConfig } from '../src/execution.js';
 
@@ -65,7 +65,7 @@ function installRepo(repo: TempRepo, strictE2E: boolean): void {
     '.gateforge/test-map.yml': TEST_MAP,
     '.gateforge.yml': `mode: changed\n${strictE2E ? 'enforcement:\n  strictE2E: true\n' : ''}${configYml()}`,
     'playwright.config.mjs': "export default { testDir: 'e2e', projects: [{ name: 'chromium' }] };\n",
-    'node_modules/playwright/cli.js': STUB_CLI,
+    ...stubPlaywrightFiles(STUB_CLI),
     '.gitignore': '.gateforge/test-gates/\nnode_modules/\n',
   });
   repo.commitFiles({}, 'base');

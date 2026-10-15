@@ -425,6 +425,8 @@ export interface SupervisorSession {
 	openedTick: number;
 	/** The session's dedicated observation-proxy origin (null when no proxy). */
 	proxyUrl: string | null;
+	/** Per-origin proxy credentials declared by this witness, absent on older witnesses. */
+	additionalProxyUrls?: Array<{ appOrigin: string; proxyUrl: string }>;
 }
 
 /**

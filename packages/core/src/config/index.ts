@@ -516,6 +516,39 @@ export const GateforgeConfigSchema = z
       })
       .strict()
       .optional(),
+    /**
+     * ADDITIONAL browser app origins this repository's UI runs on
+     * (0.15.0). A consumer whose tests drive a SECOND app — a platform
+     * admin console beside the tenant app — otherwise routes nothing on
+     * that origin through the session proxy and every HTTP claim it
+     * earns there is zero. Each entry is the NAME of an environment
+     * variable holding that origin's base URL, never the URL itself: the
+     * address stays operator-supplied (as `GATEFORGE_APP_BASE_URL` is)
+     * and never enters a candidate-controlled file.
+     *
+     * Every declared origin gets its OWN per-session observation proxy and
+     * is attested exactly like the primary target (loopback only). It
+     * widens WHERE traffic is witnessed, never WHAT counts as proof: a
+     * test-code request on a declared origin is still `test-code` and
+     * still cannot satisfy a UI claim. An undeclared origin is still
+     * reported as an unrouted origin, never silently passed.
+     *
+     * ABSENT = nothing extra declared, byte for byte, digests included:
+     * the key lives in `.gateforge.yml`, so the list is inside the
+     * owner-approved policy digest like every other declaration there — a
+     * candidate cannot widen its own app origins without the owner
+     * repinning the approved revision.
+     */
+    additionalAppOrigins: z
+      .array(
+        z
+          .string()
+          .regex(
+            /^[A-Za-z_][A-Za-z0-9_]*$/,
+            'additionalAppOrigins entries are ENVIRONMENT VARIABLE NAMES (e.g. E2E_PLATFORM_BASE_URL), not base URLs',
+          ),
+      )
+      .default([]),
     /** Plugin set: subprocess (GPP/3) and in-process detectors. */
     plugins: z.array(ConfigPluginSchema),
     /** Path to the policies YAML document. */
@@ -588,6 +621,13 @@ export const GateforgeConfigSchema = z
       .object({
         /** Upper bound for a single witness call, in seconds. */
         maxDurationSeconds: z.number().int().min(1),
+        /**
+         * Wall-clock bound for vitest/cypress `list`/collection children
+         * during catalog construction and test-gates enumeration (seconds).
+         * ABSENT = 120s (the historical default). Large monorepo workspaces
+         * need a higher value so enumeration completes before the gate runs.
+         */
+        enumerationTimeoutSeconds: z.number().int().min(1).max(3600).optional(),
       })
       .strict(),
     /** Clock selection: system time, or a fixed instant for determinism. */

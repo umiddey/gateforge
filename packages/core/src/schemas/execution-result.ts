@@ -208,6 +208,10 @@ export const ExecutionResultSchema = z
     planned: z.array(PlannedInstanceSchema),
     /** The executed instance outcomes (reporter data = input only). */
     outcomes: z.array(ExecutedOutcomeSchema),
+    /** Distinct executed tests, excluding skipped/fixme outcomes. */
+    executedTests: z.number().int().nonnegative().optional(),
+    /** Distinct tests with at least one supervisor-issued witness session. */
+    measuredTests: z.number().int().nonnegative().optional(),
     /**
      * 64-hex digest over the expected set the witness registered BEFORE
      * the run (enforcement-review fix 2d; additive). Present only when

@@ -36,8 +36,6 @@ import type {
   SessionPageObserverFlushRequest,
   SessionResolveRequest,
   SessionResolveResponse,
-  SessionDirectExchangesRequest,
-  SessionDirectExchangesResponse,
 } from '../witness/types.js';
 
 export type { SessionPageObserverFlushRequest };
@@ -205,15 +203,6 @@ export class WitnessClient {
     return this.request<SessionPageOriginResponse>('/sessions/page-origins', request);
   }
 
-  /**
-   * Reports direct API exchanges for run-scoped diagnosis only. Direct
-   * exchanges are never attributed as UI evidence and never satisfy a claim.
-   */
-  async reportSessionDirectExchanges(
-    request: SessionDirectExchangesRequest,
-  ): Promise<SessionDirectExchangesResponse> {
-    return this.request<SessionDirectExchangesResponse>('/sessions/direct-exchanges', request);
-  }
 
   /** POST /sessions/page-observer registers the fixture-launched browser with the witness. */
   async registerPageObserver(request: SessionPageObserverRequest): Promise<{ registered: true }> {

@@ -28,6 +28,7 @@ import type {
   RunnerExecutionEnvelope,
   RunnerInstanceOutcome,
 } from '@gate-forge/core';
+import { parseRunnerLogicalKey, runnerLogicalKey } from '@gate-forge/core';
 import type {
   RunnerAdapter,
   RunnerChildEnv,
@@ -39,7 +40,8 @@ import type {
   RunnerTestIdentity,
 } from '@gate-forge/witness/adapter';
 import { ENV_APP_BASE_URL, ENV_RUN_ID, ENV_RUN_TOKEN, ENV_STATE_DIR, ENV_WITNESS_URL } from '@gate-forge/witness/constants';
-import { buildWitnessedSessionRunnerEnv } from './runner-env.js';
+import { buildWitnessedSessionRunnerEnv, copyRunnerTestHarnessEnv } from './runner-env.js';
+import { stripGateforgeAmbient } from './supervised-run.js';
 import { untrustedEnv } from './reconcile.js';
 import { VITEST_END_BARRIER_ENV } from '../vitest/reporter.js';
 
@@ -96,6 +98,11 @@ export interface VitestRunnerAdapterOptions {
   witness?: { url?: string; token?: string; appBaseUrl?: string };
   /** Explicit vitest CLI entry (absolute `vitest.mjs` or a bin name). */
   vitestEntry?: string;
+  /**
+   * Wall-clock bound for bounded vitest CLI children (`list`, …).
+   * ABSENT = 120_000ms.
+   */
+  enumerationTimeoutMs?: number;
 }
 
 /**
@@ -271,11 +278,11 @@ export class VitestRunnerAdapter implements RunnerAdapter<VitestJsonReport | nul
       cwd: request.cwd,
       env: buildWitnessedSessionRunnerEnv(
         {
-          [ENV_WITNESS_URL]: this.options.witness?.url ?? process.env[ENV_WITNESS_URL] ?? '',
-          [ENV_RUN_TOKEN]: this.options.witness?.token ?? process.env[ENV_RUN_TOKEN] ?? '',
+          [ENV_WITNESS_URL]: this.options.witness?.url ?? '',
+          [ENV_RUN_TOKEN]: this.options.witness?.token ?? '',
           [ENV_STATE_DIR]: request.stateDir,
           [ENV_RUN_ID]: request.runId,
-          [ENV_APP_BASE_URL]: this.options.witness?.appBaseUrl ?? process.env[ENV_APP_BASE_URL] ?? '',
+          [ENV_APP_BASE_URL]: this.options.witness?.appBaseUrl ?? '',
           // The pack reporter's end-barrier TEST SEAM, read from the
           // ambient environment like the other non-secret run wiring
           // above: unset in every real run, and inert when set except
@@ -283,7 +290,7 @@ export class VitestRunnerAdapter implements RunnerAdapter<VitestJsonReport | nul
           // any `testEnd` (see ../vitest/reporter.ts).
           [VITEST_END_BARRIER_ENV]: process.env[VITEST_END_BARRIER_ENV] ?? '',
         },
-        process.env,
+        stripGateforgeAmbient(process.env),
       ),
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -405,7 +412,7 @@ export class VitestRunnerAdapter implements RunnerAdapter<VitestJsonReport | nul
     }
     const exitDetail = vitestExitIncompleteDetail(raw.processExit);
     const outcomes: RunnerInstanceOutcome[] = rows.map((entry) => ({
-      logicalKey: `${entry.identity.file}#${entry.identity.titlePath.join('>')}`,
+      logicalKey: runnerLogicalKey(entry.identity.file, entry.identity.titlePath),
       project: null,
       frameworkId: entry.frameworkId,
       status:
@@ -473,7 +480,9 @@ export class VitestRunnerAdapter implements RunnerAdapter<VitestJsonReport | nul
    * the witness URL out of reach of the repository being gated. The
    * ambient `GATEFORGE_REPORTER_FAIL_RUN` the old merge carried is
    * stripped by the same rule, so the list child cannot be armed to
-   * fail a run it never reports.
+   * fail a run it never reports. Test-harness variables (pytest/cypress
+   * paths, …) are copied back in so `describe.skipIf` gates the same
+   * tests at list time as at execution time.
    */
   private spawnVitest(
     cwd: string,
@@ -484,15 +493,17 @@ export class VitestRunnerAdapter implements RunnerAdapter<VitestJsonReport | nul
       let stdout = '';
       let stderr = '';
       let timedOut = false;
+      const listEnv = untrustedEnv(process.env);
+      copyRunnerTestHarnessEnv(process.env, listEnv as Record<string, string>);
       const child = spawn(entry.command, [...entry.prefix, ...args], {
         cwd,
-        env: untrustedEnv(process.env),
+        env: listEnv,
         stdio: ['ignore', 'pipe', 'pipe'],
       });
       const timer = setTimeout(() => {
         timedOut = true;
         child.kill('SIGKILL');
-      }, 120_000);
+      }, this.options.enumerationTimeoutMs ?? 120_000);
       child.stdout?.on('data', (chunk: Buffer) => {
         stdout += chunk.toString('utf8');
       });
@@ -552,6 +563,11 @@ interface TestIdentityKey {
   readonly titlePath: string[];
 }
 
+/** Drops empty describe/title segments (vitest sometimes emits blanks). */
+function normalizeTitlePath(segments: readonly string[]): string[] {
+  return segments.filter((segment) => segment.length > 0);
+}
+
 /**
  * The identity of one jest-compatible assertion row, or null when the
  * row carries no attributable identity (a row without a suite file or
@@ -560,9 +576,9 @@ interface TestIdentityKey {
 function vitestIdentityOf(file: string, row: VitestAssertionRow): TestIdentityKey | null {
   if (file === '' || typeof row.title !== 'string' || row.title === '') return null;
   const ancestors = Array.isArray(row.ancestorTitles)
-    ? row.ancestorTitles.filter((title): title is string => typeof title === 'string')
+    ? row.ancestorTitles.filter((title): title is string => typeof title === 'string' && title.length > 0)
     : [];
-  return { file, titlePath: [...ancestors, row.title] };
+  return { file, titlePath: normalizeTitlePath([...ancestors, row.title]) };
 }
 
 /** Parses the `vitest list --json` document into identities. */
@@ -581,16 +597,16 @@ function parseVitestListing(stdout: string, cwd: string): RunnerTestIdentity[] |
     if (typeof record.name !== 'string' || typeof record.file !== 'string') continue;
     const file = repoPosix(record.file);
     const relativeFile = relative(cwd, file).split('\\').join('/');
-    const titlePath = record.name.split(' > ');
+    const titlePath = normalizeTitlePath(record.name.split(' > '));
     tests.push({
-      logicalKey: `${relativeFile}#${titlePath.join('>')}`,
+      logicalKey: runnerLogicalKey(relativeFile, titlePath),
       project: null,
       file: relativeFile,
       titlePath,
       blockingAnnotations: [],
       // The pack reporter spools `<file>#<title path>` — registration
       // must name the same id.
-      frameworkId: `${relativeFile}#${titlePath.join('>')}`,
+      frameworkId: runnerLogicalKey(relativeFile, titlePath),
     });
   }
   return tests;
@@ -617,12 +633,10 @@ function parseVitestReport(report: string): VitestJsonReport {
  *   TestIdentityKey | null: the file and title path, or null.
  */
 function vitestIdentityKeyOf(logicalKey: string): TestIdentityKey | null {
-  const hash = logicalKey.indexOf('#');
-  if (hash <= 0) return null;
-  const file = logicalKey.slice(0, hash);
-  const titlePath = logicalKey.slice(hash + 1);
-  if (file === '' || titlePath === '' || titlePath.includes('#')) return null;
-  return { file, titlePath: titlePath.split('>') };
+  const parsed = parseRunnerLogicalKey(logicalKey);
+  const titlePath = normalizeTitlePath(parsed.titlePath);
+  if (parsed.file === '' || titlePath.length === 0) return null;
+  return { file: parsed.file, titlePath };
 }
 
 /**

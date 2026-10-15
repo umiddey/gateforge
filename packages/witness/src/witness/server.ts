@@ -161,6 +161,7 @@ import {
   BehaviorCatalogSchema,
   BEHAVIOR_CASE_KIND,
   enumerationDigestOf,
+  httpExchangeKind,
   interpretObservedPath,
   pathMatchesShape,
   recordIdOf,
@@ -185,8 +186,6 @@ import {
   OBSERVED_KIND,
   PERSISTENCE_KIND,
   RUN_HEADER,
-  DIRECT_CHANNEL,
-  DIRECT_EXCHANGES_CAP,
   VERIFIER_HEADER,
 } from '../constants.js';
 import { PageObserverRegistrationError, registerPageObserver, sweepPageVisits } from './page-observer-registration.js';
@@ -295,7 +294,8 @@ import { OBSERVE_CHANNEL, OBSERVED_E2E_TEST_KIND, SERVER_CHANNEL, SERVER_E2E_TES
 import { QueueObserverError } from '../queue/observer.js';
 import { driveTaskDelivery, TaskDriverError, type TaskDeliverAction } from './task.js';
 
-const MAX_BODY_BYTES = 1024 * 1024;
+/** Supervisor JSON bodies (expected-set, behavior catalog, run context). */
+const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const OBLIGATION_ID_PATTERN = /^[^:]+:.+$/;
 /**
  * Bounded response snapshot the observation proxy keeps per forwarded
@@ -523,6 +523,25 @@ interface CaseExecution {
   detail: string | null;
 }
 
+/**
+ * One attested app origin an observation proxy can front: the upstream
+ * base URL, the logical hostname the browser addresses, and every loopback
+ * address that hostname resolved to. The primary `proxyTarget` and every
+ * declared additional origin are BOTH this shape, so a session's per-origin
+ * proxies are built by one code path rather than a primary path plus a
+ * parallel second one.
+ */
+interface ProxyOrigin {
+  /** The browser-facing origin the fixture rewrites onto this proxy. */
+  appOrigin: string;
+  /** The attested loopback base URL requests are forwarded to. */
+  baseUrl: string;
+  /** The logical hostname the proxy's published URL carries. */
+  host: string;
+  /** Every loopback address the hostname resolved to, all on one port. */
+  bindHosts: string[];
+}
+
 /** Running witness state. */
 interface WitnessState {
   options: Required<
@@ -535,6 +554,14 @@ interface WitnessState {
   proxyHost: string;
   /** Every loopback address the app hostname resolved to, served by every proxy. */
   proxyBindHosts: string[];
+  /**
+   * Every origin this run proxies to, primary first (the declared
+   * `proxyTarget`), then one entry per declared additional app origin.
+   * Each carries its OWN bind hosts: the browser-facing hostname differs
+   * per app, and a proxy published under the wrong hostname would answer
+   * with the wrong `Host` header.
+   */
+  proxyOrigins: ProxyOrigin[];
   classifications: Record<string, Classification>;
   ledger: Map<string, IssuedRecord>;
   /**
@@ -1016,19 +1043,21 @@ async function closeProxyListeners(servers: Server[]): Promise<void> {
 }
 
 /**
- * Starts one loopback reverse proxy forwarding to the run's
- * attested proxy target. `sessionId` names the session the port belongs
- * to (null = the shared unattributed proxy): every exchange completing
- * on this port is recorded as an engine observation stamped with that
- * session id and the witness-monotonic completion tick.
+ * Starts one loopback reverse proxy forwarding to ONE attested app origin.
+ * `sessionId` names the session the port belongs to (null = the shared
+ * unattributed proxy): every exchange completing on this port is recorded
+ * as an engine observation stamped with that session id and the
+ * witness-monotonic completion tick.
  *
- * The proxy listens on EVERY loopback address the app hostname
- * resolved to, all on ONE port: a browser tries every resolved
- * address, but a Node-only client (Playwright's APIRequestContext)
- * connects to the single address its resolver picks.
+ * The proxy listens on EVERY loopback address that origin's hostname
+ * resolved to, all on ONE port: a browser tries every resolved address,
+ * but a Node-only client (Playwright's APIRequestContext) connects to the
+ * single address its resolver picks. A session with several declared app
+ * origins gets one of these per origin, all attributed to the SAME session.
  *
  * Args:
  *   state: running witness state.
+ *   origin: the attested app origin this proxy fronts.
  *   sessionId: owning session id, or null for the shared proxy.
  *
  * Returns:
@@ -1039,10 +1068,11 @@ async function closeProxyListeners(servers: Server[]): Promise<void> {
  */
 async function startObservedProxy(
   state: WitnessState,
+  origin: ProxyOrigin,
   sessionId: string | null,
   chaosSession: string,
 ): Promise<ObservedProxy> {
-  const proxyTargetUrl = new URL(state.options.proxyTarget as string);
+  const proxyTargetUrl = new URL(origin.baseUrl);
   // One scheduler per proxy port: a session's `k` and its recorded
   // schedule are its own, so two tests in one run can never shift each
   // other's timing. `chaosSession` is the supervisor-issued test id
@@ -1078,7 +1108,28 @@ async function startObservedProxy(
       collectionRoutes = collectionReadRoutes(state, sessionId);
     }
     if (collectionRoutes.size === 0) return null;
-    return collectionRoutes.get(`${method} ${path}`) ?? null;
+    let matched: CollectionRoute | null = null;
+    for (const [route, candidate] of collectionRoutes) {
+      const separator = route.indexOf(' ');
+      if (route.slice(0, separator) !== method) continue;
+      if (matchObserveTemplate(path, route.slice(separator + 1)) === null) continue;
+      if (matched === null) {
+        matched = candidate;
+        continue;
+      }
+      const agrees =
+        matched.shape !== null &&
+        candidate.shape !== null &&
+        (matched.shape.rowsKey ?? null) === (candidate.shape.rowsKey ?? null) &&
+        matched.shape.idKey === candidate.shape.idKey;
+      if (!agrees) {
+        return {
+          shape: null,
+          declarations: [...matched.declarations, ...candidate.declarations],
+        };
+      }
+    }
+    return matched;
   };
   // One request handler shared by EVERY listener of this
   // proxy: each loopback address gets its own Server
@@ -1318,9 +1369,8 @@ async function startObservedProxy(
       forward.end();
     });
   };
-  // ONE port for every loopback address the app hostname
+  // ONE port for every loopback address THIS ORIGIN's hostname
   // resolves to: the first listener asks the OS for a free
-  // port and the rest share it. A browser tries every
   // resolved address, but a Node-only client (Playwright's
   // APIRequestContext) connects to the single address its
   // resolver picks, so every loopback address must answer
@@ -1332,7 +1382,7 @@ async function startObservedProxy(
     const servers: Server[] = [];
     let port = 0;
     try {
-      for (const bindHost of state.proxyBindHosts) {
+      for (const bindHost of origin.bindHosts) {
         const server = createServer(proxyHandler);
         await new Promise<void>((resolveListen, rejectListen) => {
           server.once('error', rejectListen);
@@ -1356,7 +1406,7 @@ async function startObservedProxy(
         (error as NodeJS.ErrnoException | null)?.code !== 'EADDRINUSE'
       ) {
         throw new WitnessStartupError(
-          `observation proxy failed to bind '${state.proxyHost}': ${
+          `observation proxy failed to bind '${origin.host}': ${
             error instanceof Error ? error.message : String(error)
           }`,
         );
@@ -1367,23 +1417,30 @@ async function startObservedProxy(
     }
   }
   // Unreachable: every attempt returns or throws above.
-  throw new WitnessStartupError(`observation proxy failed to bind '${state.proxyHost}'`);
+  throw new WitnessStartupError(`observation proxy failed to bind '${origin.host}'`);
 }
 
 /**
- * The base URL of a started observation proxy: the HOSTNAME
+ * The base URL of a started observation proxy: the ORIGIN's HOSTNAME
  * (never an IP, so Host headers stay exactly as the suite
  * addresses them) plus the one port every listener shares.
  */
-function proxyUrlOf(state: WitnessState, proxy: ObservedProxy): string {
-  return `http://${formatHost(state.proxyHost)}:${proxy.port}`;
+function proxyUrlOf(origin: ProxyOrigin, proxy: ObservedProxy): string {
+  return `http://${formatHost(origin.host)}:${proxy.port}`;
 }
 
 /**
- * Starts the DEDICATED session proxy port (plan Phase 1) and stores it
- * on the session. Only called when the run wires an observation proxy;
- * the worker's browser uses this origin for the whole test, so all of
- * its traffic — absolute paths included — is attributed to the session.
+ * Starts the session's DEDICATED observation-proxy ports (plan Phase 1),
+ * one per attested app origin, and stores them on the session. Only called
+ * when the run wires an observation proxy; the worker's browser uses these
+ * origins for the whole test, so all of its traffic — on the primary app
+ * AND on every declared additional origin, absolute paths included — is
+ * attributed to this one session.
+ *
+ * A declared origin that fails to bind closes the ports already opened for
+ * this session first: a half-attributed session (one origin witnessed, one
+ * origin silently absent) is exactly the state this feature exists to
+ * remove, so the session opens with none or with all of them.
  *
  * Args:
  *   state: running witness state.
@@ -1397,17 +1454,43 @@ async function startSessionProxy(state: WitnessState, session: TestSession): Pro
     session.proxyUrl = null;
     return;
   }
-  const proxy = await startObservedProxy(state, session.sessionId, session.testId);
-  session.proxyServer = proxy;
-  session.proxyUrl = proxyUrlOf(state, proxy);
+  const [primary, ...additional] = state.proxyOrigins;
+  if (primary === undefined) {
+    session.proxyUrl = null;
+    return;
+  }
+  // The primary proxy and every additional origin's proxy are retained on
+  // the session so sealing closes every listener, not only the primary.
+  try {
+    const primaryProxy = await startObservedProxy(state, primary, session.sessionId, session.testId);
+    session.proxyServer = primaryProxy;
+    session.proxyUrl = proxyUrlOf(primary, primaryProxy);
+    for (const origin of additional) {
+      const proxy = await startObservedProxy(state, origin, session.sessionId, session.testId);
+      session.additionalProxyServers.push(proxy);
+      session.additionalProxyUrls.push({ appOrigin: origin.appOrigin, proxyUrl: proxyUrlOf(origin, proxy) });
+    }
+  } catch (error) {
+    // Half-attributed is worse than unattributed: close every listener
+    // this session opened (its own primary included) and open no session
+    // at all, so the caller sees the bind failure rather than a session
+    // whose declared origins are only partly witnessed.
+    await stopSessionProxy(session);
+    session.proxyUrl = null;
+    throw error;
+  }
 }
 
 /** Closes one session's dedicated proxy listeners (sealed = channel gone). */
 async function stopSessionProxy(session: TestSession): Promise<void> {
-  const proxy = session.proxyServer;
+  const servers = [
+    ...(session.proxyServer?.servers ?? []),
+    ...session.additionalProxyServers.flatMap((proxy) => proxy.servers),
+  ];
   session.proxyServer = null;
-  if (proxy === null) return;
-  await closeProxyListeners(proxy.servers);
+  session.additionalProxyServers.length = 0;
+  session.additionalProxyUrls.length = 0;
+  if (servers.length > 0) await closeProxyListeners(servers);
 }
 
 /** Detaches the independent browser observer when its test session ends. */
@@ -1428,8 +1511,8 @@ function sealPageObservationRecords(state: WitnessState, sessionId: string, outc
 
 /**
  * Issues the session's ONE claim-free `http.exchanges` record (0.14
- * WP2): the same transport snapshot the per-claim `http.observed`
- * records carry (watermark, dedup, cap, `truncated`), bound to the
+ * WP2): the transport snapshot including assets (watermark, dedup, cap,
+ * `truncated`), bound to the
  * SESSION identity instead of an obligation so no claim can ever select
  * it. Only a session that sealed as PASSED retains its exchanges — the
  * same non-passing rule {@link sealPageObservationRecords} applies to
@@ -1479,8 +1562,8 @@ function readBody(req: IncomingMessage): Promise<unknown> {
     req.on('data', (chunk: string) => {
       raw += chunk;
       if (raw.length > MAX_BODY_BYTES) {
-        rejectBody(new HttpError(400, 'request body too large'));
-        req.destroy();
+        req.pause();
+        rejectBody(new HttpError(413, 'request body too large'));
       }
     });
     req.on('end', () => {
@@ -1527,6 +1610,37 @@ async function enginePageFor(state: WitnessState, sessionId: string): Promise<Pa
     );
   }
   return manager.pageFor(sessionId);
+}
+
+
+/**
+ * The loopback addresses one app origin's observation proxy may bind.
+ *
+ * An app hostname can resolve to SEVERAL loopback addresses (`localhost`
+ * commonly answers ::1 and the IPv4 loopback): a browser tries every one,
+ * but a Node-only client connects to the single address its resolver picks.
+ * Fail closed on any non-loopback answer, and serve every loopback address.
+ *
+ * Args:
+ *   baseUrl: the origin's base URL (attested here, never forwarded off loopback).
+ *   hostname: its logical hostname, with any IPv6 brackets stripped.
+ *   role: what is being attested, for the refusal message.
+ *
+ * Returns:
+ *   string[]: the resolved loopback addresses, deduplicated.
+ *
+ * Raises:
+ *   AttestationError: when the origin is not loopback or resolves to any
+ *     non-loopback address.
+ */
+async function resolveProxyBindHosts(baseUrl: string, hostname: string, role: string): Promise<string[]> {
+  await assertLoopback(baseUrl, role);
+  const resolved = await lookup(hostname, { all: true });
+  const addresses = resolved.map((record) => record.address);
+  if (addresses.length === 0 || !addresses.every(isLoopbackAddress)) {
+    throw new AttestationError(`${role} hostname '${hostname}' resolved to a non-loopback bind address`);
+  }
+  return [...new Set(addresses)];
 }
 
 /**
@@ -1624,25 +1738,39 @@ export async function startWitness(options: WitnessOptions): Promise<WitnessHand
     }
   }
   // Keep the browser-facing logical hostname and the control host separate.
-  // Resolve the proxy bind addresses once, and never bind a non-loopback result.
+  // Resolve the proxy bind addresses once per app origin, and never bind a
+  // non-loopback result.
   const proxyHostname = options.proxyTarget ? new URL(options.proxyTarget).hostname : null;
   const proxyHost = proxyHostname === null
     ? options.host ?? LOOPBACK_HOSTNAME
     : proxyHostname.replace(/^\[|\]$/g, '');
   let proxyBindHosts = proxyHostname === null ? [proxyHost] : [];
   if (proxyHostname !== null) {
-    await assertLoopback(options.proxyTarget as string, 'observation proxy target');
-    // The app hostname can resolve to SEVERAL loopback addresses
-    // (`localhost` commonly answers ::1 and the IPv4 loopback): a
-    // browser tries every one, but a Node-only client connects to
-    // the single address its resolver picks. Fail closed on any
-    // non-loopback answer, and serve every loopback address.
-    const resolved = await lookup(proxyHost, { all: true });
-    const addresses = resolved.map((record) => record.address);
-    if (addresses.length === 0 || !addresses.every(isLoopbackAddress)) {
-      throw new AttestationError(`observation proxy hostname '${proxyHost}' resolved to a non-loopback bind address`);
-    }
-    proxyBindHosts = [...new Set(addresses)];
+    proxyBindHosts = await resolveProxyBindHosts(options.proxyTarget as string, proxyHost, 'observation proxy target');
+  }
+  // Declared ADDITIONAL app origins (0.15.0, `.gateforge.yml`
+  // `additionalAppOrigins`, resolved by the CLI): each is attested with the
+  // SAME loopback discipline as the primary target, because it is a second
+  // upstream the witness will forward browser traffic to. A non-loopback or
+  // mixed-resolution origin refuses startup HERE, before any request
+  // surface exists for it.
+  const proxyOrigins: ProxyOrigin[] = [];
+  if (proxyHostname !== null) {
+    proxyOrigins.push({
+      appOrigin: new URL(options.proxyTarget as string).origin,
+      baseUrl: options.proxyTarget as string,
+      host: proxyHost,
+      bindHosts: proxyBindHosts,
+    });
+  }
+  for (const declared of options.additionalAppOrigins ?? []) {
+    const hostname = new URL(declared).hostname.replace(/^\[|\]$/g, '');
+    proxyOrigins.push({
+      appOrigin: new URL(declared).origin,
+      baseUrl: declared,
+      host: hostname,
+      bindHosts: await resolveProxyBindHosts(declared, hostname, 'declared additional app origin'),
+    });
   }
 
   const state: WitnessState = {
@@ -1661,6 +1789,7 @@ export async function startWitness(options: WitnessOptions): Promise<WitnessHand
     adapters,
     proxyHost,
     proxyBindHosts,
+    proxyOrigins,
     classifications,
     ledger: new Map(),
     preObservations: new Map(),
@@ -1746,8 +1875,12 @@ export async function startWitness(options: WitnessOptions): Promise<WitnessHand
   // by URL rewriting.
   let proxyUrl: string | null = null;
   if (typeof state.options.proxyTarget === 'string' && state.options.proxyTarget.length > 0) {
-    state.proxyServer = await startObservedProxy(state, null, SHARED_PROXY_CHAOS_SESSION);
-    proxyUrl = proxyUrlOf(state, state.proxyServer);
+    const sharedOrigin = state.proxyOrigins[0];
+    if (sharedOrigin === undefined) {
+      throw new WitnessStartupError('observation proxy target resolved to no proxy origin');
+    }
+    state.proxyServer = await startObservedProxy(state, sharedOrigin, null, SHARED_PROXY_CHAOS_SESSION);
+    proxyUrl = proxyUrlOf(sharedOrigin, state.proxyServer);
   }
 
   // DNS binding (loopback-pins): the startup asserts above pinned every
@@ -2621,10 +2754,6 @@ async function handleRequest(
     }
     if (req.method === 'POST' && path === '/sessions/page-origins') {
       await handleSessionPageOrigins(state, res, (await readBody(req)) as Record<string, unknown>);
-      return;
-    }
-    if (req.method === 'POST' && path === '/sessions/direct-exchanges') {
-      await handleSessionDirectExchanges(state, res, (await readBody(req)) as Record<string, unknown>);
       return;
     }
 
@@ -4011,12 +4140,13 @@ async function handleSessionOpen(
     sealedTick: null,
     outcome: null,
     intervals: new Map(),
-    // Filled below: the session's DEDICATED observation-proxy port.
+    // Filled below: the session's DEDICATED observation-proxy ports, one
+    // per attested app origin this run declares.
     proxyUrl: null,
+    additionalProxyUrls: [],
+    additionalProxyServers: [],
     proxyServer: null,
     claims,
-    directExchanges: [],
-    directRecordsIssued: new Set(),
     // The registered expected-set identity this session was minted for
     // (enforcement-review fix 2b); null when no expected set is bound.
     registered:
@@ -4067,6 +4197,7 @@ function sessionView(state: WitnessState, session: TestSession): {
   workerIndex: number;
   openedTick: number;
   proxyUrl: string | null;
+  additionalProxyUrls: Array<{ appOrigin: string; proxyUrl: string }>;
   claims: string[];
 } {
   void state;
@@ -4077,6 +4208,7 @@ function sessionView(state: WitnessState, session: TestSession): {
     workerIndex: session.workerIndex,
     openedTick: session.openedTick,
     proxyUrl: session.proxyUrl,
+    additionalProxyUrls: session.additionalProxyUrls.map((entry) => ({ ...entry })),
     claims: [...session.claims],
   };
 }
@@ -4280,43 +4412,6 @@ async function handleSessionPageOrigins(
   sendJson(res, 200, { recorded: true as const });
 }
 
-/** Stores bounded, deduplicated direct API exchanges on their session. */
-async function handleSessionDirectExchanges(
-  state: WitnessState,
-  res: ServerResponse,
-  body: Record<string, unknown>,
-): Promise<void> {
-  if (!isPlainObject(body)) throw new HttpError(400, 'direct exchange report body must be an object');
-  const session = requireOpenSession(state, body);
-  const reported = body['exchanges'];
-  if (!Array.isArray(reported) || reported.length === 0) {
-    throw new HttpError(400, 'direct exchange report requires at least one exchange');
-  }
-  const exchanges = reported.map((item) => {
-    if (
-      !isPlainObject(item) ||
-      typeof item['method'] !== 'string' ||
-      !/^[A-Z]+$/.test(item['method']) ||
-      typeof item['url'] !== 'string' ||
-      item['url'].length === 0 ||
-      typeof item['status'] !== 'number' ||
-      !Number.isInteger(item['status']) ||
-      item['status'] < 100 ||
-      item['status'] > 599
-    ) {
-      throw new HttpError(400, 'each direct exchange must have an uppercase method, URL, and HTTP status');
-    }
-    return { method: item['method'], url: item['url'], status: item['status'] };
-  });
-  for (const exchange of exchanges) {
-    if (session.directExchanges.some((prior) =>
-      prior.method === exchange.method && prior.url === exchange.url && prior.status === exchange.status
-    )) continue;
-    if (session.directExchanges.length >= DIRECT_EXCHANGES_CAP) break;
-    session.directExchanges.push(exchange);
-  }
-  sendJson(res, 200, { recorded: true as const, kept: session.directExchanges.length });
-}
 
 
 /**
@@ -5138,6 +5233,29 @@ async function takePreObservation(
 }
 
 /**
+ * Whether the ledger holds TEST evidence: any issued record other than
+ * the single run-level OpenAPI metadata record (kind `http.openapi`,
+ * testId `run`) that binding a response-shape run seals. That record is
+ * run metadata sealed at bind time — BEFORE the supervisor drain
+ * registers its PRE-run declarations — so the PRE-run gates must not
+ * treat it as "the run already happened". Any other record (exchanges,
+ * observations, persistence, claims) is real test evidence and counts.
+ *
+ * Args:
+ *   state: running witness state.
+ *
+ * Returns:
+ *   boolean: true when the ledger holds at least one non-metadata record.
+ */
+function hasTestEvidenceRecord(state: WitnessState): boolean {
+  for (const record of state.ledger.values()) {
+    if (record.kind === HTTP_OPENAPI_KIND && record.testId === 'run') continue;
+    return true;
+  }
+  return false;
+}
+
+/**
  * `POST /runs/server-e2e-declarations` — SUPERVISOR ONLY (verifier key;
  * the same authority as `POST /runs/expected-set`): registers the
  * obligation ids the trusted mapping layer declared kind `server-e2e`.
@@ -5189,7 +5307,7 @@ async function handleServerE2eDeclarations(
     });
     return;
   }
-  if (state.ledger.size > 0 || state.sessions.size > 0 || state.serverPreObservations.size > 0) {
+  if (hasTestEvidenceRecord(state) || state.sessions.size > 0 || state.serverPreObservations.size > 0) {
     sendJson(res, 409, {
       error:
         'witness already issued evidence or holds open sessions; server-e2e declarations must be ' +
@@ -5252,7 +5370,7 @@ async function handleObserveDeclarations(
     });
     return;
   }
-  if (state.ledger.size > 0 || state.sessions.size > 0) {
+  if (hasTestEvidenceRecord(state) || state.sessions.size > 0) {
     sendJson(res, 409, {
       error:
         'witness already issued evidence or holds open sessions; observe declarations must be ' +
@@ -5415,7 +5533,7 @@ async function observeListEntities(
 function matchObserveTemplate(observedPath: string, template: string): { id: string | null } | null {
   const segments = template.split('/').filter((segment) => segment.length > 0);
   const idIndex = segments.indexOf('{id}');
-  const canonical = segments.map((segment) => (segment === '{id}' ? '{}' : segment)).join('/');
+  const canonical = segments.map((segment) => (segment === '{id}' || segment.startsWith(':') ? '{}' : segment)).join('/');
   if (!pathMatchesShape(observedPath, canonical.startsWith('/') ? canonical : `/${canonical}`)) {
     return null;
   }
@@ -5695,9 +5813,10 @@ function attributeCreatedEntity(
  * stays blocking through verdicts, which is the honest outcome).
  *
  * Per obligation (`<resourceId>:persistence:<op>`):
- * - adapter binding + before-snapshot must exist (else typed note);
- * - exactly one 2xx session exchange must match the binding (zero →
- *   missing-traffic note; several → ambiguity note);
+ * - exactly one 2xx session exchange must match the binding for
+ *   create/update/delete; reads may match repeated exchanges only when
+ *   each resolves to the same entity, consuming every matching exchange
+ *   single-use (zero → missing-traffic note; disagreement → ambiguity);
  * - create attributes its id to the response the witness proxied,
  *   verified against the after-list (a concurrent observed create
  *   named by its OWN response is not ambiguity; a new entity no
@@ -5754,18 +5873,8 @@ async function handleObserveFinalize(
   // transport record carries. Persistence-vs-persistence consumption is
   // untouched: it still matches against the LIVE log, so one exchange
   // can never credit two persistence claims.
-  if (session.directExchanges.length > 0) {
-    for (const claimId of session.claims) {
-      if (session.directRecordsIssued.has(claimId)) continue;
-      issueRecord(state, claimId, HTTP_OBSERVED_KIND, session.testId, {
-        channel: DIRECT_CHANNEL,
-        exchanges: session.directExchanges.map((exchange) => ({ ...exchange })),
-      }, 'engine-observed');
-      session.directRecordsIssued.add(claimId);
-    }
-  }
 
-  const transport = transportSnapshot(state, session);
+  const transport = transportSnapshot(state, session, false);
   const claims = session.claims.filter((claim) => state.observeDeclarations?.has(claim));
   for (const claimId of claims) {
     const outcome = await finalizeObserveClaim(state, session, claimId, transport);
@@ -5835,13 +5944,15 @@ interface TransportExchange {
  * persistence: an exchange that completed before the trusted context
  * bound predates this invocation and never travels. An EMPTY snapshot
  * is a typed `missing-traffic` note at the call site, never a record.
+ * Observe claims exclude assets before dedup/cap; claim-free ledger
+ * snapshots retain them under their existing discipline.
  */
 interface TransportSnapshot {
   readonly exchanges: ReadonlyArray<TransportExchange>;
   readonly truncated: boolean;
 }
 
-function transportSnapshot(state: WitnessState, session: TestSession): TransportSnapshot {
+function transportSnapshot(state: WitnessState, session: TestSession, includeAssets = true): TransportSnapshot {
   const watermark = state.runContext === null ? 0 : state.observedSeqAtBind;
   // key -> position in `exchanges`, so a repeat can upgrade its shape in place.
   const seen = new Map<string, number>();
@@ -5849,6 +5960,7 @@ function transportSnapshot(state: WitnessState, session: TestSession): Transport
   let truncated = false;
   for (const exchange of state.observed) {
     if (exchange.sessionId !== session.sessionId || exchange.seq <= watermark) continue;
+    if (!includeAssets && httpExchangeKind(exchange.fetchDest) === 'asset') continue;
     const key = `${exchange.method} ${exchange.path} ${String(exchange.status)} ${exchange.initiator ?? 'page'} ${exchange.fetchDest ?? ''} ${exchange.resourceType ?? ''}`;
     const at = seen.get(key);
     if (at !== undefined) {
@@ -5882,7 +5994,7 @@ function transportSnapshot(state: WitnessState, session: TestSession): Transport
  * Applies the SAME snapshot discipline `transportSnapshot` enforces —
  * dedup by `(method, url, status)`, cap at {@link OBSERVED_EXCHANGES_CAP}
  * with `truncated: true` past the cap — to an already-captured exchange
- * list (the page sweep's visits).
+ * list. Ledger callers retain assets; Observe callers must exclude them.
  */
 function cappedExchangeSnapshot(
   exchanges: ReadonlyArray<{
@@ -5893,11 +6005,13 @@ function cappedExchangeSnapshot(
     resourceType?: string | null;
     resourceTypeConflict?: boolean;
   }>,
+  includeAssets = true,
 ): TransportSnapshot {
   const seen: Record<string, true> = Object.create(null) as Record<string, true>;
   const kept: TransportExchange[] = [];
   let truncated = false;
   for (const exchange of exchanges) {
+    if (!includeAssets && httpExchangeKind(exchange.fetchDest) === 'asset') continue;
     const key = `${exchange.method} ${exchange.url} ${String(exchange.status)} ${exchange.fetchDest ?? ''} ${exchange.resourceType ?? ''}`;
     if (key in seen) continue;
     seen[key] = true;
@@ -5989,13 +6103,53 @@ async function finalizeObserveClaim(
         zeroTrafficCause(state, session),
     );
   }
+  let exchangesToConsume: ObservedExchange[] = [];
   if (matches.length > 1) {
-    return note(
-      `${String(matches.length)} matching ${binding.method} ${binding.path} exchanges — ambiguous, ` +
-        'refusing to pick one (seed through untracked channels so the mutation stands alone)',
-    );
+    if (operation !== 'read') {
+      return note(
+        `${String(matches.length)} matching ${binding.method} ${binding.path} exchanges — ambiguous, ` +
+          'refusing to pick one (seed through untracked channels so the mutation stands alone)',
+      );
+    }
+    const resolved = new Set<string>();
+    if (binding.collection === undefined) {
+      for (const match of matches) {
+        if (match.id === null) {
+          return note('the observe binding carries no {id} segment for a non-create operation');
+        }
+        const key = beforeKeyForSegment(snapshot.before, match.id);
+        if (key === null) {
+          return note(
+            `entity '${match.id}' was not in the session-open snapshot — observe binds {id} ` +
+              'against witness-held before-state, never against suite-declared ids',
+          );
+        }
+        resolved.add(key);
+      }
+      if (resolved.size > 1) return note(`${resolved.size} distinct entity ids among repeated read exchanges — ambiguous`);
+    } else {
+      for (const match of matches) {
+        const rows = match.exchange.collectionRows;
+        if (match.exchange.collectionConflict !== undefined || rows === undefined || rows.error !== null ||
+            rows.rowsKey !== (binding.collection.rowsKey ?? null) || rows.idKey !== binding.collection.idKey) {
+          return note(`${matches.length} repeated collection read exchanges could not all resolve to the same entity — ambiguous`);
+        }
+        const held: Record<string, true> = Object.create(null) as Record<string, true>;
+        for (const id of rows.ids) {
+          const key = beforeKeyForSegment(snapshot.before, String(id));
+          if (key !== null) held[key] = true;
+        }
+        const returned = Object.keys(held).sort(compareStrings);
+        if (returned.length === 0) {
+          return note(`${matches.length} repeated collection read exchanges could not all resolve to the same entity — ambiguous`);
+        }
+        resolved.add(returned[0] as string);
+      }
+      if (resolved.size > 1) return note(`${resolved.size} distinct entities among repeated collection reads — ambiguous`);
+    }
+    exchangesToConsume = matches.map((match) => match.exchange);
   }
-  const matched = matches[0] as { exchange: ObservedExchange; id: string | null };
+  const matched = matches[matches.length - 1] as { exchange: ObservedExchange; id: string | null };
   // Resolve the entity id: create attributes the entity to the response
   // the witness proxied (verified against the witness's own after-list,
   // so a concurrent observed create cannot make it ambiguous);
@@ -6028,8 +6182,8 @@ async function finalizeObserveClaim(
     const conflict = matched.exchange.collectionConflict;
     if (conflict !== undefined) {
       return note(
-        `this session claims more than one read on ${binding.method} ${binding.path} and they declare ` +
-          `DIFFERENT collection shapes (${conflict.join(' vs ')}) — the witness parses that response for ` +
+        `this session claims more than one read on ${binding.method} ${binding.path} and declares DIFFERENT ` +
+          `collection shapes (different declared collection shapes: ${conflict.join(' vs ')}) — the witness parses that response for ` +
           'neither of them, so no record is issued',
       );
     }
@@ -6122,9 +6276,12 @@ async function finalizeObserveClaim(
   // origin, witnessed trust; the suite-driven-browser distinction rides
   // `channel: 'observe'`, which the grader keys off explicitly.
   const issued = issueRecord(state, claimId, OBSERVED_KIND, session.testId, payload, 'engine-observed');
-  // Single-use: the matched exchange can never credit another claim.
-  const consumed = state.observed.indexOf(matched.exchange);
-  if (consumed !== -1) state.observed.splice(consumed, 1);
+  // Single-use: agreeing repeated read exchanges are consumed together.
+  const consumedExchanges = exchangesToConsume.length === 0 ? [matched.exchange] : exchangesToConsume;
+  for (const exchange of consumedExchanges) {
+    const consumed = state.observed.indexOf(exchange);
+    if (consumed !== -1) state.observed.splice(consumed, 1);
+  }
   session.activity += 1;
   return {
     record: { obligationId: claimId, recordId: issued.recordId, operation, entityId: read.entityId },
@@ -6797,7 +6954,7 @@ async function handleRunContext(
     return;
   }
   if (
-    state.ledger.size > 0 ||
+    hasTestEvidenceRecord(state) ||
     state.observed.length > 0 ||
     state.preObservations.size > 0 ||
     state.serverPreObservations.size > 0 ||

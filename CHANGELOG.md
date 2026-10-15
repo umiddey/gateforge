@@ -1,5 +1,225 @@
 # Changelog
 
+## 0.15.0
+
+- **Fixed: github-pr base ref in detached PR checkouts:** the changed-file
+  provider and the `test-gates` carry-forward resolver now resolve
+  `GITHUB_BASE_REF` as the fetched remote ref `refs/remotes/origin/<base>`
+  first and as a local `<base>` only as a fallback — a checkout of the PR
+  head SHA has the base only as the remote-tracking ref, the gate used to
+  fail with `fatal: Not a valid object name <base>`, and a stale local
+  branch of the same name no longer shadows the fetched base. The value
+  must be a valid branch name (`git check-ref-format --branch`): revision
+  syntax and surrounding whitespace fail closed, as does neither candidate
+  resolving. The witnessed CI template drops its `GITHUB_BASE_REF` write
+  to `$GITHUB_ENV` and passes the branch name to the shell through `env:`;
+  the base `git fetch` and `GATEFORGE_CI_BASE_SHA` stay.
+- **Candidate fast-path tree binding:** `check --candidate-commit` reuses a
+  receipt only when the sealed candidate tree matches the commit tree or
+  every extra sealed path is git-ignored (`git check-ignore`); non-ignored
+  worktree extras no longer satisfy containment alone.
+- **Candidate-tree cache exclusions:** `.gateforge/ci-witnessed/` and
+  runner cache directories (`.vite`, `.vite-temp`, `.vitest`, `.turbo`) are
+  omitted from the sealed tree only when Git ignores that path; tracked or
+  untracked non-ignored bytes there are bound.
+- **Witness shutdown:** `test-gates` returns immediately when a spawned
+  witness has already exited instead of waiting the full 30 s SIGKILL grace
+  and misreporting SIGKILL; attestation fetch parse failures are labeled
+  `(parse)` separately from `(transport)`.
+- **GitLab CI engine pin:** The committed `.gateforge/ci/gitlab-gateforge.yml`
+  template is regenerated for 0.15.0 so `GATEFORGE_VERSION` matches the
+  installed CLI (same contract as the GitHub strict workflow manifest pin).
+- **Repository hygiene:** `.gitignore` ignores `.gateforge/test-gates/` so
+  local run state does not pollute commits; GitHub strict workflow adds
+  `timeout-minutes` and explicit browser install steps.
+- **Runtime reuse ephemeral list:** Reuse digests omit `.vite-temp` alongside
+  `.vite`, `.vitest`, `.cache`, and `.turbo` under approved reuse roots.
+- **Vitest logical keys with `#` in titles:** Execution no longer rejects
+  enumerated tests whose title path contains `#` (only the first `#` separates
+  file from title path). A self-gate that registered such tests used to finish
+  with zero executed cases and blanket `RUN_INCOMPLETE` grading.
+- **Vitest logical keys with `>` in titles:** Title segments escape literal
+  `>` (e.g. angle brackets in schema test names) so registration, the vitest
+  reporter, and supervision share one reconciliation key instead of splitting
+  on characters inside a test title. Playwright outcomes mapping,
+  catalog reconciliation, Cypress/pytest adapters, and `test-gates` progress
+  filtering now use the same `runnerLogicalKey` helper; pytest named runs
+  decode logical keys with `parseRunnerLogicalKey` instead of splitting on
+  `>`.
+- **Supervised vitest dist rebuild:** The pack's vitest `global-setup` skips
+  the workspace dist rebuild and the post-run dist drift teardown when
+  `GATEFORGE_RUN_TOKEN` or `GATEFORGE_RUN_ID` is set (witnessed-session
+  child), so `gateforge test-gates` (which already builds dists) no longer
+  rewrites them mid-run or fails the runner on unrelated dist churn while
+  the supervisor enforces reuse digests.
+- **Vitest `list` harness parity:** `vitest list` enumeration copies the
+  same test-harness `GATEFORGE_*` variables as execution (`pytest`/`cypress`
+  paths, …), so `describe.skipIf` suites register in the expected set when
+  they will run. Pack global-setup tests import the setup module from
+  TypeScript so list inventory matches execution without a pre-list dist
+  rebuild.
+- **Witnessed session runner env:** `buildWitnessedSessionRunnerEnv` no longer
+  falls back to ambient `GATEFORGE_*` for run wiring; the supervisor-supplied
+  vars are the only source, so nested meta-tests under an outer vitest gate
+  cannot inherit the parent witness URL.
+- **Vitest title paths with empty segments:** Blank `ancestorTitles` entries and
+  stray `>` joins no longer produce empty `titlePath` segments that fail execution
+  result sealing (`ZodError` on `outcomes[].titlePath`).
+- **Playwright catalog gaps on disclaimed files:** Zero-instance parameterized
+  templates and dynamic-title gaps in files the runner never collects stay
+  visible as blocking catalog rows instead of disappearing when native
+  enumeration lists no instances.
+- **Misplaced specs inside a runner `testDir`:** Files the static scan finds
+  under a runner's `testDir` but outside its `testMatch`/`include` are
+  `unclaimed` gaps again (explicit `testIgnore` and paths outside every
+  `testDir` stay `disclaimed`).
+- **Runtime reuse digest and runner caches:** Ephemeral cache directories
+  (`.vite`, `.vitest`, `.cache`, `.turbo`) under a declared reuse root are
+  omitted from the reuse byte digest so parallel supervised runs in the owner
+  workspace do not fail nested `pre-commit`/`test-gates` with “reused
+  dependency bytes changed during the run” when only tooling caches move.
+- **Nested supervised Playwright meta-tests:** `executeSupervisedPlaywright`
+  accepts `ambientEnv` and exports `stripGateforgeAmbient()` so pack tests
+  that spawn their own loopback witness do not inherit the parent
+  `gateforge test-gates` witness URL (which previously sent nested runner
+  reporters to the wrong witness and failed under the full vitest gate).
+- **Supervised Playwright `execute` under an outer gate:** When `ambientEnv` is
+  omitted, `executeSupervisedPlaywright` strips ambient `GATEFORGE_*` wiring
+  unless `vars` already carry the supervisor witness URL, so a parent vitest
+  gate's exported witness URL no longer leaves nested playwright runs with
+  empty outcomes or failed runner binding tests.
+- **Auto-session e2e nested `test-gates`:** Spawns strip the parent gate's
+  ambient `GATEFORGE_*` before starting nested playwright and gateforge runs.
+- **Witness supervisor body limit:** `POST /runs/expected-set` (and other
+  supervisor JSON endpoints) accept bodies up to 8 MiB so large vitest
+  workspace self-gates can register the full enumeration without the witness
+  resetting the connection mid-read. Over-limit bodies answer HTTP 413 instead
+  of aborting the socket.
+- **`witness.enumerationTimeoutSeconds`:** Vitest catalog/enumeration children
+  (`vitest list --json`) honor this optional bound (default 120s, max 3600s).
+  Large workspace suites no longer die as `vitest enumeration exceeded its
+  timeout and was killed` when the owner raises the limit in `.gateforge.yml`.
+- **Vitest workspace file scope:** A root `test.projects[]` workspace config no
+  longer claims every `*.spec` under the repository; only each project's own
+  config selects files. Specs outside a project's `test.include` are disclaimed
+  rather than blocking inventory as phantom configured-runner gaps (Playwright
+  demo journeys in a vitest-monorepo self-gate).
+- **Vitest-configured catalog:** When the configured runner enumerates vitest
+  tests, its rows replace static-scan duplicates (same logical key) instead of
+  failing catalog validation — the runner list is authoritative, like playwright
+  native reconciliation.
+- **Vitest `list` enumeration:** Monorepo globalSetup no longer rebuilds or
+  asserts dist integrity during `vitest list` — inventory-only runs are not test
+  execution, and a gate step that already built workspace dists must not fail
+  enumeration teardown when list spans many projects.
+- Supervised runs that spawn their own witness fetch the live attestation while
+  the witness still serves it, before the graceful stop. The fetch previously ran
+  after the stop, so those runs always reported `live attestation unavailable
+  (transport)` and sealed no live envelope. Re-seal refusals of tampered retained
+  evidence now name the sealed attestation digest check, which runs before the MAC check.
+- A consumer whose UI runs on a SECOND browser app (a platform admin console
+  beside the tenant app) can declare it in `.gateforge.yml` under
+  `additionalAppOrigins`, one ENVIRONMENT VARIABLE NAME per extra origin. The
+  witness opens one additional loopback-attested observation proxy per
+  session and the Playwright fixture rewrites each app origin's requests onto
+  that origin's own proxy, so one test driving two apps keeps one session, one
+  attribution and one exchange ledger instead of passing while every claim on
+  the second app earns nothing. The UI-vs-test-code initiator classification
+  applies on every declared origin, test-code requests still never satisfy a
+  UI claim, an undeclared origin is still reported and still blocks, and
+  resolution fails closed on a declared variable the run does not set. Absent
+  declaration, nothing changes: no proxy, no variable, byte-identical startup.
+  The declaration is inside the owner-approved policy digest, so widening the
+  list is a policy-revision change.
+
+- Automatic witnessed fixture preloads recognize Playwright 1.60's separate
+  worker and loader fork entries as well as 1.58's shared process entry;
+  binding failures fail loud in those children without loading app/helper processes.
+- Witnesses of runs whose bound options request response shapes no longer
+  refuse the supervisor's PRE-run observe and server-e2e declarations with
+  409: the run-level `http.openapi` record sealed at bind time is run
+  metadata, not test evidence, so a fresh witness binds both declaration
+  sets and a response-shape run witnesses its full authorized HTTP ledger.
+  The declaration and run-context gates still refuse after any real test
+  record, open session, pre-observation or in-flight proxy exchange.
+- Witnessed browser routing requires `GATEFORGE_APP_BASE_URL` only when a
+  page or browser context is used, preserving page-free supervised tests
+  and their original integrity diagnostics.
+- Test-owned Playwright API request contexts route app-origin calls through
+  the current session proxy, including redirects, exposing witnessed
+  `httpLedger` rows marked `initiator: test-code` without satisfying UI
+  claims. Non-app origins, setup contexts and page/context-owned request
+  objects remain direct; the obsolete API exchange self-report channel is removed.
+- Playwright reports retain per-test runner-observed UI actions and assertions
+  as a report-only `uiLedger` in full supervised runs as well as selection
+  reports, distinguishing journeys with identical HTTP traffic. Locator-free
+  keyboard and mouse input is retained alongside locator actions and assertions.
+  Signatures ignore source locations and normalize UUIDs/long digit runs;
+  each attempt is capped at 500 unique steps with truncation disclosed.
+- `enforcement doctor` runs repository hooks only with `--hook-mutation`,
+  once in an isolated copy at low priority. Its 120 s deadline kills the
+  whole process tree, avoiding default full-hook workloads and orphaned
+  formatter processes after a timeout.
+- Witnessed Playwright sessions also route pages from consumer-created browser
+  contexts and `browser.newPage()`, including overridden context/page fixtures
+  and popups. Consumer context routes retain the session rewrite; test-scoped
+  hooks are removed at teardown so later contexts cannot reuse a prior session.
+- Supervised Playwright runs with missing/malformed/empty outcomes, or only
+  skipped outcomes and a failed exit, report
+  `RUNNER_STARTUP_FAILED`, the child exit code and the first 20 stderr lines
+  (8192 characters maximum, Gateforge token echoes redacted). JSON reports retain this
+  diagnostic; debug output drains child stderr before returning.
+  Successful all-skipped runs retain their existing execution envelope and
+  are not misclassified as runner startup failures.
+- Playwright config discovery searches two directory levels breadth-first,
+  retaining root-first selection and multiple-config disclosure. Hidden,
+  dependency, build and Python environment directories are pruned at every
+  level; sealed-tree re-sealing uses the same convention.
+- Observe-channel HTTP claim snapshots exclude static assets before deduplication
+  and the 500-exchange cap, using the ledger's existing request classification.
+  Unmatched truncated records stay blocking as missing with a cap diagnostic,
+  rather than blaming an unrelated endpoint; retained matches still satisfy.
+  Claim-free `http.exchanges` ledger snapshots keep their existing semantics.
+- Observe persistence reads match collection responses against parameterized
+  declared routes, and repeated same-entity reads are credited once while
+  consuming every matching exchange. Repeated reads that resolve to different
+  entities remain blocking; create, update and delete still require exactly
+  one matching exchange.
+- Witnessed Playwright runs automatically use the existing Gateforge fixture
+  for consumer `@playwright/test` imports, including CommonJS, ESM, TypeScript,
+  project extensions and root `test.test` calls, without editing specs.
+  Direct API calls remain diagnostics, never browser evidence. Execution results
+  and report execution summaries include `measuredTests` (tests with witness
+  sessions) and `executedTests`; ordinary unwitnessed runs stay unchanged.
+- Session proxy routing yields to consumer context routes, preserving fulfilled
+  stubs and retaining the session rewrite when those handlers continue requests.
+  A later consumer page route that continues directly still takes precedence:
+  its outcome is unchanged, but that request bypasses session attribution.
+- The automatic Playwright preload activates only in the test runner and its
+  forked test processes; inherited options leave application servers and helper
+  Node commands untouched, without loading the fixture or redirecting imports.
+- Automatic root-module forwarding uses a separate test wrapper, preserving the
+  explicit Gateforge fixture's own API when plain and explicit imports coexist.
+- Automatic preload binding failures name the selected runner and underlying
+  cause, and stop the child rather than continuing without witnessed fixtures.
+- Shared CLI stub installs include Playwright's public `test` entry alongside
+  the CLI, so automatic fixture loading exercises the same install shape.
+- Strict supervised result-contract tests pin both `executedTests` and
+  `measuredTests` in the sealed execution result's exact key set.
+- Automatic witnessed sessions also cover the equivalent `playwright/test`
+  entry in CommonJS, ESM and project re-exporting helpers, preserving root
+  test properties and extension hooks without redirecting the plain library.
+- Page-observation diagnostics now describe session-backed observation instead
+  of claiming plain-import tests require an explicit fixture. Clean passing
+  auto-session tests retain their page records under the same witness rules.
+  Twin comparison advice accepts both supported Playwright package imports
+  and the explicit fixture; uninstrumented or zero-traffic twins remain
+  explicitly not compared.
+- ESM `playwright/test` imports preserve that entry's native named exports even
+  when a consumer's `@playwright/test` is a CommonJS-only shim. ESM and CommonJS
+  helpers share the same automatic fixture test wrapper and witness session.
+- **Breaking:** `HTTP_CALL_UNRESOLVED` always blocks the gate; declare the wrapper in `scan.httpClients` or fix the call site — adoption and `http.callFindings: report` no longer forgive it.
+
 ## 0.14.0
 
 Theme: In the witnessed run, Gateforge checks the API calls your UI actually

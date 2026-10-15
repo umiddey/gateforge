@@ -86,6 +86,39 @@ export const RUNNER_SECRET_ENV: readonly string[] = [
 ];
 
 /**
+ * Operator-controlled `GATEFORGE_*` names that gateforge tests read to
+ * locate optional external tools (pytest, Cypress, Redis, Alembic) or the
+ * physical workspace install under nested meta-tests. They carry no witness
+ * authority — unlike run wiring — and must reach vitest/pytest children
+ * even when ambient `GATEFORGE_*` run state is stripped.
+ */
+export const RUNNER_TEST_HARNESS_ENV: readonly string[] = [
+  'GATEFORGE_PYTEST_TEST_PYTHON',
+  'GATEFORGE_CYPRESS_TEST_BIN',
+  'GATEFORGE_TEST_REDIS_URL',
+  'GATEFORGE_ALEMBIC_TEST_ADMIN_URL',
+  'GATEFORGE_ALEMBIC_TEST_PYTHON',
+  'GATEFORGE_PHYSICAL_NODE_MODULES',
+  'GATEFORGE_PHYSICAL_CLI_BIN',
+  'GATEFORGE_TEST_BASELINE_CLI',
+];
+
+const RUNNER_TEST_HARNESS_NAMES = new Set<string>(RUNNER_TEST_HARNESS_ENV);
+
+/** True when `name` is a supervised-runner test harness variable. */
+export function isRunnerTestHarnessEnv(name: string): boolean {
+  return RUNNER_TEST_HARNESS_NAMES.has(name);
+}
+
+/** Copies non-empty harness variables from `from` into `into`. */
+export function copyRunnerTestHarnessEnv(from: NodeJS.ProcessEnv, into: Record<string, string>): void {
+  for (const name of RUNNER_TEST_HARNESS_ENV) {
+    const value = from[name];
+    if (value !== undefined && value !== '') into[name] = value;
+  }
+}
+
+/**
  * Run-state paths that must NEVER reach the runner child through ANY
  * channel (execution-authority fix): worker code that can address the
  * lifecycle spool or the outcomes document can fabricate execution.
@@ -212,6 +245,7 @@ export function buildRunnerChildEnv(
     if (Object.hasOwn(child, name)) continue;
     if (value !== '') child[name] = value;
   }
+  copyRunnerTestHarnessEnv(ambient, child);
   return child;
 }
 
@@ -294,7 +328,7 @@ export function buildWitnessedPytestChildEnv(
   }
   // Run-scoped allowlist from trusted supervision, wins over ambient.
   for (const name of WITNESSED_PYTEST_RUN_ENV) {
-    const value = vars[name] ?? ambient[name];
+    const value = vars[name];
     if (value !== undefined && value !== '') child[name] = value;
   }
   // Non-GATEFORGE supervisor vars (suite-specific wiring) pass through;
@@ -379,14 +413,17 @@ export function buildWitnessedSessionRunnerEnv(
     if (name.startsWith('GATEFORGE_')) continue;
     child[name] = value;
   }
+  // Run wiring is supervisor-supplied only — never inherit ambient
+  // `GATEFORGE_*` (nested meta-tests run under an outer test-gates).
   for (const name of WITNESSED_SESSION_RUN_ENV) {
-    const value = vars[name] ?? ambient[name];
+    const value = vars[name];
     if (value !== undefined && value !== '') child[name] = value;
   }
   for (const [name, value] of Object.entries(vars)) {
     if (name.startsWith('GATEFORGE_')) continue;
     if (value !== '') child[name] = value;
   }
+  copyRunnerTestHarnessEnv(ambient, child);
   return child;
 }
 

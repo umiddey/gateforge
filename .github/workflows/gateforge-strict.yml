@@ -35,6 +35,7 @@ jobs:
   gateforge:
     name: gateforge
     runs-on: ubuntu-24.04
+    timeout-minutes: 120
     # The job is a mechanism. Branch protection and an owner-controlled
     # reusable workflow/ruleset are the enforcement boundary.
     environment: gateforge-protected
@@ -53,24 +54,88 @@ jobs:
           node-version: 24
           cache: npm
 
+      - name: Restore the Cypress binary cache
+        # The cypress participants (runner-cli-e2e) execute the REAL
+        # Cypress binary; the lockfile-pinned npm package alone is not
+        # enough. The Electron download is the slow part, so it is
+        # cached; the lockfile hash keys the cache, so a cypress version
+        # bump invalidates it.
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/Cypress
+          key: cypress-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
       - name: Install locked dependencies
         run: npm ci
 
+      - name: Build workspaces
+        run: npm run build --workspaces --if-present
+
       - name: Assert exact Gateforge engine pin
-        env:
-          GATEFORGE_VERSION: '0.4.1'
         run: |
+          # The CLI reports the version from packages/cli/package.json at runtime,
+          # so that manifest is the exact pin; no hand-maintained literal to drift.
+          expected="$(node -p "require('./packages/cli/package.json').version")"
           actual="$(node_modules/.bin/gateforge --version)"
-          echo "gateforge engine ${actual} (pinned ${GATEFORGE_VERSION})"
-          test "${actual}" = "${GATEFORGE_VERSION}"
+          echo "gateforge engine ${actual} (pinned ${expected})"
+          test -n "${expected}"
+          test "${actual}" = "${expected}"
+
+      - name: Install the suite's browser builds
+        # The supervised vitest suite boots real Playwright browser children
+        # (packages/pack-playwright). CI images need the download plus the
+        # browser system libraries; see example/README.md ("Gateforge first
+        # run") for the exact failure modes without this step.
+        run: npx playwright install --with-deps chromium
+
+      - name: Install the Cypress binary
+        # The cypress participants execute the real Cypress binary that
+        # the lockfile-pinned npm package manages (cached above).
+        # `cypress verify` fails this step when the binary is missing or
+        # unusable, instead of letting the suite skip its cypress cases —
+        # a skip is never coverage.
+        run: |
+          npx cypress install
+          npx cypress verify
+
+      - name: Install the suite's python test runner
+        # The supervised suite executes real pytest participants
+        # (runner-cli-e2e, witnessed-pytest); with no pytest executable on
+        # PATH they skip or fail — and a skip is never coverage. The
+        # versions are pinned to the exact ones the suite is verified
+        # with, and the probes below fail this step when a module did
+        # not install (participants run `python3 -m pytest`, so only the
+        # importable modules matter, not PATH scripts; runner-cli-e2e
+        # routes its pytest httpx traffic through the per-test session
+        # proxy, so httpx must be importable too).
+        run: |
+          python3 -m pip install --break-system-packages pytest==9.1.1 httpx==0.28.1
+          python3 -m pytest --version
+          python3 -c "import httpx; print('httpx', httpx.__version__)"
+
+      - name: Resolve pull-request base ref
+        # The checkout is a detached PR head: no local base branch exists, so
+        # the github-pr provider must diff against the fetched remote ref.
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git fetch --no-tags --quiet origin "$BASE_REF:refs/remotes/origin/$BASE_REF"
 
       - name: Run supervised strict gate
         env:
           GATEFORGE_WITNESS_VERIFIER_KEY: ${{ secrets.GATEFORGE_WITNESS_VERIFIER_KEY }}
           GATEFORGE_APPROVED_POLICY_DIGEST: ${{ secrets.GATEFORGE_APPROVED_POLICY_DIGEST }}
+          # The conditional participants (runner-cli-e2e `describe.skipIf`)
+          # gate on these exact paths: an empty value means the case skips
+          # itself, and a skip is never coverage. CI exports the same
+          # paths the local strict-proof recipe does, so every planned
+          # case executes here too.
+          GATEFORGE_PYTEST_TEST_PYTHON: /usr/bin/python3
+          GATEFORGE_CYPRESS_TEST_BIN: ${{ github.workspace }}/node_modules/.bin/cypress
         run: node_modules/.bin/gateforge test-gates --changed
 
       - name: Check exact candidate receipt
         env:
+          GATEFORGE_WITNESS_VERIFIER_KEY: ${{ secrets.GATEFORGE_WITNESS_VERIFIER_KEY }}
           GATEFORGE_APPROVED_POLICY_DIGEST: ${{ secrets.GATEFORGE_APPROVED_POLICY_DIGEST }}
         run: node_modules/.bin/gateforge check --changed --require-e2e --format json

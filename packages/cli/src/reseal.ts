@@ -35,7 +35,7 @@ import { join, posix, relative, resolve } from 'node:path';
 import picomatch from 'picomatch';
 import ts from 'typescript';
 import { parse as parseYaml } from 'yaml';
-import { CONFIG_SEARCH_PRUNED_DIRS, PLAYWRIGHT_CONFIG_NAMES } from '@gate-forge/pack-playwright';
+import { CONFIG_SEARCH_MAX_DEPTH, isConfigSearchDirectory, PLAYWRIGHT_CONFIG_NAMES } from '@gate-forge/pack-playwright';
 import { sanitizedAuthorityEnv } from './candidate-tree.js';
 import { UsageError } from './errors.js';
 
@@ -866,7 +866,7 @@ function runnerConfigText(
     if (tab < 0) continue;
     const name = entry.slice(tab + 1);
     rootPaths.add(name);
-    if (entry.startsWith('040000 tree ') && CONFIG_SEARCH_PRUNED_DIRS[name] !== true) nested.push(name);
+    if (entry.startsWith('040000 tree ') && isConfigSearchDirectory(name)) nested.push(name);
   }
   let runner = 'playwright';
   if (rootPaths.has('.gateforge.yml')) {
@@ -886,18 +886,32 @@ function runnerConfigText(
     return text === null ? null : { text, directory: '.', name, runner };
   }
   if (runner !== 'playwright' || nested.length === 0) return null;
-  nested.sort();
-  // One bounded listing of immediate children, not one Git process per candidate.
-  const children = run(gitDir, env, ['ls-tree', '--name-only', '-z', treeId, ...nested.map((name) => `${name}/`)]);
-  if (children === null) return null;
-  const paths = new Set(children.split('\0'));
-  for (const directory of nested) {
-    for (const name of PLAYWRIGHT_CONFIG_NAMES) {
-      const path = `${directory}/${name}`;
-      if (!paths.has(path)) continue;
-      const text = run(gitDir, env, ['cat-file', 'blob', `${treeId}:${path}`]);
-      return text === null ? null : { text, directory, name, runner };
+  let directories = nested.sort();
+  for (let depth = 1; depth <= CONFIG_SEARCH_MAX_DEPTH; depth += 1) {
+    // One bounded listing per level, never the full repository tree.
+    const children = run(gitDir, env, ['ls-tree', '-z', treeId, ...directories.map((name) => `${name}/`)]);
+    if (children === null) return null;
+    const paths = new Set<string>();
+    const next: string[] = [];
+    for (const entry of children.split('\0')) {
+      const tab = entry.indexOf('\t');
+      if (tab < 0) continue;
+      const path = entry.slice(tab + 1);
+      paths.add(path);
+      if (entry.startsWith('040000 tree ') && isConfigSearchDirectory(path.slice(path.lastIndexOf('/') + 1))) {
+        next.push(path);
+      }
     }
+    for (const directory of directories) {
+      for (const name of PLAYWRIGHT_CONFIG_NAMES) {
+        const path = `${directory}/${name}`;
+        if (!paths.has(path)) continue;
+        const text = run(gitDir, env, ['cat-file', 'blob', `${treeId}:${path}`]);
+        return text === null ? null : { text, directory, name, runner };
+      }
+    }
+    directories = next.sort();
+    if (directories.length === 0) break;
   }
   return null;
 }

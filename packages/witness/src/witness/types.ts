@@ -34,6 +34,15 @@ export interface SessionCredential {
    */
   proxyUrl: string | null;
   /**
+   * The session's dedicated observation proxies for the run's DECLARED
+   * additional app origins (0.15.0): `{appOrigin, proxyUrl}` per declared
+   * origin, so a suite whose page also drives a second app rewrites that
+   * app's requests onto ITS proxy instead of letting them pass unwitnessed.
+   * Every entry is attributed to THIS session, exactly like `proxyUrl`.
+   * Empty (and absent from older witnesses) for a single-origin run.
+   */
+  additionalProxyUrls?: Array<{ appOrigin: string; proxyUrl: string }>;
+  /**
    * The supervisor-registered obligation claims for this test (Phase 4
    * claim injection): the merged native-annotation + sidecar-mapping
    * claims the orchestrating CLI resolved from the tracked mappings and
@@ -507,7 +516,17 @@ export interface TestSession {
    * an observation proxy; null otherwise.
    */
   proxyUrl: string | null;
-  /** The dedicated proxy listeners (closed when the session seals). */
+  /**
+   * The session's dedicated observation proxies for the run's DECLARED
+   * additional app origins (0.15.0): each maps the app origin the page
+   * requests to the per-session proxy origin that fronts it, so one test
+   * driving two apps keeps one session, one attribution and one ledger.
+   * Empty for a run that declares none.
+   */
+  additionalProxyUrls: Array<{ appOrigin: string; proxyUrl: string }>;
+  /** Additional per-origin proxy listeners (closed when the session seals). */
+  additionalProxyServers: ObservedProxy[];
+  /** The dedicated primary proxy listeners (closed when the session seals). */
   proxyServer: ObservedProxy | null;
   /**
    * Phase 4 claim injection: the mapped obligation claims the supervisor
@@ -516,10 +535,6 @@ export interface TestSession {
    * supervisor writes claims.json from what the witness registered.
    */
   claims: string[];
-  /** Session-owned direct API calls, retained only for non-crediting diagnosis. */
-  directExchanges: Array<{ method: string; url: string; status: number }>;
-  /** Claim ids for which this session has already stamped its diagnostic record. */
-  directRecordsIssued: Set<string>;
   /**
    * The registered expected-set identity this session was minted for
    * (enforcement-review fix 2a/2b); null when the run has no registered
@@ -694,6 +709,22 @@ export interface WitnessOptions {
    * suite-claimed. Must be loopback.
    */
   proxyTarget?: string;
+  /**
+   * ADDITIONAL app origins this run's UI drives (0.15.0), resolved by the
+   * CLI from the owner's `.gateforge.yml` `additionalAppOrigins`
+   * declaration (each entry names the env var holding that base URL). A
+   * consumer whose page also loads a second browser app — a platform admin
+   * console beside the tenant app — otherwise routes nothing on that origin
+   * through the session proxy, and every HTTP claim it earns there is zero.
+   *
+   * Each origin gets its OWN per-session observation proxy, attested with
+   * the same loopback rule as {@link WitnessOptions.proxyTarget} and
+   * attributed to the same session. Absent/empty is the single-origin path,
+   * byte-identical. Widening where traffic is WITNESSED never widens what
+   * counts as proof: the initiator classification and every grader are
+   * unchanged.
+   */
+  additionalAppOrigins?: readonly string[];
   /**
    * Timing chaos (E63): the seeded release plan the observation proxy
    * applies to proxied app RESPONSES. Null/absent is the
@@ -1233,35 +1264,6 @@ export interface SessionPageOriginResponse {
   recorded: true;
 }
 
-/** One direct API exchange the fixture observed (diagnostic only). */
-export interface DirectExchangeReport {
-  /** Uppercase HTTP method of the call. */
-  method: string;
-  /** The URL as the call resolved (absolute, or a bare path without a base). */
-  url: string;
-  /** The response status the app answered. */
-  status: number;
-}
-
-/**
- * `POST /sessions/direct-exchanges` request. The fixture reports all direct
- * app-origin API calls; they never ride the session proxy and can never
- * satisfy a claim. The report is run-scoped and diagnostic only.
- */
-export interface SessionDirectExchangesRequest {
-  /** The session the report rides (its own credential; run-scoped storage). */
-  sessionId: string;
-  /** The session's witness-issued secret; authorizes this call alone. */
-  sessionToken: string;
-  /** The direct exchanges observed since the last call. */
-  exchanges: DirectExchangeReport[];
-}
-
-/** `POST /sessions/direct-exchanges` response: how many exchanges are kept. */
-export interface SessionDirectExchangesResponse {
-  recorded: true;
-  kept: number;
-}
 
 /**
  * `POST /sessions/page-observer`: fixture registers its witnessed Chromium

@@ -783,6 +783,16 @@ function vitestScopeOf(absolute: string): RunnerFileScope | null {
   const base = root === undefined ? configRoot : isAbsolute(root) ? root : resolve(configRoot, root);
   const dir = literalString(propertyOf(testNode, 'dir'));
   const scopeRoot = dir === undefined ? base : isAbsolute(dir) ? dir : resolve(base, dir);
+  const projectsNode = propertyOf(testNode, 'projects');
+  if (
+    projectsNode !== undefined &&
+    ts.isArrayLiteralExpression(projectsNode) &&
+    projectsNode.elements.length > 0
+  ) {
+    // Workspace layout: each `projects[]` entry owns its own config and
+    // file selection — the root defaults do not claim the whole tree.
+    return null;
+  }
   const includeNode = propertyOf(testNode, 'include');
   const excludeNode = propertyOf(testNode, 'exclude');
   const globalsNode = propertyOf(testNode, 'globals');

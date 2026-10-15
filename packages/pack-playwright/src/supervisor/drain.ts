@@ -53,6 +53,8 @@
  * never finalize (no evidence for unfinished work).
  */
 import { CAUSE_NEXT_ACTIONS, type CauseCode } from '@gate-forge/core';
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { WitnessRequestError } from '../fixture/witness-client.js';
 import { SupervisorClient } from './client.js';
 import { readFreezeRequest } from '../discovery/prepare-barrier.js';
@@ -178,6 +180,7 @@ export function startSupervisorSpoolDrain(options: {
     onRequest: (request: unknown) => Promise<void>;
   };
 }): SpoolDrainHandle {
+  const uiByTest = new Map<string, { attempt: number; steps: string[]; truncated: boolean }>();
   const client = new SupervisorClient(options.witnessUrl, options.runToken, options.verifierKey);
   const spoolFile = spoolPathFor(options.stateDir, options.runId);
   const intentsFile = persistenceIntentsPathFor(options.stateDir, options.runId);
@@ -422,6 +425,18 @@ const releaseReachedWaiters = (): void => {
       return;
     }
     if (event.kind === 'testEnd') {
+      // Only outcome-bearing reporter ends contribute UI diagnostics;
+      // worker releases carry no signature. Later retries replace earlier
+      // attempts, rather than mixing unfinished and completed journeys.
+      if (event.outcome !== undefined) {
+        const previous = uiByTest.get(event.testId);
+        const attempt = event.attempt ?? 1;
+        if (previous === undefined || attempt >= previous.attempt) {
+          uiByTest.set(event.testId, {
+            attempt, steps: event.uiSteps ?? [], truncated: event.uiStepsTruncated === true,
+          });
+        }
+      }
       const slot = openByWorker.get(event.workerIndex);
       if (slot !== undefined && slot.testId === event.testId) {
         openByWorker.delete(event.workerIndex);
@@ -704,6 +719,16 @@ const releaseReachedWaiters = (): void => {
       await loop.catch(() => undefined);
       await drainOnce();
       await settling;
+      const rows: Array<{ testId: string; step: string }> = [];
+      const truncatedTestIds: string[] = [];
+      for (const [testId, ui] of [...uiByTest].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
+        for (const step of ui.steps) rows.push({ testId, step });
+        if (ui.truncated) truncatedTestIds.push(testId);
+      }
+      writeFileSync(join(options.stateDir, 'ui-ledger.json'), JSON.stringify({
+        rows,
+        ...(truncatedTestIds.length === 0 ? {} : { truncatedTestIds }),
+      }), 'utf8');
       // A freeze handler still polling when the runner exits is given its
       // own bound before grading, so a late refusal lands as a recorded
       // conflict instead of a silently dropped promise.

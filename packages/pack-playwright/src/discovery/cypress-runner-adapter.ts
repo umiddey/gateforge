@@ -28,7 +28,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
-import type { RunnerExecutionEnvelope, RunnerInstanceOutcome } from '@gate-forge/core';
+import { runnerLogicalKey, type RunnerExecutionEnvelope, type RunnerInstanceOutcome } from '@gate-forge/core';
 import type {
   RunnerAdapter,
   RunnerChildEnv,
@@ -53,6 +53,7 @@ import {
 } from '../cypress/plugin.js';
 import { scanCypressSpecs } from '../cypress/spec-scan.js';
 import { buildWitnessedSessionRunnerEnv } from './runner-env.js';
+import { stripGateforgeAmbient } from './supervised-run.js';
 
 // Public re-exports (the CLI supervised surface drives the adapter and
 // needs the plugin registration plus the report type).
@@ -134,14 +135,14 @@ export class CypressRunnerAdapter implements RunnerAdapter<CypressRunReport | nu
       return { status: 'unavailable', detail: scanned.detail, tests: [] };
     }
     const tests: RunnerTestIdentity[] = scanned.tests.map((test) => ({
-      logicalKey: `${test.file}#${test.titlePath.join('>')}`,
+      logicalKey: runnerLogicalKey(test.file, test.titlePath),
       project: null,
       file: test.file,
       titlePath: [...test.titlePath],
       blockingAnnotations: [],
       // The generated support file spools `<file>#<title path>` —
       // registration must name the same id.
-      frameworkId: `${test.file}#${test.titlePath.join('>')}`,
+      frameworkId: runnerLogicalKey(test.file, test.titlePath),
     }));
     return {
       status: 'discovered',
@@ -226,7 +227,7 @@ export class CypressRunnerAdapter implements RunnerAdapter<CypressRunReport | nu
       files.add(file);
     }
     const runDir = join(request.stateDir, 'cypress', request.runId);
-    const appBaseUrl = this.options.witness?.appBaseUrl ?? process.env[ENV_APP_BASE_URL] ?? '';
+    const appBaseUrl = this.options.witness?.appBaseUrl ?? '';
     let generated: { configFile: string; supportFile: string };
     try {
       mkdirSync(runDir, { recursive: true });
@@ -249,13 +250,13 @@ export class CypressRunnerAdapter implements RunnerAdapter<CypressRunReport | nu
       cwd: request.cwd,
       env: buildWitnessedSessionRunnerEnv(
         {
-          [ENV_WITNESS_URL]: this.options.witness?.url ?? process.env[ENV_WITNESS_URL] ?? '',
-          [ENV_RUN_TOKEN]: this.options.witness?.token ?? process.env[ENV_RUN_TOKEN] ?? '',
+          [ENV_WITNESS_URL]: this.options.witness?.url ?? '',
+          [ENV_RUN_TOKEN]: this.options.witness?.token ?? '',
           [ENV_STATE_DIR]: request.stateDir,
           [ENV_RUN_ID]: request.runId,
           [ENV_APP_BASE_URL]: appBaseUrl,
         },
-        process.env,
+        stripGateforgeAmbient(process.env),
       ),
       // Cypress drives a browser process tree; the run is killed as a
       // GROUP so no orphan browser survives a timeout.
@@ -356,7 +357,7 @@ export class CypressRunnerAdapter implements RunnerAdapter<CypressRunReport | nu
       return envelopeIncomplete(raw.processExit, 'the Cypress report covers zero tests — a zero-test run is incomplete');
     }
     const outcomes: RunnerInstanceOutcome[] = rows.map((entry) => ({
-      logicalKey: `${entry.identity.file}#${entry.identity.titlePath.join('>')}`,
+      logicalKey: runnerLogicalKey(entry.identity.file, entry.identity.titlePath),
       project: null,
       frameworkId: `${entry.identity.file}::${entry.identity.titlePath.join('::')}`,
       status:

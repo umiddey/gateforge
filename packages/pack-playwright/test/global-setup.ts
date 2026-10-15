@@ -14,12 +14,16 @@
  *
  * The returned teardown fails the run when any file of those dists was
  * rewritten after this build, so a reintroduced in-suite rebuild is caught
- * on every run instead of as a rare parallel flake.
+ * on every run instead of as a rare parallel flake. `vitest list` skips
+ * both build and teardown — see {@link isVitestListInvocation}.
  */
 import { spawnSync } from 'node:child_process';
 import { readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isSupervisedGateforgeRun, isVitestListInvocation } from './global-setup-inventory.js';
+
+export { isSupervisedGateforgeRun, isVitestListInvocation } from './global-setup-inventory.js';
 
 /** Repo root (the gateforge monorepo). */
 const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
@@ -28,7 +32,17 @@ const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
 const BUILT_PACKAGES = ['core', 'witness', 'pack-playwright'] as const;
 
 /**
- * Compiles one workspace package into its dist with its build tsconfig.
+ * True when this Node process is vitest's `list` subcommand (inventory
+ * only — no test workers execute).
+ *
+ * Gateforge enumerates consumer suites with `vitest list --json`. That
+ * lifecycle still runs globalSetup/teardown, but dist integrity is
+ * enforced on real test runs only: list can take minutes across many
+ * projects, and setup may run more than once while the gate's own
+ * workspace build already refreshed dists.
+ */
+/**
+ * Builds one workspace package, including its shipped non-TypeScript assets.
  *
  * Args:
  *   name (string): the package directory under `packages/`.
@@ -37,18 +51,18 @@ const BUILT_PACKAGES = ['core', 'witness', 'pack-playwright'] as const;
  *   void: nothing; the dist is current on return.
  *
  * Throws:
- *   Error: when tsc exits nonzero or is killed (full compiler output).
+ *   Error: when the package build exits nonzero or is killed (full output).
  */
 function buildPackage(name: string): void {
-  const project = `packages/${name}/tsconfig.build.json`;
-  const result = spawnSync('npx', ['tsc', '-p', project], {
+  const workspace = `packages/${name}`;
+  const result = spawnSync('npm', ['run', 'build', '--workspace', workspace], {
     cwd: ROOT,
     encoding: 'utf8',
     timeout: 180_000,
   });
   if (result.status !== 0) {
     throw new Error(
-      `${project} build failed (exit ${String(result.status)}, signal ${String(result.signal)}):\n${result.stdout}${result.stderr}`,
+      `${workspace} build failed (exit ${String(result.status)}, signal ${String(result.signal)}):\n${result.stdout}${result.stderr}`,
     );
   }
 }
@@ -108,7 +122,23 @@ function changedFiles(before: Map<string, string>, after: Map<string, string>): 
  * Returns:
  *   () => void: teardown; throws when any built dist file changed.
  */
+/**
+ * True when vitest runs under a supervised gateforge gate (workspace dists
+ * were built before the runner child started). The witnessed-session child
+ * always receives `GATEFORGE_RUN_TOKEN`; `GATEFORGE_RUN_ID` crosses on the
+ * same path for the reporter. Local `vitest run` without either name still
+ * builds dists here and enforces the teardown integrity check.
+ */
 export default function setup(): () => void {
+  if (isVitestListInvocation()) {
+    return () => {};
+  }
+  // `gateforge test-gates` builds workspace dists before spawning vitest;
+  // rebuilding here rewrites dist in place and trips inputs-changed-during-run.
+  // Teardown dist drift is enforced by the supervisor's reuse digest instead.
+  if (isSupervisedGateforgeRun()) {
+    return () => {};
+  }
   for (const name of BUILT_PACKAGES) buildPackage(name);
   const built = BUILT_PACKAGES.map((name) => [name, distState(name)] as const);
   return () => {

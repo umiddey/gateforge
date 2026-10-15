@@ -1,6 +1,6 @@
 {
   "name": "@gate-forge/pack-playwright",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "gateforgeCompatibility": {
     "supervisedFixtureProtocol": "gateforge.supervised-playwright.v1"
   },
@@ -51,13 +51,13 @@
     "!**/*.pyo"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && cp src/fixture/auto-session*.cjs src/fixture/auto-session*.mjs dist/fixture/",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"
   },
   "dependencies": {
-    "@gate-forge/core": "^0.14.0",
-    "@gate-forge/witness": "^0.14.0",
+    "@gate-forge/core": "^0.15.0",
+    "@gate-forge/witness": "^0.15.0",
     "playwright": "1.58.2",
     "typescript": "^5.9.2",
     "yaml": "^2.8.1"

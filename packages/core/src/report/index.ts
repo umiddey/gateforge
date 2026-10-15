@@ -18,6 +18,7 @@
  * Rendering is pure and deterministic: identical inputs serialize
  * byte-for-byte identically.
  */
+import type { RunnerExecutionEnvelope } from '../schemas/runner-adapter.js';
 import { canonicalJson, type JsonValue } from '../canonical-json.js';
 import { fingerprintObligation } from '../fingerprints.js';
 import { compareStrings } from '../graph/util.js';
@@ -99,6 +100,8 @@ export interface RunExecutionSummary {
   scope: 'full' | 'changed' | 'named';
   mode: 'executed' | 'reused';
   testsPerformedThisInvocation: number;
+  executedTests?: number;
+  measuredTests?: number;
   selectedTests: { selected: number; passed: number; failed: number; skipped: number; expectedFailures: number };
   selectedClaims: { selected: number; satisfied: number; blocking: number; blockingEntries: number; waived: number };
   /**
@@ -219,6 +222,8 @@ export interface DiagnosticContext {
   inputDigest: string | null;
   evidenceState: string;
   authority: 'authoritative' | 'non-authoritative';
+  /** Display-only startup failure from the supervised runner child. */
+  runnerStartup?: RunnerExecutionEnvelope['startupDiagnostic'];
   /** Owner-approved documentation folders and their reduced trust guarantee. */
   docsExclusions?: {
     folders: readonly string[];
@@ -381,6 +386,11 @@ export interface RenderRunOptions {
    * had.
    */
   httpLedger?: HttpLedger;
+  /** Runner-observed UI signature, descriptive only; absent for non-UI runs. */
+  uiLedger?: {
+    rows: Array<{ testId: string; step: string }>;
+    truncatedTestIds?: string[];
+  };
   /**
    * The HTTP coverage summary (0.14 WP3, plan §4.5): the one line that
    * makes the served/used/proven denominator visible. REPORT-ONLY — it
@@ -629,6 +639,7 @@ function jsonReport(
   // Report-only exchange ledger (0.14 WP2): present only when the run
   // witnessed session exchanges, so existing reports keep their keys.
   if (options.httpLedger !== undefined) report['httpLedger'] = options.httpLedger;
+  if (options.uiLedger !== undefined) report['uiLedger'] = options.uiLedger;
   // HTTP coverage summary (0.14 WP3): additive, like the ledger, so a
   // report without it keeps exactly the document it always had.
   if (options.httpCoverage !== undefined) report['httpCoverage'] = options.httpCoverage;
@@ -817,6 +828,9 @@ function textReport(
         `(selected ${execution.selectedTests.selected}; ${execution.selectedTests.skipped} skipped; ` +
         `${execution.selectedTests.expectedFailures} expected failures)`,
     );
+    if (execution.measuredTests !== undefined && execution.executedTests !== undefined) {
+      lines.push(`measurement: ${execution.measuredTests} test(s) with witness sessions; ${execution.executedTests} executed`);
+    }
     // A local run has no progress stream (it is OFF unless CI or a flag
     // asks for it), so without these lines a red run states a count and
     // never a reason. At most three are named inline — enough to see

@@ -19,6 +19,24 @@ import { runPipeline } from '../src/pipeline.js';
 import { httpRoutesView, resolveStateDir } from '../src/state.js';
 import { setSection } from '../src/yaml-section.js';
 
+/**
+ * A CLI stub still models Playwright's public test entry beside its CLI.
+ * These suites drive their own protocol; executing a test body through this
+ * entry is an error, but the witnessed fixture must be able to extend it.
+ */
+export function stubPlaywrightFiles(cli: string, dependencyRoot = 'node_modules'): Record<string, string> {
+  return {
+    [`${dependencyRoot}/playwright/cli.js`]: cli,
+    [`${dependencyRoot}/playwright/test.js`]: [
+      "function test() { throw new Error('CLI stub does not execute Playwright test bodies'); }",
+      'test.extend = () => test;',
+      "function expect() { throw new Error('CLI stub does not execute Playwright assertions'); }",
+      'module.exports = { test, expect };',
+      '',
+    ].join('\n'),
+  };
+}
+
 /** The fixed clock all fixture configs use (deterministic verdicts). */
 export const FIXED_AT = '2026-01-01T00:00:00.000Z';
 
@@ -357,10 +375,36 @@ export interface CliResult {
   stderr: string;
 }
 
+/**
+ * CI/provider environment names that must not leak from an outer CI run
+ * into a fixture repository: GitHub Actions exports `GITHUB_BASE_REF`,
+ * `GITHUB_ACTIONS`, `CI`, ... and a CLI run inside a fixture repo would
+ * otherwise pick the `github-pr`/`gitlab-mr` changed-file provider and
+ * diff against a base the fixture never created (57 CI-only failures at
+ * PR run 38687871354). Every fixture CLI run must strip the same names in
+ * lockstep, so they live here; a test that NEEDS one of them passes it
+ * explicitly through `runCli`'s `env` argument, which overrides the strip.
+ */
+const CI_PROVIDER_ENV: readonly string[] = [
+  'GITHUB_BASE_REF',
+  'GITHUB_HEAD_REF',
+  'GITHUB_EVENT_NAME',
+  'GITHUB_ACTIONS',
+  'CI',
+  'CI_MERGE_REQUEST_DIFF_BASE_SHA',
+  'GITLAB_CI',
+];
+
+export function ciFreeEnv(overrides: Record<string, string | undefined> = {}): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  for (const name of CI_PROVIDER_ENV) delete env[name];
+  return { ...env, ...overrides };
+}
+
 export async function runCli(repo: TempRepo, argv: readonly string[], env: Record<string, string | undefined> = {}): Promise<CliResult> {
   const stdout = new CaptureStream();
   const stderr = new CaptureStream();
-  const io: Io = { cwd: repo.root, env: { ...process.env, ...env }, stdout, stderr };
+  const io: Io = { cwd: repo.root, env: ciFreeEnv(env), stdout, stderr };
   // In-process plugins resolve repo-relative paths against the process
   // cwd (production cwd IS the repo root); mirror that for the call.
   const previousCwd = process.cwd();
@@ -393,7 +437,7 @@ export async function currentInputDigest(repo: TempRepo, docsExclusions: readonl
     const stateDir = resolveStateDir(repo.root);
     const pipeline = await runPipeline({
       cwd: repo.root,
-      env: { ...process.env },
+      env: ciFreeEnv(),
       config,
       provider: 'all-files',
       stateDir,

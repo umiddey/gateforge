@@ -29,7 +29,7 @@ import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadConfig, type GateforgeConfig } from '@gate-forge/core';
+import { loadConfig, parseRunnerLogicalKey, runnerLogicalKey, type GateforgeConfig } from '@gate-forge/core';
 import type {
   DiagnosticSuite,
   RunnerExecutionEnvelope,
@@ -53,6 +53,7 @@ import {
 } from './pytest-adapter.js';
 import { collectPytestSuite, type PytestCollectedCase } from './pytest-adapter.js';
 import { buildWitnessedPytestSessionEnv } from './runner-env.js';
+import { stripGateforgeAmbient } from './supervised-run.js';
 
 /** Per-test session variables a runner adapter publishes to the test. */
 export const PYTEST_ENV_SESSION_ID = 'GATEFORGE_SESSION_ID';
@@ -255,11 +256,11 @@ export class PytestRunnerAdapter implements RunnerAdapter<JunitDocument | null> 
       cwd: join(request.cwd, suite.cwd),
       env: buildWitnessedPytestSessionEnv(
         {
-          [ENV_WITNESS_URL]: this.options.witness?.url ?? process.env[ENV_WITNESS_URL] ?? '',
-          [ENV_RUN_TOKEN]: this.options.witness?.token ?? process.env[ENV_RUN_TOKEN] ?? '',
+          [ENV_WITNESS_URL]: this.options.witness?.url ?? '',
+          [ENV_RUN_TOKEN]: this.options.witness?.token ?? '',
           [ENV_STATE_DIR]: request.stateDir,
           [ENV_RUN_ID]: request.runId,
-          [ENV_APP_BASE_URL]: this.options.appBaseUrl ?? process.env[ENV_APP_BASE_URL] ?? '',
+          [ENV_APP_BASE_URL]: this.options.appBaseUrl ?? '',
           // The candidate workspace must stay byte-identical across the
           // run: CPython would otherwise write `__pycache__/*.pyc` beside
           // the collected suite AFTER the authority froze the candidate
@@ -268,7 +269,7 @@ export class PytestRunnerAdapter implements RunnerAdapter<JunitDocument | null> 
           // this; the supervised session child must too.
           PYTHONDONTWRITEBYTECODE: '1',
         },
-        process.env,
+        stripGateforgeAmbient(process.env),
         pluginDir,
       ),
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -441,7 +442,7 @@ export class PytestRunnerAdapter implements RunnerAdapter<JunitDocument | null> 
 
 /** One enumerated test's identity from its collected node id. */
 function collectedIdentityOf(collected: PytestCollectedCase): RunnerTestIdentity {
-  const logicalKey = `${collected.file}#${collected.titlePath.join('>')}`;
+  const logicalKey = runnerLogicalKey(collected.file, collected.titlePath);
   return {
     logicalKey,
     project: null,
@@ -466,17 +467,14 @@ function junitIdentityOf(testCase: JunitTestCase): { logicalKey: string; file: s
   if (module !== '' && segments.slice(0, module.split('.').length).join('.') !== module) return null;
   const classPath = module === '' ? segments : segments.slice(module.split('.').length);
   const titlePath = [...classPath, testCase.name];
-  return { logicalKey: `${file}#${titlePath.join('>')}`, file, titlePath };
+  return { logicalKey: runnerLogicalKey(file, titlePath), file, titlePath };
 }
 
 /** The pytest node id of a `<file>#<title path>` identity, or null. */
 function logicalKeyToNodeId(logicalKey: string): string | null {
-  const hash = logicalKey.indexOf('#');
-  if (hash <= 0) return null;
-  const file = logicalKey.slice(0, hash);
-  const titlePath = logicalKey.slice(hash + 1);
-  if (file === '' || titlePath === '' || titlePath.includes('#')) return null;
-  return `${file}::${titlePath.split('>').join('::')}`;
+  const { file, titlePath } = parseRunnerLogicalKey(logicalKey);
+  if (file === '' || titlePath.length === 0) return null;
+  return `${file}::${titlePath.join('::')}`;
 }
 
 /** Single-cause incomplete envelope (no outcomes are ever invented). */

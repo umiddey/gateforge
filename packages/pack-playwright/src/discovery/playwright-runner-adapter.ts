@@ -29,7 +29,12 @@ import type {
 } from '@gate-forge/witness/adapter';
 import { ENV_APP_BASE_URL, ENV_RUN_TOKEN, ENV_WITNESS_URL } from '../constants.js';
 import { discoverTestCatalog, type DiscoverOptions } from './discover.js';
-import { executeSupervisedPlaywright, parseOutcomesText, type SupervisedRunOptions } from './supervised-run.js';
+import {
+  executeSupervisedPlaywright,
+  parseOutcomesText,
+  stripGateforgeAmbient,
+  type SupervisedRunOptions,
+} from './supervised-run.js';
 
 /**
  * Per-test session variables a runner adapter publishes to the test.
@@ -184,6 +189,9 @@ export class PlaywrightRunnerAdapter implements RunnerAdapter {
       {
         cwd: request.cwd,
         timeoutMs: request.timeoutMs,
+        // Contract `execute` carries no witness wiring in `vars`; never
+        // inherit a parent `test-gates` ambient (meta-tests, contract suite).
+        ambientEnv: stripGateforgeAmbient(),
         // The project selection is part of the identity join key: a run
         // that does not select the enumerated projects reports outcomes
         // under different identities than the expected set was fixed

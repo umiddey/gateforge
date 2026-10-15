@@ -29,6 +29,7 @@
  * - a NEWLY CLAIMED obligation without evidence still blocks;
  * - flipping the key moves the owner-pinned digest.
  */
+import { stubPlaywrightFiles } from './helpers.js';
 import { describe, expect, it } from 'vitest';
 import { loadConfig, withTempRepo, type TempRepo } from '@gate-forge/core';
 import {
@@ -129,7 +130,7 @@ async function installUngated(repo: TempRepo, appUrl: string): Promise<void> {
     '.gateforge/adapters/refunds.mjs': evidenceAdapter(appUrl),
     ...Object.fromEntries(ADOPTED_NAMES.map((name) => [`src/${name}.txt`, `${name} fixture.table\n`])),
     ...Object.fromEntries(ADOPTED_NAMES.map((name) => [`.gateforge/adapters/${name}.mjs`, evidenceAdapter(appUrl)])),
-    'node_modules/playwright/cli.js': evidenceStubCli(ADOPTED_NAMES),
+    ...stubPlaywrightFiles(evidenceStubCli(ADOPTED_NAMES)),
   });
   repo.commitFiles({}, 'existing product code, no gate yet');
 }

@@ -28,7 +28,10 @@ import {
   evaluateObligations,
   buildHttpLedger,
   fingerprintObligation,
+  channelHttpCallFindings,
   evaluateHttpCoverage,
+  HTTP_CALL_UNRESOLVED,
+  httpCallFindingAdoptionForgivable,
   httpCallFindingEntries,
   httpResponseShapeEntries,
   type HttpCoverageResult,
@@ -52,6 +55,34 @@ import { join } from 'node:path';
 import { UsageError } from './errors.js';
 import { resolveRepoPath, sourcesByResourceId } from './pipeline.js';
 import { httpCoverageRoutesView, httpRoutesView, readJsonArray } from './state.js';
+
+/** Runner-observed UI steps are descriptive, never proof or verdict input. */
+export interface UiLedger {
+  rows: Array<{ testId: string; step: string }>;
+  truncatedTestIds?: string[];
+}
+
+function readUiLedger(stateDir: string): UiLedger | undefined {
+  try {
+    const value: unknown = JSON.parse(readFileSync(join(stateDir, 'ui-ledger.json'), 'utf8'));
+    if (typeof value !== 'object' || value === null || !('rows' in value) || !Array.isArray(value.rows)) return undefined;
+    const rows: UiLedger['rows'] = [];
+    for (const row of value.rows) {
+      if (
+        typeof row === 'object' && row !== null &&
+        'testId' in row && typeof row.testId === 'string' &&
+        'step' in row && typeof row.step === 'string' && row.step.length > 0
+      ) rows.push({ testId: row.testId, step: row.step });
+    }
+    if (rows.length === 0) return undefined;
+    const truncatedTestIds = 'truncatedTestIds' in value && Array.isArray(value.truncatedTestIds)
+      ? value.truncatedTestIds.filter((id): id is string => typeof id === 'string')
+      : [];
+    return { rows, ...(truncatedTestIds.length === 0 ? {} : { truncatedTestIds }) };
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * Pin-#2 fingerprint of an obligation — the identity the baseline
@@ -350,6 +381,7 @@ export interface EvaluateResult {
    * had. It never changes a verdict or the exit code.
    */
   httpLedger?: HttpLedger;
+  uiLedger?: UiLedger;
   /**
    * The HTTP call rules R1-R5 (0.14 WP3) over this run's ledger, its
    * graded verdicts and the graph's static join: the summary line's
@@ -751,6 +783,7 @@ export function evaluateRun(input: EvaluateInput): EvaluateResult {
   // exchanges, so such runs' reports keep exactly the keys they had.
   const ledger = buildHttpLedger(records, httpRoutes);
   const httpLedger: HttpLedger | undefined = ledger.rows.length > 0 ? ledger : undefined;
+  const uiLedger = readUiLedger(stateDir);
 
   // The HTTP call rules R1-R5 (0.14 WP3) over that ledger, this run's
   // graded verdicts and the graph's static join facts. R1/R5 are pure
@@ -787,19 +820,23 @@ export function evaluateRun(input: EvaluateInput): EvaluateResult {
     (finding) => finding.code !== 'HTTP_ROUTE_NOT_INVENTORIED',
   );
   const newCallFindings = adoptableCallFindings.filter(
-    (finding) => adoptedCallFingerprints?.has(finding.fingerprint) !== true,
+    (finding) =>
+      finding.code === HTTP_CALL_UNRESOLVED ||
+      adoptedCallFingerprints?.has(finding.fingerprint) !== true,
   );
   const httpCallsBaselined = adoptableCallFindings.length - newCallFindings.length;
-  const callEntries = httpCallFindingEntries(newCallFindings);
   const inventoryAdvisories = httpCallFindingEntries(
     httpCoverage.findings.filter((finding) => finding.code === 'HTTP_ROUTE_NOT_INVENTORIED'),
   );
-  const callBlocking = config.http.callFindings === 'block' ? callEntries : [];
+  const { blocking: callBlocking, advisories: callAdvisories } = channelHttpCallFindings(
+    newCallFindings,
+    config.http.callFindings,
+  );
   const responseShapeAdvisories =
     config.http.responseShape === 'report' ? httpResponseShapeEntries(ledger.rows) : [];
   const httpCallAdvisories = [
     ...inventoryAdvisories,
-    ...(config.http.callFindings === 'block' ? [] : callEntries),
+    ...callAdvisories,
     ...responseShapeAdvisories,
   ];
   const runBlocking = [...applied.blocking, ...callBlocking];
@@ -813,6 +850,7 @@ export function evaluateRun(input: EvaluateInput): EvaluateResult {
     blocking: runBlocking,
     records,
     httpLedger,
+    uiLedger,
     httpCoverage,
     httpCallAdvisories,
     baselined: applied.baselined,
@@ -954,6 +992,10 @@ export function splitBlockingByBaseline(
     const identity = classificationBlockedIdentity(entry);
     if (identity !== null && classification !== null && classification.has(identity)) {
       forgivenClassifications.add(identity);
+      continue;
+    }
+    if (entry.kind === 'finding' && !httpCallFindingAdoptionForgivable(entry)) {
+      kept.push(entry);
       continue;
     }
     if (fingerprints.has(blockingEntryFingerprint(entry))) {

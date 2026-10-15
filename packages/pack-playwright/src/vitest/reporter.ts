@@ -26,6 +26,7 @@
  */
 import { appendFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
+import { runnerLogicalKey } from '@gate-forge/core';
 import { canonicalOf } from '../json.js';
 import { failureDiagnosisOf, type SerializedFailure } from '../diagnosis.js';
 import { claimInjectionsFor } from '../runner-claims.js';
@@ -142,7 +143,7 @@ function titlePathOf(testCase: VitestTestCase): string[] {
 function identityOf(testCase: VitestTestCase): TestIdentity {
   const file = relative(process.cwd(), testCase.module.moduleId).split('\\').join('/');
   const titlePath = titlePathOf(testCase);
-  return { file, titlePath, testId: `${file}#${titlePath.join('>')}` };
+  return { file, titlePath, testId: runnerLogicalKey(file, titlePath) };
 }
 
 /**

@@ -1,0 +1,109 @@
+# gateforge project configuration (schemaVersion 1)
+schemaVersion: 1
+project:
+  # Languages detectors should run for (your detector packs decide).
+  languages:
+    - python
+    - javascript
+    - typescript
+  paths:
+    # Globs scanned by every detector; results drive obligations.
+    include:
+      - '**/*.py'
+      - '**/*.js'
+      - '**/*.jsx'
+      - '**/*.mjs'
+      - '**/*.cjs'
+      - '**/*.ts'
+      - '**/*.tsx'
+    exclude:
+      - '**/node_modules/**'
+      - '**/.venv/**'
+      - '**/venv/**'
+      - '**/__pycache__/**'
+      - '**/.pytest_cache/**'
+      - '**/.mypy_cache/**'
+      - '**/dist/**'
+      - '**/build/**'
+      # Hidden dot-folders (agent tooling like .claude/ or .cursor/,
+      # editor/tool caches, leftover merge or working folders) hold
+      # tooling and debris, never application code. The rule is generic
+      # -- it keys on the dot prefix at any depth -- so any hidden folder
+      # is skipped, whatever it is called. .gateforge is the ONE
+      # exception and is deliberately NOT matched here: Gateforge's own
+      # configuration stays in scope.
+      - '**/.(!(gateforge))/**'
+      - '.!(gateforge)/**'
+    # The strict self-gate's own workflow is developer/CI tooling: no
+    # discovered resource claims it and no managed block covers it, so an
+    # edit would otherwise block forever as CHANGE_UNMAPPED. The
+    # declaration EXPANDS the changed-file evaluation scope (never a
+    # skip) and stays inside the trusted policy digest.
+    testTooling:
+      - '.github/workflows/**'
+      # The product under test IS the Gateforge engine packages; engine
+      # edits expand scope (never a skip) instead of blocking as unmapped
+      # product surface on a repository with no discovered app endpoints.
+      - 'packages/**'
+      - 'CHANGELOG.md'
+# Detector plugins. This repository IS the gate: its product code is the
+# CLI itself and declares no HTTP endpoints, models or pages of its own.
+# The scan's fastapi/sqlalchemy/express signals come from this repo's own
+# test fixtures and examples (packages/*/test/fixtures, example/), which
+# are not application code, so no detector pack is enabled and nothing is
+# excluded from the scan to make that so.
+plugins: []
+policies: .gateforge/policies.yml
+classificationPolicy: .gateforge/classification-policy.yml
+adapters: .gateforge/adapters
+waivers: .gateforge/waivers
+baselines: .gateforge/baselines/obligations.json
+# Machine-wide scanner settings (0.11.0). These four keys used to sit at
+# the top of .gateforge/classification-policy.yml; they moved here because
+# they configure the scan rather than answer any question about the app.
+scan:
+  # Globs a closed-world proof must cover; any parse/unresolved hole inside
+  # them invalidates every suppressive decision in scope.
+  scanRoots:
+    - '**/*'
+  # No coverage rules: with no detector plugins enabled, no detector can
+  # report complete examination, so no closed-world proof is claimed.
+  # Supported source declaration syntax consumed by the classifier.
+  declarations:
+    internality: 'gateforge:internal'
+    archiveState: 'gateforge:archive-state'
+  # Bookkeeping columns that never satisfy an update by themselves.
+  volatileFields:
+    - updated_at
+    - created_at
+changed:
+  provider: auto
+# The test runner the supervised gate drives. The scan detected BOTH
+# playwright and vitest in this repository; the playwright default plans
+# the EXAMPLE app's demo journeys (example/e2e, packages/pack-playwright/
+# examples), which are not this repository's suite — the product's own
+# regression suite is the root vitest workspace. `runner:` is a trusted
+# policy input: changing it moves the approved digest.
+runner: vitest
+witness:
+  maxDurationSeconds: 5
+  # Root vitest workspace enumeration (~3,700 tests) exceeds the 120s default.
+  enumerationTimeoutSeconds: 1800
+clock:
+  mode: system
+# Routes whose name matches no discovered resource (ENDPOINT_RESOURCE_CANDIDATE_UNMATCHED).
+# 'warn' reports them as advisories with a banner; 'block' makes them
+# blocking entries like any other finding. Absent means 'warn'.
+endpoints:
+  unmatchedRoutes: warn
+# How hard the gate blocks: strict = block everything, changed = block
+# only the debt this change touches, warn = report everything and block
+# nothing. This softens the GATE, never the evidence.
+mode: strict
+# Enforcement: standard mode combines the local hook with a mandatory
+# trusted server check. strictE2E makes waived/baselined in-scope E2E
+# obligations NOT proof (they block with ENFORCEMENT_UNTRUSTED).
+enforcement:
+  mode: standard
+  strictE2E: true
+  receiptStage: pre-push

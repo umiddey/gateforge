@@ -6,10 +6,13 @@
  *
  * - `local-staged`: `git diff --cached --name-only` — the staged index
  *   vs HEAD.
- * - `github-pr`: `GITHUB_BASE_REF` (base branch name) → merge-base diff
- *   `git merge-base HEAD <base>` then `git diff --name-only <base> HEAD`.
- * - `gitlab-mr`: `CI_MERGE_REQUEST_DIFF_BASE_SHA` → `git diff --name-only
- *   <base sha> HEAD`.
+ * - `github-pr`: `GITHUB_BASE_REF` (base branch name) → the base resolves
+ *   as the fetched remote ref `refs/remotes/origin/<base>` first and as a
+ *   local `<base>` only as a fallback; then `git --no-replace-objects
+ *   merge-base HEAD <base-commit>` and `git --no-replace-objects diff
+ *   --name-only <merge-base> HEAD`.
+ * - `gitlab-mr`: `CI_MERGE_REQUEST_DIFF_BASE_SHA` → `git
+ *   --no-replace-objects diff --name-only <base sha> HEAD`.
  *
  * `auto` (config default) picks github-pr when `GITHUB_BASE_REF` is set,
  * gitlab-mr when `CI_MERGE_REQUEST_DIFF_BASE_SHA` is set, else
@@ -68,6 +71,60 @@ export function localStagedProvider(cwd: string, env: NodeJS.ProcessEnv): Change
   };
 }
 
+/**
+ * Resolves the github-pr base ref to a commit.
+ *
+ * A detached PR checkout (actions/checkout of the PR head SHA) has the
+ * base only as the fetched remote-tracking ref, and a stale local branch
+ * or tag of the same name must never shadow it. The candidates, in order:
+ * `refs/remotes/origin/<base>^{commit}` FIRST, then `<base>^{commit}` only
+ * as a fallback. The raw input is validated untrimmed and must be a valid
+ * branch name (`git check-ref-format --branch`), so revision syntax
+ * (`HEAD`, `<ref>~1`, `<ref>@{1}`), surrounding whitespace, and option
+ * injection (leading `-`, whitespace/NUL) all fail closed to null.
+ *
+ * Args:
+ *   cwd: repository root.
+ *   baseRef: the `GITHUB_BASE_REF` value (base branch name).
+ *   env: process environment.
+ *
+ * Returns:
+ *   string | null: the 40-hex base commit, or null when neither
+ *   candidate resolves.
+ */
+export function resolveGithubBaseCommit(
+  cwd: string,
+  baseRef: string,
+  env: NodeJS.ProcessEnv,
+): string | null {
+  const base = baseRef;
+  if (
+    base.length === 0 ||
+    base.startsWith('-') ||
+    base === 'HEAD' ||
+    /[\s\0]/.test(base) ||
+    base.includes('@{')
+  ) {
+    return null;
+  }
+  const format = spawnSync(
+    'git',
+    [...GIT_FLAGS, 'check-ref-format', '--branch', base],
+    { cwd, env, encoding: 'utf8' },
+  );
+  if (format.error !== undefined || format.status !== 0) return null;
+  for (const candidate of [`refs/remotes/origin/${base}^{commit}`, `${base}^{commit}`]) {
+    const result = spawnSync(
+      'git',
+      [...GIT_FLAGS, '--no-replace-objects', 'rev-parse', '--verify', '--quiet', candidate],
+      { cwd, env, encoding: 'utf8' },
+    );
+    const sha = (result.stdout ?? '').trim();
+    if (result.error === undefined && result.status === 0 && /^[0-9a-f]{40}$/.test(sha)) return sha;
+  }
+  return null;
+}
+
 /** GitHub Actions merge-base diff provider (`GITHUB_BASE_REF`, pin #5). */
 export function githubPrProvider(cwd: string, env: NodeJS.ProcessEnv): ChangedFileProvider {
   return {
@@ -79,15 +136,23 @@ export function githubPrProvider(cwd: string, env: NodeJS.ProcessEnv): ChangedFi
           'github-pr provider requires GITHUB_BASE_REF (base branch name) in the environment',
         );
       }
+      const baseCommit = resolveGithubBaseCommit(cwd, baseRef, env);
+      if (baseCommit === null) {
+        throw new UsageError(
+          `github-pr provider: GITHUB_BASE_REF '${baseRef}' resolves neither as 'refs/remotes/origin/${baseRef}' nor as ` +
+            `'${baseRef}' — in a detached checkout fetch the base first ` +
+            `(git fetch origin "${baseRef}:refs/remotes/origin/${baseRef}")`,
+        );
+      }
       const mergeBase = gitOutput(
         cwd,
-        ['merge-base', 'HEAD', baseRef],
-        `github-pr provider (merge-base HEAD ${baseRef})`,
+        ['--no-replace-objects', 'merge-base', 'HEAD', baseCommit],
+        `github-pr provider (merge-base HEAD ${baseCommit})`,
         env,
       );
       const out = gitOutput(
         cwd,
-        ['diff', '--name-only', mergeBase, 'HEAD'],
+        ['--no-replace-objects', 'diff', '--name-only', mergeBase, 'HEAD'],
         `github-pr provider (diff ${mergeBase}..HEAD)`,
         env,
       );
@@ -109,7 +174,7 @@ export function gitlabMrProvider(cwd: string, env: NodeJS.ProcessEnv): ChangedFi
       }
       const out = gitOutput(
         cwd,
-        ['diff', '--name-only', baseSha, 'HEAD'],
+        ['--no-replace-objects', 'diff', '--name-only', baseSha, 'HEAD'],
         `gitlab-mr provider (diff ${baseSha}..HEAD)`,
         env,
       );
@@ -247,15 +312,17 @@ export function changeBaseRevision(
       return head.status === 0 && /^[0-9a-f]{40}$/.test(sha) ? sha : null;
     }
     case 'github-pr': {
-      const baseRef = env['GITHUB_BASE_REF']?.trim() ?? '';
-      if (baseRef.length === 0 || baseRef.startsWith('-') || /[\s\0]/.test(baseRef)) {
-        return null;
-      }
-      const mergeBase = spawnSync('git', [...GIT_FLAGS, 'merge-base', 'HEAD', baseRef], {
-        cwd,
-        env,
-        encoding: 'utf8',
-      });
+      const baseCommit = resolveGithubBaseCommit(cwd, env['GITHUB_BASE_REF'] ?? '', env);
+      if (baseCommit === null) return null;
+      const mergeBase = spawnSync(
+        'git',
+        [...GIT_FLAGS, '--no-replace-objects', 'merge-base', 'HEAD', baseCommit],
+        {
+          cwd,
+          env,
+          encoding: 'utf8',
+        },
+      );
       const sha = (mergeBase.stdout ?? '').trim();
       return mergeBase.status === 0 && /^[0-9a-f]{40}$/.test(sha) ? sha : null;
     }

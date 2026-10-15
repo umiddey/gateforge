@@ -31,10 +31,12 @@ import { LooseObjectWriter, serializeTreePayload, sortTreeEntries } from './git-
 import { isAbsolute, join } from 'node:path';
 import { UsageError } from './errors.js';
 import {
+  skipCandidateTreeCacheDirectory,
   RuntimeReuseBoundaryError,
   type RuntimeReuseMount,
   validateRuntimeReuseMounts,
 } from './runtime-reuse.js';
+import { pathIgnoredByGit, pathsIgnoredByGitCheckIgnore } from './git-ignored.js';
 import { DEFAULT_STATE_DIR } from './state.js';
 import { RUN_CACHE_DIR } from './run-cache.js';
 
@@ -179,10 +181,15 @@ function collectEntries(
   // `check` can write its fixed cache beside a run using a custom `--out`.
   // Exclude only Gateforge's own cache root, not other ignored/state files.
   const defaultCachePrefix = `${DEFAULT_STATE_DIR}/${RUN_CACHE_DIR}`;
+  /** CI witnessed runs may materialize ephemeral state beside the default gate dir. */
+  const ciWitnessedPrefix = '.gateforge/ci-witnessed';
+  const underCiWitnessed = (rel: string): boolean =>
+    rel === ciWitnessedPrefix || rel.startsWith(`${ciWitnessedPrefix}/`);
   const excluded = (rel: string): boolean =>
     (excludePrefix !== null && (rel === excludePrefix || rel.startsWith(`${excludePrefix}/`))) ||
     rel === defaultCachePrefix ||
     rel.startsWith(`${defaultCachePrefix}/`) ||
+    (underCiWitnessed(rel) && pathIgnoredByGit(workspace, rel)) ||
     docsExclusions.some((folder) => rel === folder || rel.startsWith(`${folder}/`)) ||
     cacheExclusions.includes(rel);
   const inspectExcludedDirectory = (directory: string, relativeDirectory: string): void => {
@@ -306,6 +313,9 @@ function collectEntries(
           continue;
         }
         if (stat.isDirectory()) {
+          if (skipCandidateTreeCacheDirectory(workspace, current.rel, name)) {
+            continue;
+          }
           stack.push({ dir: absolute, rel });
           continue;
         }
@@ -509,6 +519,7 @@ export function candidateTreeCoversCommit(
   env: NodeJS.ProcessEnv,
   treeId: string,
   commitish: string,
+  workspace: string,
   docsExclusions: readonly string[] = [],
   cacheExclusions: readonly string[] = [],
 ): boolean {
@@ -534,6 +545,16 @@ export function candidateTreeCoversCommit(
   if (committed === null || candidate === null) return false;
   for (const [path, identity] of committed) {
     if (candidate.get(path) !== identity) return false;
+  }
+  const extras: string[] = [];
+  for (const path of candidate.keys()) {
+    if (!committed.has(path)) extras.push(path);
+  }
+  if (extras.length === 0) return true;
+  const ignored = pathsIgnoredByGitCheckIgnore(workspace, extras);
+  if (ignored === null) return false;
+  for (const path of extras) {
+    if (!ignored.has(path)) return false;
   }
   return true;
 }

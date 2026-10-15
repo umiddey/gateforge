@@ -434,7 +434,19 @@ function verifiedCandidateFastPathReceipt(
     // Currency check: the receipt binds the tree identity the full gate would
     // have sealed. With exclusions that is the FILTERED tree of the checkout
     // (docs/cache bytes excluded), recomputed here from the candidate bytes.
-    let expectedTreeId: string | null = candidate.treeId;
+    // Without exclusions the full staged gate uses boundCandidateTreeId so a
+    // receipt sealed over the worktree (gitignored dependency bytes included)
+    // still matches a candidate-commit checkout whose tree is only tracked
+    // bytes — containment, not equality with the commit tree id.
+    let expectedTreeId: string | null = boundCandidateTreeId(
+      resolveGitDir(io.cwd, io.env),
+      io.cwd,
+      io.env,
+      resolveStateDir(io.cwd),
+      candidate,
+      docsExclusions,
+      cacheExclusions,
+    );
     if (hasOwnerExclusions) {
       const gitDir = resolveGitDir(checkoutDir, io.env);
       expectedTreeId =
@@ -738,6 +750,7 @@ export async function checkCommand(io: Io, argv: readonly string[]): Promise<num
  */
 function boundCandidateTreeId(
   gitDir: string | null,
+  workspace: string,
   env: NodeJS.ProcessEnv,
   stateDir: string,
   frozen: StagedCandidate,
@@ -748,7 +761,7 @@ function boundCandidateTreeId(
   const parsed = GateReceiptSchema.safeParse(readStateDocument(stateDir, 'receipt.json'));
   const sealed = parsed.success ? parsed.data.candidateTreeId : null;
   if (sealed === null || sealed === undefined || sealed === frozen.treeId) return frozen.treeId;
-  return candidateTreeCoversCommit(gitDir, env, sealed, frozen.treeId, docsExclusions, cacheExclusions)
+  return candidateTreeCoversCommit(gitDir, env, sealed, frozen.treeId, workspace, docsExclusions, cacheExclusions)
     ? sealed
     : frozen.treeId;
 }
@@ -875,12 +888,12 @@ async function stagedCheckCommand(
         if (!fastPathReceipt.treeMatches) {
           const stateDir = resolveStateDir(io.cwd);
           const sealedEntries = readCandidateTreeEntries(stateDir);
-          const gitDir = resolveGitDir(checkoutDir, io.env);
+          const checkoutGitDir = resolveGitDir(checkoutDir, io.env);
           const snapshot =
-            sealedEntries === null || gitDir === null
+            sealedEntries === null || checkoutGitDir === null
               ? null
               : computeCandidateTreeSnapshot(
-                  gitDir,
+                  checkoutGitDir,
                   checkoutDir,
                   io.env,
                   resolveStateDir(checkoutDir),
@@ -967,6 +980,7 @@ async function stagedCheckCommand(
       verifierKeyring: options.verifierKeyring,
       fixedCandidateTreeId: boundCandidateTreeId(
         resolveGitDir(io.cwd, io.env),
+        io.cwd,
         io.env,
         userState,
         frozen,
@@ -2313,6 +2327,7 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
           }),
     },
     ...(evaluated.httpLedger === undefined ? {} : { httpLedger: evaluated.httpLedger }),
+    ...(evaluated.uiLedger === undefined ? {} : { uiLedger: evaluated.uiLedger }),
     httpCoverage: evaluated.httpCoverage.summary,
   });
   // Unmatched by-id routes the owner graded as advisory (0.9.0, owner

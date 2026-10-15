@@ -126,6 +126,7 @@ import {
   type TwinDivergence,
   type TwinLink,
   type TwinShape,
+  runnerLogicalKey,
 } from '@gate-forge/core';
 import {
   appendFreezeReleaseEvent,
@@ -135,6 +136,7 @@ import {
   defaultPlaywrightCommand,
   diffNativePlaywrightTests,
   discoverTestCatalog,
+  refreshCatalogAfterRunnerEnumeration,
   findPlaywrightConfig,
   isPlaywrightRunnerInstall,
   listNativePlaywrightTests,
@@ -166,6 +168,7 @@ import {
   ENV_TWIN_INVENTORY,
   ENV_TWIN_QUERY_KEYS,
   ENV_TWIN_SHAPES,
+  autoSessionNodeOptions,
   type FreezeSigningKeyPair,
   type SpoolDrainHandle,
   type ExpectedSetResponse,
@@ -269,9 +272,10 @@ import {
 } from '../native-freeze.js';
 import type { RuntimeReuseMount } from '../runtime-reuse.js';
 import { loadRuntimeConfigAt, resolveRuntimeReuseDigest } from '../runtime.js';
-import { mergeRequestScopePreflight, resolveProvider } from '../providers.js';
+import { mergeRequestScopePreflight, resolveGithubBaseCommit, resolveProvider } from '../providers.js';
 import { engineIdentity, reportEngineLine } from '../engine-identity.js';
 import { assertReceiptApprovedPolicy, evaluateApprovedPolicy, resolveApprovedPolicyDigest } from '../trusted-policy.js';
+import { resolveAdditionalAppOrigins } from '../additional-app-origins.js';
 import { unstagedPolicyInputs } from './enforcement.js';
 import {
   clearGateReceipt,
@@ -878,6 +882,7 @@ async function legacyTestGates(io: Io, options: LegacyOptions): Promise<number> 
           [VERIFIER_KEY_ENV]: undefined,
           [VERIFIER_KEY_FILE_ENV]: undefined,
           ...suiteEnv,
+          ...(witnessUrl === undefined ? {} : { NODE_OPTIONS: autoSessionNodeOptions(suiteEnv['NODE_OPTIONS'] ?? io.env['NODE_OPTIONS']) }),
         },
       });
       suiteFailed = suiteStatus !== 0;
@@ -982,6 +987,7 @@ async function legacyTestGates(io: Io, options: LegacyOptions): Promise<number> 
       ? {}
       : { advisories: [...evaluated.httpCallAdvisories] }),
     ...(evaluated.httpLedger === undefined ? {} : { httpLedger: evaluated.httpLedger }),
+    ...(evaluated.uiLedger === undefined ? {} : { uiLedger: evaluated.uiLedger }),
     httpCoverage: evaluated.httpCoverage.summary,
   });
   writeLine(io.stdout, report);
@@ -1002,6 +1008,7 @@ async function legacyTestGates(io: Io, options: LegacyOptions): Promise<number> 
         ? {}
         : { advisories: [...evaluated.httpCallAdvisories] }),
       ...(evaluated.httpLedger === undefined ? {} : { httpLedger: evaluated.httpLedger }),
+      ...(evaluated.uiLedger === undefined ? {} : { uiLedger: evaluated.uiLedger }),
       httpCoverage: evaluated.httpCoverage.summary,
     }),
   );
@@ -1312,7 +1319,7 @@ export function twinPairNotComparedLine(link: TwinLink, witnessedObserved: boole
   ].join(' and ');
   const fix = rawObserved
     ? ''
-    : ' — a raw twin is observed only when it runs with the Gateforge test fixture, which opens an observation-only session for it (it issues no evidence)';
+    : ' — use a supported Playwright test import (@playwright/test or playwright/test) for automatic sessions, or the explicit Gateforge test fixture, and send browser requests through the session proxy; linked raw twins are observation-only (they issue no evidence)';
   return `test-gates: twin pair not compared: ${unobserved} sent no request through the witness${fix}`;
 }
 
@@ -1428,7 +1435,7 @@ interface VerifiedCarryForwardParent {
  * Returns:
  *   string | null: verified 40-character base commit, or null when unavailable.
  */
-function resolveCarryForwardBaseSha(
+export function resolveCarryForwardBaseSha(
   io: Io,
   provider: 'github-pr' | 'gitlab-mr' | 'local-staged' | 'all-files',
 ): string | null {
@@ -1437,11 +1444,12 @@ function resolveCarryForwardBaseSha(
     return /^[0-9a-f]{40}$/.test(sha) ? sha : null;
   }
   if (provider !== 'github-pr') return null;
-  const baseRef = io.env['GITHUB_BASE_REF']?.trim() ?? '';
-  if (baseRef.length === 0 || baseRef.startsWith('-') || /[\\s\\0]/.test(baseRef)) return null;
-  const result = spawnSync('git', ['--no-replace-objects', 'merge-base', 'HEAD', baseRef], {
+  const authorityEnv = sanitizedAuthorityEnv(io.env);
+  const baseCommit = resolveGithubBaseCommit(io.cwd, io.env['GITHUB_BASE_REF'] ?? '', authorityEnv);
+  if (baseCommit === null) return null;
+  const result = spawnSync('git', ['--no-replace-objects', 'merge-base', 'HEAD', baseCommit], {
     cwd: io.cwd,
-    env: sanitizedAuthorityEnv(io.env),
+    env: authorityEnv,
     encoding: 'utf8',
   });
   const sha = (result.stdout ?? '').trim();
@@ -1610,6 +1618,7 @@ function verifyCarryForwardParent(input: CarryForwardParentInput): ParentVerific
         input.io.env,
         treeId,
         `${bound.sha}^{tree}`,
+        input.io.cwd,
         input.docsExclusions,
         input.cacheExclusions,
       )
@@ -1817,6 +1826,7 @@ function verifyRunRecordParent(input: ResealParentCoordinates): ParentVerificati
         input.io.env,
         treeId,
         `${bound.sha}^{tree}`,
+        input.io.cwd,
         input.docsExclusions,
         input.cacheExclusions,
       )
@@ -2347,7 +2357,7 @@ function quarantinedInstanceKeys(
   if (catalog === null || quarantinedKeys.size === 0) return keys;
   for (const entry of catalog.entries) {
     if (!quarantinedKeys.has(entry.logicalKey)) continue;
-    keys.add(`${entry.file}#${entry.titlePath.join('>')}`);
+    keys.add(runnerLogicalKey(entry.file, entry.titlePath));
   }
   return keys;
 }
@@ -2446,6 +2456,7 @@ function plannedRowOfIdentity(test: RunnerTestIdentity): PlannedRow {
 function runnerAdapterFor(
   runner: string,
   wiring: { witnessUrl?: string; runToken?: string; appBaseUrl?: string } = {},
+  adapterOptions: { enumerationTimeoutMs?: number } = {},
 ): RunnerAdapterHolder {
   const witness = {
     ...(wiring.witnessUrl !== undefined && wiring.witnessUrl !== '' ? { url: wiring.witnessUrl } : {}),
@@ -2465,7 +2476,12 @@ function runnerAdapterFor(
     case 'pytest':
       return new PytestRunnerAdapter({ witness, ...appBaseUrl });
     case 'vitest':
-      return new VitestRunnerAdapter({ witness: sessionWiring });
+      return new VitestRunnerAdapter({
+        witness: sessionWiring,
+        ...(adapterOptions.enumerationTimeoutMs === undefined
+          ? {}
+          : { enumerationTimeoutMs: adapterOptions.enumerationTimeoutMs }),
+      });
     case 'cypress':
       return new CypressRunnerAdapter({ witness: sessionWiring });
     default:
@@ -2578,6 +2594,10 @@ async function runSupervisedTestGatesInner(
   // RunnerAdapter contract behind the SAME witness session, run token,
   // supervision, receipts, and strictness machinery.
   const runnerName = config.runner;
+  const vitestEnumerationTimeoutMs =
+    config.witness.enumerationTimeoutSeconds !== undefined
+      ? config.witness.enumerationTimeoutSeconds * 1000
+      : undefined;
   // The timing-chaos plan for THIS run (E63). Null without the flag:
   // then the witness is spawned with no plan and every byte of the run
   // is exactly what it was before chaos existed. The bounds come from
@@ -2778,6 +2798,9 @@ async function runSupervisedTestGatesInner(
       cwd: io.cwd,
       config,
       collectPytest: true,
+      ...(vitestEnumerationTimeoutMs === undefined
+        ? {}
+        : { vitestEnumerationTimeoutMs }),
       // The state directory this run ACTUALLY resolved (`--out` aware):
       // the supervised run's own generated config — and, for a
       // repository carrying one, an earlier build's freeze control files
@@ -3267,7 +3290,11 @@ async function runSupervisedTestGatesInner(
     // again. Nothing about the enumeration is assumed — an adapter that
     // cannot list its tests returns `status: 'unavailable'`, and that
     // plans nothing rather than planning a guessed half-set.
-    const enumeration = await runnerAdapterFor(runnerName).enumerate(io.cwd);
+    const enumeration = await runnerAdapterFor(
+      runnerName,
+      {},
+      vitestEnumerationTimeoutMs === undefined ? {} : { enumerationTimeoutMs: vitestEnumerationTimeoutMs },
+    ).enumerate(io.cwd);
     runnerEnumeration = enumeration;
     if (enumeration.status === 'discovered') {
       const enumeratedRows = enumeration.tests.map(plannedRowOfIdentity);
@@ -3276,6 +3303,9 @@ async function runSupervisedTestGatesInner(
         options.scope === 'changed'
           ? enumeratedRows.filter((row) => affectedRequiredFiles.includes(row.planned.file))
           : enumeratedRows;
+      if (catalog !== null && (runnerName === 'vitest' || runnerName === 'cypress')) {
+        catalog = refreshCatalogAfterRunnerEnumeration(catalog, runnerName, enumeration, io.cwd);
+      }
     }
   }
   // Named selection (`--test`): the plan is built from the FULL planned
@@ -3595,6 +3625,7 @@ async function runSupervisedTestGatesInner(
         ? {}
         : { advisories: [...evaluated.httpCallAdvisories] }),
       ...(evaluated.httpLedger === undefined ? {} : { httpLedger: evaluated.httpLedger }),
+      ...(evaluated.uiLedger === undefined ? {} : { uiLedger: evaluated.uiLedger }),
       httpCoverage: evaluated.httpCoverage.summary,
     });
     writeLine(io.stdout, report);
@@ -4108,6 +4139,12 @@ async function runSupervisedTestGatesInner(
         io.env['GATEFORGE_ADAPTER_BASE_URL'] !== undefined && io.env['GATEFORGE_ADAPTER_BASE_URL'] !== ''
           ? io.env['GATEFORGE_ADAPTER_BASE_URL']
           : targetBase;
+      // The owner's DECLARED additional app origins (0.15.0), resolved
+      // fail-closed from the trusted orchestrator environment. Each one
+      // becomes an extra attested upstream with its own per-session
+      // proxy; absent declaration = the variable is not passed at all and
+      // the witness is byte-identical to every earlier one.
+      const additionalAppOrigins = resolveAdditionalAppOrigins(config, io.env);
       spawnedWitness = await startWitnessProcess({
         GATEFORGE_RUN_ID: manifest.runId,
         GATEFORGE_RUN_TOKEN: runToken,
@@ -4120,6 +4157,9 @@ async function runSupervisedTestGatesInner(
         GATEFORGE_CLASSIFICATIONS: join(stateDir, 'classifications.json'),
         ...(targetBase !== '' ? { GATEFORGE_TARGET_BASE_URL: targetBase } : {}),
         ...(adapterBase !== '' ? { GATEFORGE_ADAPTER_BASE_URL: adapterBase } : {}),
+        ...(additionalAppOrigins.length > 0
+          ? { GATEFORGE_ADDITIONAL_APP_ORIGINS: JSON.stringify(additionalAppOrigins) }
+          : {}),
         ...(io.env['GATEFORGE_TARGET_FINGERPRINT'] !== undefined && io.env['GATEFORGE_TARGET_FINGERPRINT'] !== ''
           ? { GATEFORGE_TARGET_FINGERPRINT: io.env['GATEFORGE_TARGET_FINGERPRINT'] }
           : {}),
@@ -4248,7 +4288,7 @@ async function runSupervisedTestGatesInner(
   // this run would then perturb or compare nothing while reporting as
   // if it had. Say which, rather than reporting the fiction.
   if (chaosRun !== null && appliedOptions?.chaos == null) {
-    if (spawnedWitness !== null) await stopWitnessProcess(spawnedWitness);
+    if (spawnedWitness !== null) await stopWitnessProcess(io, spawnedWitness);
     throw new UsageError(
       `test-gates: --chaos ${String(chaosRun.seed)} needs a witness that accepts run options; the witness at ` +
         `'${effectiveWitnessUrl ?? ''}' confirmed no chaos plan, so no schedule was applied and this run would ` +
@@ -4315,7 +4355,7 @@ async function runSupervisedTestGatesInner(
   // the suite's own account of execution — refuse it instead.
   if (effectiveWitnessUrl === undefined || witnessVerifierKey === undefined) {
     if (spawnedWitness !== null) {
-      await stopWitnessProcess(spawnedWitness);
+      await stopWitnessProcess(io, spawnedWitness);
     }
     throw new UsageError(
       `test-gates --changed requires ${VERIFIER_KEY_ENV} or ${VERIFIER_KEY_FILE_ENV} in the orchestrating environment: ` +
@@ -4505,7 +4545,7 @@ async function runSupervisedTestGatesInner(
   if (pageObservation !== null) {
     writeLine(
       io.stderr,
-      'PAGE_OBSERVATION_FIXTURE_REQUIRED: page records are issued only for tests using the Gateforge Playwright fixture; other tests produce no page-observation records.',
+      'PAGE_OBSERVATION_ENABLED: page records are retained for passing tests with session-backed observation, including automatic Playwright sessions; uninstrumented tests produce no page-observation records.',
     );
     const reportedTamperLocations = new Set<string>();
     for (const risk of pageObservation.tamperRisks) {
@@ -4605,7 +4645,7 @@ async function runSupervisedTestGatesInner(
         )
         .map((row) => ({ file: row.planned.file, titlePath: [...row.planned.titlePath] }));
     } catch (error) {
-      if (spawnedWitness !== null) await stopWitnessProcess(spawnedWitness);
+      if (spawnedWitness !== null) await stopWitnessProcess(io, spawnedWitness);
       throw new UsageError(
         `test-gates: the global native preparation freeze refuses this run — ${(error as Error).message}`,
       );
@@ -4725,7 +4765,7 @@ async function runSupervisedTestGatesInner(
         );
       }
     } catch (error) {
-      if (spawnedWitness !== null) await stopWitnessProcess(spawnedWitness);
+      if (spawnedWitness !== null) await stopWitnessProcess(io, spawnedWitness);
       if (armedFreeze !== null) removeFreezeSpecDir(armedFreeze.control);
       throw error;
     }
@@ -4993,7 +5033,7 @@ async function runSupervisedTestGatesInner(
       // completion signal — exactly as the progress stream below does.
       runActivity.onTestFinished?.(title);
       progress.endTest({
-        logicalKey: `${event.file ?? ''}#${event.titlePath.join('>')}`,
+        logicalKey: runnerLogicalKey(event.file ?? '', event.titlePath),
         title,
         outcome: progressOutcomeOf(event.outcome),
         ...(event.errorMessage === undefined ? {} : { message: event.errorMessage }),
@@ -5012,6 +5052,10 @@ async function runSupervisedTestGatesInner(
   let sessionTrace: readonly TracedTestInput[] | null = null;
   let lifecycleConflicts: string[] = [];
   let intentFailures: string[] = [];
+  // The live attestation envelope (step 8 below) — fetched in the
+  // `finally` while the spawned witness still serves, persisted as the
+  // durable fallback, then the witness is stopped. `null` until then.
+  let liveAttestation: Attestation | null = null;
   // The FINAL control-spec verdict, decided in the `finally` below — at
   // the close of the supervised window, which is the last moment the
   // generated spec is read — and consumed below, after the run sealed.
@@ -5100,11 +5144,15 @@ async function runSupervisedTestGatesInner(
         mode: selection.mode,
         ...(selection.mode === 'named-selection' ? { testLocations: namedTestLocations } : {}),
       };
-      envelope = await runnerAdapterFor(runnerName, {
-        witnessUrl: effectiveWitnessUrl,
-        runToken,
-        appBaseUrl: io.env['GATEFORGE_APP_BASE_URL'] ?? '',
-      }).execute(request);
+      envelope = await runnerAdapterFor(
+        runnerName,
+        {
+          witnessUrl: effectiveWitnessUrl,
+          runToken,
+          appBaseUrl: io.env['GATEFORGE_APP_BASE_URL'] ?? '',
+        },
+        vitestEnumerationTimeoutMs === undefined ? {} : { enumerationTimeoutMs: vitestEnumerationTimeoutMs },
+      ).execute(request);
     } else {
       // The runner could not enumerate its expected set: nothing is
       // selected, so launching would widen to the whole suite. Fail
@@ -5349,11 +5397,31 @@ async function runSupervisedTestGatesInner(
         }
       }
     }
-    if (spawnedWitness !== null) {
-      // Graceful stop (the same contract as the consumer teardown): the
-      // witness appends its attested manifest envelope at shutdown, so
-      // the durable evidence channel is sealed before evaluation.
-      await stopWitnessProcess(spawnedWitness);
+    // 8. Live attestation (same discipline as the legacy path). It is read
+    // while the spawned witness still serves it: a stopped witness refuses
+    // the read, so the stop below must come after it.
+    // The stop sits in its own finally: a throwing read or persist must
+    // still shut the spawned witness down, and the error still propagates.
+    try {
+      liveAttestation = await fetchWitnessAttestation(
+        io,
+        effectiveWitnessUrl,
+        runToken,
+        witnessVerifierKey,
+        expectedDigest === null
+          ? null
+          : { runId: manifest.runId, invocationId, inputDigest: expectedDigest },
+      );
+      if (liveAttestation !== null) {
+        persistLiveAttestation(stateDir, liveAttestation);
+      }
+    } finally {
+      if (spawnedWitness !== null) {
+        // Graceful stop (the same contract as the consumer teardown): the
+        // witness appends its attested manifest envelope at shutdown, so
+        // the durable evidence channel is sealed before evaluation.
+        await stopWitnessProcess(io, spawnedWitness);
+      }
     }
     try {
       hostLoadCollector?.stop();
@@ -5464,7 +5532,7 @@ async function runSupervisedTestGatesInner(
         sessionTrace === null
           ? null
           : sessionTrace.filter(
-              (traced) => !ungradedKeys.has(`${traced.file}#${traced.titlePath.join('>')}`),
+              (traced) => !ungradedKeys.has(runnerLogicalKey(traced.file, traced.titlePath)),
             );
     }
   }
@@ -5501,12 +5569,12 @@ async function runSupervisedTestGatesInner(
       : {
           ...rawOutcomesDoc,
           outcomes: rawOutcomesDoc.outcomes.filter(
-            (row) => !unrequiredInstances.has(`${row.file}#${row.titlePath.join('>')}`),
+            (row) => !unrequiredInstances.has(runnerLogicalKey(row.file, row.titlePath)),
           ),
         };
   if (sessionTrace !== null && unrequiredInstances.size > 0) {
     sessionTrace = sessionTrace.filter(
-      (test) => !unrequiredInstances.has(`${test.file}#${test.titlePath.join('>')}`),
+      (test) => !unrequiredInstances.has(runnerLogicalKey(test.file, test.titlePath)),
     );
   }
   const sealed = sealExecutionResult({
@@ -5553,19 +5621,6 @@ async function runSupervisedTestGatesInner(
     }
   }
 
-  // 8. Live attestation (same discipline as the legacy path).
-  const liveAttestation = await fetchWitnessAttestation(
-    io,
-    effectiveWitnessUrl,
-    runToken,
-    witnessVerifierKey,
-    expectedDigest === null
-      ? null
-      : { runId: manifest.runId, invocationId, inputDigest: expectedDigest },
-  );
-  if (liveAttestation !== null) {
-    persistLiveAttestation(stateDir, liveAttestation);
-  }
 
   // 9. Evaluate + project supervision/mapping/inventory/lifecycle findings
   // into blocking entries (never diff-scoped, never waived). Lifecycle
@@ -6006,7 +6061,11 @@ async function runSupervisedTestGatesInner(
     }
     return 1;
   }
+  if (envelope.startupDiagnostic !== undefined) {
+    writeLine(io.stderr, envelope.incompleteDetail ?? 'RUNNER_STARTUP_FAILED');
+  }
   const diagnosticContext = {
+    ...(envelope.startupDiagnostic === undefined ? {} : { runnerStartup: envelope.startupDiagnostic }),
     scope: namedTestIds !== null ? ('named' as const) : options.scope,
     candidateTreeId: testedTreeId,
     inputDigest: expectedDigest,
@@ -6087,6 +6146,7 @@ async function runSupervisedTestGatesInner(
       : { chaos: { ...chaosRun, ...(chaosSchedule === null ? {} : { schedule: chaosSchedule }) } }),
     ...(localFailures.length === 0 ? {} : { failedTests: localFailures }),
     ...(evaluated.httpLedger === undefined ? {} : { httpLedger: evaluated.httpLedger }),
+    ...(evaluated.uiLedger === undefined ? {} : { uiLedger: evaluated.uiLedger }),
     httpCoverage: evaluated.httpCoverage.summary,
   });
   /**
@@ -6118,6 +6178,7 @@ async function runSupervisedTestGatesInner(
             ? {}
             : { chaos: { ...chaosRun, ...(chaosSchedule === null ? {} : { schedule: chaosSchedule }) } }),
           ...(evaluated.httpLedger === undefined ? {} : { httpLedger: evaluated.httpLedger }),
+          ...(evaluated.uiLedger === undefined ? {} : { uiLedger: evaluated.uiLedger }),
           httpCoverage: evaluated.httpCoverage.summary,
         }),
       ) as Record<string, unknown>),
@@ -6707,6 +6768,8 @@ function runExecutionSummaryOf(input: {
     scope: input.scope,
     mode: input.mode,
     testsPerformedThisInvocation: input.mode === 'executed' ? performed : 0,
+    executedTests: input.executionResult.executedTests ?? performed,
+    measuredTests: input.executionResult.measuredTests ?? input.executionResult.sessionTrace?.filter((test) => test.sessions.length > 0).length ?? 0,
     selectedTests: {
       selected,
       passed,
@@ -6738,25 +6801,47 @@ const EMPTY_CATALOG: TestCatalog = {
 };
 
 /**
+ * The grace a spawned witness gets between SIGTERM and SIGKILL. The
+ * witness's shutdown sequence is long by design — proxy listeners,
+ * session proxies, page observers, fixture leases, queue channel,
+ * engine browser, HTTP server — and the attested manifest envelope is
+ * appended LAST, so the bound must cover that whole sequence. The wait
+ * itself is on the EXIT event: a witness that shuts down in half a
+ * second is reaped immediately, and only a genuinely hung shutdown
+ * ever reaches the bound.
+ */
+const WITNESS_STOP_GRACE_MS = 30_000;
+
+/**
  * Gracefully stops a witness this command spawned (the same contract as
- * the consumer teardown): SIGTERM with a short grace period so the
- * witness appends its attested manifest envelope, then SIGKILL.
+ * the consumer teardown): SIGTERM, then wait for the process to EXIT so
+ * the witness can run its whole shutdown sequence and append the
+ * attested manifest envelope. If the bounded grace expires first, the
+ * SIGKILL is a REPORTED failure on stderr — the envelope is then known
+ * to be absent, and a missing durable attestation must be explainable,
+ * never silent.
  *
  * Args:
+ *   io: output target for the reported-SIGKILL failure line.
  *   handle: the spawned witness handle.
  */
-async function stopWitnessProcess(handle: { child: ChildProcess }): Promise<void> {
+export async function stopWitnessProcess(io: Io, handle: { child: ChildProcess }): Promise<void> {
+  if (handle.child.exitCode !== null || handle.child.signalCode !== null) return;
   handle.child.kill('SIGTERM');
-  await new Promise<void>((resolveWait) => {
-    const timer = setTimeout(() => {
-      handle.child.kill('SIGKILL');
-      resolveWait();
-    }, 2000);
+  const exited = await new Promise<boolean>((resolveWait) => {
+    const timer = setTimeout(() => resolveWait(false), WITNESS_STOP_GRACE_MS);
     handle.child.once('exit', () => {
       clearTimeout(timer);
-      resolveWait();
+      resolveWait(true);
     });
   });
+  if (exited) return;
+  handle.child.kill('SIGKILL');
+  writeLine(
+    io.stderr,
+    `test-gates: the spawned witness did not exit within ${String(Math.round(WITNESS_STOP_GRACE_MS / 1000))}s of SIGTERM — ` +
+      'SIGKILL sent before it appended its manifest envelope, so this run has no durable attestation',
+  );
 }
 
 /**
@@ -7083,8 +7168,9 @@ async function fetchWitnessAttestation(
       return null;
     }
     return attestation;
-  } catch {
-    writeLine(io.stderr, 'test-gates: live attestation unavailable (transport)');
+  } catch (error) {
+    const label = error instanceof SyntaxError ? 'parse' : 'transport';
+    writeLine(io.stderr, `test-gates: live attestation unavailable (${label})`);
     return null;
   } finally {
     clearTimeout(timer);

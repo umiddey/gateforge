@@ -661,9 +661,13 @@ describe('consecutive test-only re-seals', () => {
         expect(checked.stdout).toContain('EVIDENCE_STALE');
         // Hop 1 authenticates the union against EVERY contributing
         // run's envelope, so the deeper hop's forged MAC is caught
-        // there, naming the reason exactly.
+        // there, naming the reason exactly. The run that produced the
+        // envelope sealed the envelope's own digest, so the re-mace is
+        // caught by the digest match one check BEFORE the keyring (the
+        // keyring line stays for an envelope that still matches its
+        // seal but no longer verifies — key rotation).
         expect(checked.stdout).toContain(
-          "re-seal hop 1's retained evidence does not recompute: its evidence attestation does not verify with this keyring",
+          "re-seal hop 1's retained evidence does not recompute: its retained evidence does not match the attestation its document seals",
         );
       } finally {
         await close();
@@ -795,7 +799,13 @@ describe('the parent evidence survives an intermediate run', () => {
       );
       const refused = await runCli(repo, ['test-gates', '--changed', '--scope', 'changed', '--format', 'json'], env);
       expect(refused.stderr.split('\n').filter((row) => row.startsWith('test-gates: the previous run cannot be re-sealed'))).toEqual([
-        'test-gates: the previous run cannot be re-sealed from: its evidence attestation does not verify with this keyring → changed-scope run',
+        // The parent run fetched its attestation LIVE, so its document
+        // seals the envelope's own digest: the re-maced retained copy
+        // is caught by the digest match one check BEFORE the keyring
+        // (that line stays for an envelope that matches its seal but
+        // no longer verifies — key rotation). Still refused, and the
+        // ordinary changed-scope path still runs.
+        'test-gates: the previous run cannot be re-sealed from: its retained evidence does not match the attestation its document seals → changed-scope run',
       ]);
       expect(refused.stderr).not.toContain('only test files changed');
       // The ordinary changed-scope path ran instead, and it sealed an

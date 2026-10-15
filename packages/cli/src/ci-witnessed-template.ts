@@ -169,14 +169,16 @@ jobs:
           mkdir -p "\$GITHUB_WORKSPACE/.gateforge/test-gates"
       - name: Forward the pull-request base ref
         if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: \${{ github.base_ref }}
         run: |
           set -eu
           # The scope provider diffs against the merge base of the base
-          # branch, and it must be a real local ref: export the remote
-          # tracking ref plus the merge-base sha for the run.
-          git fetch --no-tags --quiet origin "\${{ github.base_ref }}:refs/remotes/origin/\${{ github.base_ref }}"
-          echo "GITHUB_BASE_REF=refs/remotes/origin/\${{ github.base_ref }}" >> "\$GITHUB_ENV"
-          echo "GATEFORGE_CI_BASE_SHA=\$(git merge-base HEAD "refs/remotes/origin/\${{ github.base_ref }}")" >> "\$GITHUB_ENV"
+          # branch: fetch the base as a remote-tracking ref (a detached PR
+          # checkout has no local base branch) and export the merge-base
+          # sha for the run.
+          git fetch --no-tags --quiet origin "\$BASE_REF:refs/remotes/origin/\$BASE_REF"
+          echo "GATEFORGE_CI_BASE_SHA=\$(git merge-base HEAD "refs/remotes/origin/\$BASE_REF")" >> "\$GITHUB_ENV"
       - name: Witnessed run
         env:
           GATEFORGE_WITNESS_VERIFIER_KEY: \${{ secrets.GATEFORGE_WITNESS_VERIFIER_KEY }}

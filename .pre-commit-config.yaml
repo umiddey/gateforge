@@ -1,0 +1,9 @@
+repos:
+# --- gateforge (generated): blocking static gate ---------------------
+  - repo: local
+    hooks:
+      - id: gateforge-check
+        name: gateforge — unresolved findings / unwaived obligations
+        entry: node .gateforge/hooks/gateforge-check.mjs
+        language: system
+        pass_filenames: false

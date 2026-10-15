@@ -40,14 +40,16 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
-import type {
-  RunnerExecutionEnv,
-  RunnerExecutionEnvelope,
-  RunnerInstanceOutcome,
-  RunnerSelection,
+import {
+  runnerLogicalKey,
+  type RunnerExecutionEnv,
+  type RunnerExecutionEnvelope,
+  type RunnerInstanceOutcome,
+  type RunnerSelection,
 } from '@gate-forge/core';
 import { ENV_PLAYWRIGHT_CONFIG_DIR } from '../constants.js';
-import { buildRunnerChildEnv } from './runner-env.js';
+import { autoSessionNodeOptions } from '../fixture/auto-session-env.js';
+import { buildRunnerChildEnv, isRunnerTestHarnessEnv } from './runner-env.js';
 import { findPlaywrightConfig } from './reconcile.js';
 import { localPlaywrightCliCandidates } from '../runner-resolution.js';
 import { synthesizeTrustedConfig, trustedReporterEntry, type ProjectScope } from './trusted-config.js';
@@ -208,6 +210,14 @@ export interface SupervisedRunOptions {
    */
   reporterEntry?: string;
   /**
+   * Ambient environment for the runner-child allowlist (meta-tests only).
+   * Defaults to `process.env`. Nested supervised runs started while this
+   * pack's vitest suite executes inside `gateforge test-gates` must strip
+   * outer `GATEFORGE_*` wiring so the child never inherits the parent
+   * gate's witness URL.
+   */
+  ambientEnv?: NodeJS.ProcessEnv;
+  /**
    * Carries the GLOBAL native preparation freeze the trusted CLI already
    * armed (see `discovery/prepare-barrier.ts`): the controller project,
    * the pinned control-spec digest's owner, and the per-invocation
@@ -348,6 +358,15 @@ export function nativeConfigDirOf(cwd: string): string {
  * @returns
  *   Record<string, string>: the child's own environment.
  */
+/** Drops parent `gateforge test-gates` wiring from an ambient environment. */
+export function stripGateforgeAmbient(ambient: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return Object.fromEntries(
+    Object.entries(ambient).filter(
+      ([name]) => !name.startsWith('GATEFORGE_') || isRunnerTestHarnessEnv(name),
+    ),
+  ) as NodeJS.ProcessEnv;
+}
+
 export function supervisedRunnerChildEnv(
   vars: Readonly<Record<string, string>>,
   cwd: string,
@@ -355,6 +374,7 @@ export function supervisedRunnerChildEnv(
 ): Record<string, string> {
   const child = buildRunnerChildEnv(vars, ambient);
   child[ENV_PLAYWRIGHT_CONFIG_DIR] = nativeConfigDirOf(cwd);
+  if (child['GATEFORGE_WITNESS_URL']) child['NODE_OPTIONS'] = autoSessionNodeOptions(child['NODE_OPTIONS']);
   return child;
 }
 
@@ -401,7 +421,11 @@ export async function executeSupervisedPlaywright(
   const isStub = options.command !== undefined;
   // Locate the consumer config without loading it; only the runner child
   // receives this context.
-  const childEnv = supervisedRunnerChildEnv(env.vars, cwd);
+  const childEnv = supervisedRunnerChildEnv(
+    env.vars,
+    cwd,
+    options.ambientEnv ?? stripGateforgeAmbient(),
+  );
   // The GLOBAL preparation freeze (see `discovery/prepare-barrier.ts`),
   // already ARMED by the trusted CLI: the CLI owns the per-invocation
   // signing key, the nonce and the baseline child environment, and it
@@ -505,7 +529,6 @@ export async function executeSupervisedPlaywright(
     env: childEnv,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
-  let stdout = '';
   let stderr = '';
   let timedOut = false;
   // The stall watchdog (F4): a real suite finishes tests for hours, so
@@ -567,18 +590,18 @@ export async function executeSupervisedPlaywright(
       if (activity !== undefined) activity.onTestFinished = undefined;
     };
     child.stdout?.on('data', (chunk: Buffer) => {
-      stdout += chunk.toString('utf8');
       if (echoRunnerOutput) process.stderr.write(chunk);
     });
     child.stderr?.on('data', (chunk: Buffer) => {
-      stderr += chunk.toString('utf8');
+      if (stderr.length < 8192) stderr += chunk.toString('utf8').slice(0, 8192 - stderr.length);
       if (echoRunnerOutput) process.stderr.write(chunk);
     });
     child.once('error', (error) => {
       stopTimers();
       settle({ code: null, timedOut: false, error });
     });
-    child.once('exit', (code) => {
+    // `exit` can precede the last pipe data; `close` waits for stdio to drain.
+    child.once('close', (code) => {
       stopTimers();
       settle({ code, timedOut, error: null });
     });
@@ -598,10 +621,9 @@ export async function executeSupervisedPlaywright(
       );
     }
   }
-  void stdout;
   if (outcome.error !== null) {
-    return incomplete(
-      null,
+    return startupFailure(
+      null, stderr,
       `supervised run could not start the runner (${argv.join(' ')}): ${outcome.error.message}`,
     );
   }
@@ -616,14 +638,28 @@ export async function executeSupervisedPlaywright(
     return incomplete(outcome.code, stallDetail);
   }
   const document = readOutcomesDocument(outcomesPath);
-  if (document === null) {
-    return incomplete(
-      outcome.code,
-      'runner outcomes missing or malformed — the trusted engine reporter writes them on every ' +
-        'supervised run (absent = crash, kill, or lost contact; an incomplete run never reports success)',
-    );
+  if (
+    document === null ||
+    document.outcomes.length === 0 ||
+    (outcome.code !== 0 && document.outcomes.every((row) => row.status === 'skipped'))
+  ) {
+    return startupFailure(outcome.code, stderr,
+      'before executing any tests; runner outcomes missing, malformed, empty, or all skipped with a failed exit');
   }
   return parseOutcomesDocument(document, outcome.code);
+}
+
+/** Bounded display evidence only: tokens cannot escape via env echo lines. */
+function startupFailure(processExit: number | null, stderr: string, reason: string): RunnerExecutionEnvelope {
+  const excerpt = stderr.slice(0, 8192).split(/\r?\n/).slice(0, 20)
+    .map((line) => /GATEFORGE_[A-Z0-9_]*TOKEN[A-Z0-9_]*/i.test(line)
+      ? '[Gateforge token environment echo redacted]' : line).join('\n').slice(0, 8192);
+  const detail = `RUNNER_STARTUP_FAILED: runner exited with status ${String(processExit)} — ${reason}` +
+    (excerpt.length === 0 ? '' : `\n${excerpt}`);
+  return {
+    ...incomplete(processExit, detail),
+    startupDiagnostic: { cause: 'RUNNER_STARTUP_FAILED', processExit, stderr: excerpt },
+  };
 }
 
 /**
@@ -698,7 +734,7 @@ export function parseOutcomesDocument(
         : 'failed';
   const shardComplete = document.shard === null || document.shard.total <= 1;
   const outcomes: RunnerInstanceOutcome[] = document.outcomes.map((row) => ({
-    logicalKey: `${row.file}#${row.titlePath.join('>')}`,
+    logicalKey: runnerLogicalKey(row.file, row.titlePath),
     project: row.project,
     frameworkId: row.testId,
     status: normalizeStatus(row.status),

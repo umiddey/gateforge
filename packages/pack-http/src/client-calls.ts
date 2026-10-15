@@ -40,7 +40,18 @@
  *   in the scanned set is a single `return <client call>(...)` arrow or
  *   function resolves its internal call with the callsite's first
  *   argument substituted for the wrapper's first parameter (one level,
- *   one parameter — anything deeper is typed unresolved).
+ *   one parameter — anything deeper is typed unresolved). A wrapper may
+ *   also name the endpoint parameter (`parameter`) and, when
+ *   `methodFromBody` is set, keep each concrete verb in its body. The
+ *   declaration may live in another scanned file, including a default
+ *   export, and a JSX attribute of that parameter is a callsite.
+ * - **Local shapes** (still fail closed): a single-assignment `const`
+ *   (a closer `let` stays unresolved), both branches of a conditional,
+ *   a `const` object-literal lookup (every literal value), a destructured
+ *   relative dynamic-import alias of a configured symbol or builder, and
+ *   a same-file function whose returns are a finite resolvable set.
+ *   A `const` named `fetch` whose initializer is not the Fetch API is
+ *   not a fetch call.
  */
 
 import ts from 'typescript';
@@ -83,10 +94,22 @@ export interface ClientSymbolConfig extends ClientSymbolScoping {
 export interface WrapperFunctionConfig extends ClientSymbolScoping {
   name: string;
   /**
-   * The concrete method the wrapper always issues (wrappers with
-   * computed methods stay unresolved).
+   * The concrete method the wrapper always issues, unless
+   * {@link methodFromBody} is set. A body verb that disagrees with this
+   * method stays unresolved — the configuration must not relabel a POST
+   * as GET.
    */
   method: HttpMethod;
+  /**
+   * The parameter that carries the endpoint path. Absent means the first
+   * parameter — the original single-parameter wrapper contract.
+   */
+  parameter?: string;
+  /**
+   * When true, each client call in the body keeps its own concrete verb.
+   * Required when one wrapper issues more than one verb.
+   */
+  methodFromBody?: boolean;
 }
 
 /** A configured pure URL builder: `name` + optional base + scoping. */
@@ -258,7 +281,7 @@ export interface ResponseRead {
 }
 
 
-/** One discovered frontend call (one row per source callsite). */
+/** One discovered frontend call. One callsite may emit several when it provably reaches several targets. */
 export interface ClientCall {
   method: HttpMethod;
   /** Path exactly as written after constant substitution. */
@@ -284,6 +307,12 @@ export interface ClientCall {
    * the pre-feature contract.
    */
   responseReads?: ResponseRead[];
+  /**
+   * Present only when this callsite emits more than one canonical target.
+   * Appended to the fact id so siblings do not collide. Absent on a
+   * single-target callsite — that id stays byte-identical.
+   */
+  idDisambiguator?: string;
 }
 
 export interface ClientScanUnresolved {
@@ -846,6 +875,16 @@ interface ConstValue {
 
 const UNRESOLVED_VALUE: ConstValue = { kind: 'unresolved', text: '' };
 
+/** Cap on alternatives one expression may prove. Above this, fail closed — never a partial set. */
+const MAX_CALL_TARGETS = 32;
+
+/** Calls of a declared wrapper into another declared wrapper, before fail closed. */
+const MAX_WRAPPER_DEPTH = 4;
+
+type ExprBinding = ReadonlyMap<string, readonly [ts.Expression, string]>;
+
+type UrlFunction = ts.FunctionDeclaration | ts.ArrowFunction | ts.FunctionExpression;
+
 /** One parsed file's contribution to the bounded dataflow. */
 interface FileModel {
   source: ts.SourceFile;
@@ -1046,14 +1085,18 @@ export function scanClientCalls(
   const model = table.modelOf(file);
   const calls: ClientCall[] = [];
   const unresolved: ClientScanUnresolved[] = [];
-  const wrapperSpans = [...(model?.wrappers.values() ?? [])].map((w) => [w.start, w.end] as const);
+  const wrapperSpans = modeledWrapperSpans(model, config, file);
 
   const insideWrapper = (node: ts.Node): boolean =>
     wrapperSpans.some(([start, end]) => node.getStart(source) >= start && node.getEnd() <= end);
 
   const visit = (node: ts.Node): void => {
-    if (ts.isCallExpression(node) && !insideWrapper(node)) {
-      extractCall(node, file, config, table, model, calls, unresolved);
+    if (!insideWrapper(node)) {
+      if (ts.isCallExpression(node)) {
+        extractCall(node, file, config, table, model, calls, unresolved);
+      } else if (ts.isJsxSelfClosingElement(node) || ts.isJsxOpeningElement(node)) {
+        extractJsxWrapper(node, file, config, table, calls, unresolved);
+      }
     }
     ts.forEachChild(node, visit);
   };
@@ -1104,12 +1147,14 @@ function extractCall(
 
   // fetch(url[, {method}])
   if (ts.isIdentifier(expression) && expression.text === 'fetch') {
-    extractClientCall(call, 'fetch', 'GET', file, config, table, calls, unresolved, location, undefined, reads);
+    if (!table.shadowsGlobalFetch(expression)) {
+      extractClientCall(call, 'fetch', 'GET', file, config, table, calls, unresolved, location, undefined, reads);
+    }
     return;
   }
   // axios.get(url), apiClient.post(url), window.fetch(url)
   if (ts.isPropertyAccessExpression(expression) && ts.isIdentifier(expression.expression)) {
-    const objectName = expression.expression.text;
+    const objectName = table.configuredClientName(expression.expression, file);
     const verb = expression.name.text.toLowerCase();
     const isFetchObject = objectName === 'window' && expression.name.text === 'fetch';
     if (isFetchObject) {
@@ -1159,14 +1204,16 @@ function extractCall(
   if (wrapperConfig !== undefined) {
     const wrapperModel = table.modelOf(file)?.wrappers.get(wrapperConfig.name);
     if (wrapperModel === undefined) {
-      unresolved.push({
-        code: FRONTEND_CALL_TARGET_UNRESOLVED,
-        detail: (
-          `wrapper '${wrapperConfig.name}' has no simple single-return client call in the ` +
-          'scanned set; its call targets cannot be resolved statically'
-        ),
-        location,
-      });
+      if (resolvesToDeclaredWrapper(table, wrapperConfig.name, file, config)) {
+        const bindings = new Map<string, readonly [ts.Expression, string]>();
+        const declared = table.findFunction(wrapperConfig.name, file);
+        const paramName = wrapperConfig.parameter ?? (declared === undefined ? undefined : firstIdentifierParam(declared.fn));
+        if (declared !== undefined && paramName !== undefined) {
+          const argument = argumentForParameter(declared.fn, paramName, call);
+          if (argument !== undefined) bindings.set(paramName, [argument, file]);
+        }
+        resolveExtendedWrapper(wrapperConfig, file, config, table, bindings, calls, unresolved, location, reads);
+      }
       return;
     }
     const bound = new BoundTable(table, wrapperModel.parameter, call.arguments[0], file);
@@ -1226,6 +1273,7 @@ function extractCall(
  */
 interface Evaluator {
   evaluate(node: ts.Expression, file: string): ConstValue;
+  callTargets(node: ts.Expression, file: string, bindings?: ExprBinding): readonly string[] | undefined;
   optionsMethod(
     node: ts.Expression,
     file: string,
@@ -1276,6 +1324,12 @@ class BoundTable implements Evaluator {
       return { kind: 'literal', text };
     }
     return this.inner.evaluate(node, file);
+  }
+
+  callTargets(node: ts.Expression, file: string, bindings?: ExprBinding): readonly string[] | undefined {
+    const next = new Map(bindings);
+    if (this.argument !== undefined) next.set(this.parameter, [this.argument, this.argumentFile]);
+    return this.inner.callTargets(node, file, next);
   }
 
   optionsMethod(
@@ -1490,8 +1544,8 @@ function resolveAndRecord(
   reads: ResponseRead[] = [],
   baseURL?: string,
 ): void {
-  const resolved = table.evaluate(urlNode, file);
-  if (resolved.kind === 'unresolved') {
+  const targets = table.callTargets(urlNode, file);
+  if (targets === undefined || targets.length === 0) {
     unresolved.push({
       code: FRONTEND_CALL_TARGET_UNRESOLVED,
       detail: `call target cannot be resolved statically (${framework})`,
@@ -1499,25 +1553,52 @@ function resolveAndRecord(
     });
     return;
   }
-  const joined = joinInstanceBaseURL(baseURL, resolved.text);
-  const canonical = normalizeHttpPath(joined.path, { sameOriginHosts: config.sameOriginHosts });
-  if (!canonical.ok) {
-    unresolved.push({
-      code: FRONTEND_CALL_TARGET_UNRESOLVED,
-      detail: `call target '${joined.path}': ${canonical.detail}`,
-      location,
-    });
-    return;
+  recordRawTargets(targets, method, framework, config, calls, unresolved, location, reads, baseURL);
+}
+
+function recordRawTargets(
+  raws: readonly string[],
+  method: HttpMethod,
+  framework: string,
+  config: ClientScanConfig,
+  calls: ClientCall[],
+  unresolved: ClientScanUnresolved[],
+  location: Location,
+  reads: ResponseRead[],
+  baseURL?: string,
+): void {
+  const resolved: { raw: string; canonical: string; joined: string | undefined }[] = [];
+  for (const raw of raws) {
+    const joined = joinInstanceBaseURL(baseURL, raw);
+    const canonical = normalizeHttpPath(joined.path, { sameOriginHosts: config.sameOriginHosts });
+    if (!canonical.ok) {
+      unresolved.push({
+        code: FRONTEND_CALL_TARGET_UNRESOLVED,
+        detail: `call target '${joined.path}': ${canonical.detail}`,
+        location,
+      });
+      return;
+    }
+    resolved.push({ raw, canonical: canonical.canonical, joined: joined.joined });
   }
-  calls.push({
-    method,
-    rawPath: resolved.text,
-    canonicalPath: canonical.canonical,
-    ...(joined.joined !== undefined ? { joinedBaseURL: joined.joined } : {}),
-    framework,
-    location,
-    ...(reads.length > 0 ? { responseReads: reads } : {}),
-  });
+  const unique = new Map<string, { raw: string; joined: string | undefined }>();
+  for (const item of resolved) {
+    if (!unique.has(item.canonical)) unique.set(item.canonical, { raw: item.raw, joined: item.joined });
+  }
+  const many = unique.size > 1;
+  const ordered = [...unique.entries()].sort((left, right) => (left[0] < right[0] ? -1 : left[0] > right[0] ? 1 : 0));
+  for (const [canonical, item] of ordered) {
+    calls.push({
+      method,
+      rawPath: item.raw,
+      canonicalPath: canonical,
+      ...(item.joined !== undefined ? { joinedBaseURL: item.joined } : {}),
+      framework,
+      location,
+      ...(many ? { idDisambiguator: canonical } : {}),
+      ...(reads.length > 0 ? { responseReads: reads } : {}),
+    });
+  }
 }
 
 /**
@@ -2150,6 +2231,758 @@ class ValueTable {
     }
     return null;
   }
+
+  /**
+   * Every literal path `node` can take, or undefined when any branch
+   * cannot be proven. A resolved target is exactly a value the code can
+   * call — never a guess, never a partial set.
+   */
+  callTargets(
+    node: ts.Expression,
+    file: string,
+    bindings?: ExprBinding,
+    seen: Set<string> = new Set(),
+  ): readonly string[] | undefined {
+    const peeled = unwrapOwnExpression(node);
+    if (peeled !== node) return this.callTargets(peeled, file, bindings, seen);
+    if (ts.isSatisfiesExpression(node)) return this.callTargets(node.expression, file, bindings, seen);
+    if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return [node.text];
+    if (ts.isTemplateExpression(node)) return this.expandTemplate(node, file, bindings, seen);
+    if (ts.isConditionalExpression(node)) return this.conditionalTargets(node, file, bindings, seen);
+    if (ts.isIdentifier(node)) return this.identifierTargets(node, file, bindings, seen);
+    if (ts.isElementAccessExpression(node)) return this.lookupTargets(node, file, bindings, seen);
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
+      const alias = this.dynamicImportAlias(node.expression, file);
+      const builderName = alias?.kind === 'builder' ? alias.name : node.expression.text;
+      const builder = alias?.kind === 'client' ? undefined : activeUrlBuilderIn(this.config, builderName, file);
+      if (builder !== undefined) {
+        const argument = node.arguments[0];
+        if (argument === undefined) return undefined;
+        const inner = this.callTargets(argument, file, bindings, seen);
+        if (inner === undefined) return undefined;
+        const base = builder.base ?? '';
+        return inner.map((text) => (text.startsWith('/') || base === '' ? `${base}${text}` : `${base}/${text}`));
+      }
+      if (alias === undefined) return this.finiteFunctionTargets(node, file, bindings, seen);
+    }
+    return undefined;
+  }
+
+  /** A const binding named `fetch` whose initializer is not the Fetch API. */
+  shadowsGlobalFetch(use: ts.Identifier): boolean {
+    const local = this.localConstBinding(use);
+    if (local.state !== 'found') return false;
+    const init = unwrapOwnExpression(local.initializer);
+    if (ts.isArrowFunction(init) || ts.isFunctionExpression(init)) return true;
+    if (!ts.isCallExpression(init)) return false;
+    const callee = init.expression;
+    if (ts.isIdentifier(callee) && callee.text === 'fetch') return false;
+    if (ts.isPropertyAccessExpression(callee) && callee.name.text === 'fetch') return false;
+    return true;
+  }
+
+  /** Configured client-symbol name for a callsite object, following a dynamic-import alias. */
+  configuredClientName(use: ts.Identifier, file: string): string {
+    const alias = this.dynamicImportAlias(use, file);
+    return alias?.kind === 'client' ? alias.name : use.text;
+  }
+
+  /** A function named `name` visible from `file`: same file, or a relative import including default. */
+  findFunction(name: string, file: string): { fn: UrlFunction; file: string } | undefined {
+    const own = this.modelOf(file)?.functions.get(name);
+    if (own !== undefined) return { fn: own, file };
+    const imported = this.importedExport(file, name);
+    if (imported === null) return undefined;
+    const model = this.modelOf(imported.file);
+    if (model === undefined) return undefined;
+    const fn = imported.exported === 'default' ? defaultExportedFunction(model) : model.functions.get(imported.exported);
+    return fn === undefined ? undefined : { fn, file: imported.file };
+  }
+
+  private identifierTargets(
+    node: ts.Identifier,
+    file: string,
+    bindings: ExprBinding | undefined,
+    seen: Set<string>,
+  ): readonly string[] | undefined {
+    const bound = bindings?.get(node.text);
+    if (bound !== undefined) {
+      const rest = new Map(bindings);
+      rest.delete(node.text);
+      return this.callTargets(bound[0], bound[1], rest, seen);
+    }
+    const local = this.localConstBinding(node);
+    if (local.state === 'shadowed') return undefined;
+    if (local.state === 'found') {
+      const key = `${file}::${node.text}`;
+      if (seen.has(key)) return undefined;
+      seen.add(key);
+      const value = this.callTargets(local.initializer, file, bindings, seen);
+      seen.delete(key);
+      return value;
+    }
+    const imported = this.importedFrom(file, node.text);
+    const origin = imported ?? file;
+    const initializer = this.modelOf(origin)?.constants.get(node.text);
+    if (initializer === undefined) return undefined;
+    const key = `${origin}::${node.text}`;
+    if (seen.has(key)) return undefined;
+    seen.add(key);
+    const value = this.callTargets(initializer, origin, bindings, seen);
+    seen.delete(key);
+    return value;
+  }
+
+  private conditionalTargets(
+    node: ts.ConditionalExpression,
+    file: string,
+    bindings: ExprBinding | undefined,
+    seen: Set<string>,
+  ): readonly string[] | undefined {
+    const proven = this.proveStartsWith(node.condition, file, bindings, seen);
+    if (proven === true) return this.callTargets(node.whenTrue, file, bindings, seen);
+    if (proven === false) return this.callTargets(node.whenFalse, file, bindings, seen);
+    const whenTrue = this.callTargets(node.whenTrue, file, bindings, seen);
+    const whenFalse = this.callTargets(node.whenFalse, file, bindings, seen);
+    if (whenTrue === undefined || whenFalse === undefined) return undefined;
+    const combined = [...whenTrue, ...whenFalse];
+    return combined.length > MAX_CALL_TARGETS ? undefined : combined;
+  }
+
+  /** `expr.startsWith('literal')` when `expr` is exactly one literal. Otherwise unproven. */
+  private proveStartsWith(
+    node: ts.Expression,
+    file: string,
+    bindings: ExprBinding | undefined,
+    seen: Set<string>,
+  ): boolean | undefined {
+    const expr = unwrapOwnExpression(node);
+    if (ts.isPrefixUnaryExpression(expr) && expr.operator === ts.SyntaxKind.ExclamationToken) {
+      const inner = this.proveStartsWith(expr.operand, file, bindings, seen);
+      return inner === undefined ? undefined : !inner;
+    }
+    if (
+      !ts.isCallExpression(expr) ||
+      !ts.isPropertyAccessExpression(expr.expression) ||
+      expr.expression.name.text !== 'startsWith' ||
+      expr.arguments.length !== 1
+    ) {
+      return undefined;
+    }
+    const probe = expr.arguments[0];
+    if (probe === undefined || !ts.isStringLiteral(probe)) return undefined;
+    const receiver = this.callTargets(expr.expression.expression, file, bindings, seen);
+    if (receiver === undefined || receiver.length !== 1) return undefined;
+    return (receiver[0] ?? '').startsWith(probe.text);
+  }
+
+  private expandTemplate(
+    node: ts.TemplateExpression,
+    file: string,
+    bindings: ExprBinding | undefined,
+    seen: Set<string>,
+  ): readonly string[] | undefined {
+    let pieces: { text: string; rooted: boolean }[] = [{
+      text: node.head.text,
+      rooted: node.head.text.startsWith('/') || node.head.text.startsWith('${'),
+    }];
+    for (const span of node.templateSpans) {
+      const next: { text: string; rooted: boolean }[] = [];
+      const substituted = this.pathHoleTargets(span.expression, file, bindings, seen);
+      if (substituted !== undefined) {
+        for (const piece of pieces) {
+          for (const hole of substituted) {
+            next.push({
+              text: piece.text + hole + span.literal.text,
+              rooted: piece.rooted || hole.startsWith('/'),
+            });
+          }
+        }
+      } else {
+        const bound = ts.isIdentifier(span.expression) ? bindings?.get(span.expression.text) : undefined;
+        const holeExpr = bound?.[0] ?? span.expression;
+        const holeFile = bound?.[1] ?? file;
+        const hole = bound === undefined ? this.evaluate(span.expression, file) : this.evaluate(holeExpr, holeFile);
+        if (hole.kind === 'unresolved') {
+          if (pieces.some((piece) => !piece.rooted)) return undefined;
+          const suffix = this.trailingQuerySuffix(node, span, holeExpr, holeFile);
+          const slot = suffix ? '?' : '${}';
+          for (const piece of pieces) next.push({ text: piece.text + slot + span.literal.text, rooted: true });
+        } else {
+          for (const piece of pieces) {
+            next.push({
+              text: piece.text + hole.text + span.literal.text,
+              rooted: piece.rooted || hole.text.startsWith('/'),
+            });
+          }
+        }
+      }
+      if (next.length === 0 || next.length > MAX_CALL_TARGETS) return undefined;
+      pieces = next;
+    }
+    return pieces.map((piece) => piece.text);
+  }
+
+  /** Path-absolute hole alternatives only. Query-shaped holes stay on the suffix model. */
+  private pathHoleTargets(
+    expr: ts.Expression,
+    file: string,
+    bindings: ExprBinding | undefined,
+    seen: Set<string>,
+  ): readonly string[] | undefined {
+    const targets = this.callTargets(expr, file, bindings, seen);
+    if (targets === undefined || targets.length === 0) return undefined;
+    if (!targets.every((text) => text === '' || text.startsWith('/'))) return undefined;
+    return targets;
+  }
+
+  private lookupTargets(
+    node: ts.ElementAccessExpression,
+    file: string,
+    bindings: ExprBinding | undefined,
+    seen: Set<string>,
+  ): readonly string[] | undefined {
+    const object = this.constObjectLiteral(node.expression, file, bindings, seen);
+    if (object === undefined) return undefined;
+    for (const property of object.properties) {
+      if (!ts.isPropertyAssignment(property) && !ts.isShorthandPropertyAssignment(property)) return undefined;
+      if (ts.isComputedPropertyName(property.name)) return undefined;
+    }
+    const index = node.argumentExpression;
+    const selected = index !== undefined && ts.isStringLiteral(index)
+      ? object.properties.filter((property) => propertyNameText(property.name) === index.text)
+      : object.properties;
+    if (selected.length === 0) return undefined;
+    const targets: string[] = [];
+    for (const property of selected) {
+      if (!ts.isPropertyAssignment(property) && !ts.isShorthandPropertyAssignment(property)) return undefined;
+      const initializer = ts.isPropertyAssignment(property) ? property.initializer : property.name;
+      const part = this.callTargets(initializer, file, bindings, seen);
+      if (part === undefined) return undefined;
+      targets.push(...part);
+      if (targets.length > MAX_CALL_TARGETS) return undefined;
+    }
+    return targets;
+  }
+
+  private constObjectLiteral(
+    expr: ts.Expression,
+    file: string,
+    bindings: ExprBinding | undefined,
+    seen: Set<string>,
+  ): ts.ObjectLiteralExpression | undefined {
+    const node = unwrapOwnExpression(expr);
+    if (ts.isObjectLiteralExpression(node)) return node;
+    if (!ts.isIdentifier(node)) return undefined;
+    const local = this.localConstBinding(node);
+    if (local.state !== 'found') return undefined;
+    const key = `${file}::${node.text}`;
+    if (seen.has(key)) return undefined;
+    const initializer = unwrapOwnExpression(local.initializer);
+    return ts.isObjectLiteralExpression(initializer) ? initializer : undefined;
+  }
+
+  private finiteFunctionTargets(
+    call: ts.CallExpression,
+    file: string,
+    bindings: ExprBinding | undefined,
+    seen: Set<string>,
+  ): readonly string[] | undefined {
+    if (!ts.isIdentifier(call.expression)) return undefined;
+    const name = call.expression.text;
+    const local = this.localConstBinding(call.expression);
+    let fn: UrlFunction | undefined;
+    if (local.state === 'shadowed') return undefined;
+    if (local.state === 'found') {
+      const init = unwrapOwnExpression(local.initializer);
+      if (!ts.isArrowFunction(init) && !ts.isFunctionExpression(init)) return undefined;
+      fn = init;
+    } else {
+      fn = this.modelOf(file)?.functions.get(name);
+    }
+    if (fn === undefined) return undefined;
+    const key = `${file}::fn::${name}`;
+    if (seen.has(key)) return undefined;
+    seen.add(key);
+    const returns = collectUrlReturns(fn);
+    if (returns === undefined) {
+      seen.delete(key);
+      return undefined;
+    }
+    const targets: string[] = [];
+    for (const returned of returns) {
+      const part = this.callTargets(returned, file, bindings, seen);
+      if (part === undefined) {
+        seen.delete(key);
+        return undefined;
+      }
+      targets.push(...part);
+      if (targets.length > MAX_CALL_TARGETS) {
+        seen.delete(key);
+        return undefined;
+      }
+    }
+    seen.delete(key);
+    return targets.length === 0 ? undefined : targets;
+  }
+
+  private dynamicImportAlias(
+    use: ts.Identifier,
+    file: string,
+  ): { kind: 'builder' | 'client'; name: string } | undefined {
+    const binding = this.nearestDestructure(use);
+    if (binding === undefined) return undefined;
+    if (binding.exported !== 'default') {
+      if (activeUrlBuilderIn(this.config, binding.exported, file) !== undefined) {
+        return { kind: 'builder', name: binding.exported };
+      }
+      if (clientSymbolActiveIn(this.config, binding.exported, file)) {
+        return { kind: 'client', name: binding.exported };
+      }
+      return undefined;
+    }
+    const resolved = this.resolveSpecifier(file, binding.specifier);
+    if (resolved === null) return undefined;
+    const exported = defaultExportIdentifier(this.modelOf(resolved)?.source);
+    if (exported === undefined || !clientSymbolActiveIn(this.config, exported, file)) return undefined;
+    return { kind: 'client', name: exported };
+  }
+
+  private nearestDestructure(use: ts.Identifier): { exported: string; specifier: string } | undefined {
+    let scope: ts.Node | undefined = use.parent;
+    while (scope !== undefined) {
+      if (ts.isFunctionLike(scope) || ts.isSourceFile(scope)) {
+        const found = this.destructureInScope(use, scope);
+        if (found === 'other') return undefined;
+        if (found !== undefined) return found;
+      }
+      scope = scope.parent;
+    }
+    return undefined;
+  }
+
+  private destructureInScope(
+    use: ts.Identifier,
+    scope: ts.Node,
+  ): { exported: string; specifier: string } | 'other' | undefined {
+    let best: { pos: number; result: { exported: string; specifier: string } | 'other' } | undefined;
+    const visit = (node: ts.Node): void => {
+      if (node !== scope && ts.isFunctionLike(node)) return;
+      if (ts.isVariableDeclaration(node) && node.name.getEnd() <= use.getStart()) {
+        const isConst = (ts.getCombinedNodeFlags(node) & ts.NodeFlags.Const) !== 0;
+        if (ts.isIdentifier(node.name) && node.name.text === use.text) {
+          if (best === undefined || node.name.getStart() > best.pos) {
+            best = { pos: node.name.getStart(), result: 'other' };
+          }
+        }
+        if (ts.isObjectBindingPattern(node.name)) {
+          for (const element of node.name.elements) {
+            if (!ts.isIdentifier(element.name) || element.name.text !== use.text || element.dotDotDotToken !== undefined) {
+              continue;
+            }
+            if (best !== undefined && element.name.getStart() <= best.pos) continue;
+            const specifier = isConst ? awaitImportSpecifier(node.initializer) : undefined;
+            const exported = element.propertyName !== undefined && ts.isIdentifier(element.propertyName)
+              ? element.propertyName.text
+              : element.name.text;
+            best = {
+              pos: element.name.getStart(),
+              result: specifier === undefined ? 'other' : { exported, specifier },
+            };
+          }
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(scope);
+    return best?.result;
+  }
+
+  private importedExport(file: string, localName: string): { file: string; exported: string } | null {
+    const model = this.modelOf(file);
+    if (model === undefined) return null;
+    let found: { file: string; exported: string } | null = null;
+    const visit = (node: ts.Node): void => {
+      if (found !== null) return;
+      if (!ts.isImportDeclaration(node) || !ts.isStringLiteral(node.moduleSpecifier)) {
+        ts.forEachChild(node, visit);
+        return;
+      }
+      const specifier = node.moduleSpecifier.text;
+      if (!specifier.startsWith('./') && !specifier.startsWith('../')) return;
+      const resolved = this.resolveSpecifier(file, specifier);
+      if (resolved === null) return;
+      const clause = node.importClause;
+      if (clause?.name?.text === localName) {
+        found = { file: resolved, exported: 'default' };
+        return;
+      }
+      if (clause?.namedBindings !== undefined && ts.isNamedImports(clause.namedBindings)) {
+        for (const element of clause.namedBindings.elements) {
+          if (element.name.text === localName) {
+            found = { file: resolved, exported: element.propertyName?.text ?? element.name.text };
+            return;
+          }
+        }
+      }
+    };
+    visit(model.source);
+    return found;
+  }
+}
+
+function modeledWrapperSpans(
+  model: FileModel | undefined,
+  config: ClientScanConfig,
+  file: string,
+): Array<readonly [number, number]> {
+  if (model === undefined) return [];
+  const spans: Array<readonly [number, number]> = [...model.wrappers.values()].map((wrapper) => [wrapper.start, wrapper.end]);
+  for (const entry of config.wrapperFunctions ?? []) {
+    if (!entryInScope(file, entry)) continue;
+    const fn = model.functions.get(entry.name);
+    if (fn === undefined) continue;
+    if (containsClientCall(fn, config, file) || containsConfiguredWrapperCall(fn, config, file)) {
+      spans.push([fn.getStart(), fn.getEnd()]);
+    }
+  }
+  return spans;
+}
+
+function containsConfiguredWrapperCall(node: ts.Node, config: ClientScanConfig, file: string): boolean {
+  let found = false;
+  const visit = (current: ts.Node): void => {
+    if (found || !ts.isCallExpression(current)) {
+      ts.forEachChild(current, visit);
+      return;
+    }
+    if (ts.isIdentifier(current.expression) && activeWrapperIn(config, current.expression.text, file) !== undefined) {
+      found = true;
+      return;
+    }
+    ts.forEachChild(current, visit);
+  };
+  visit(node);
+  return found;
+}
+
+function collectUrlReturns(fn: UrlFunction): ts.Expression[] | undefined {
+  const body = fn.body;
+  if (body === undefined) return undefined;
+  if (!ts.isBlock(body)) return [body];
+  const returns: ts.Expression[] = [];
+  let poison = false;
+  const visit = (node: ts.Node): void => {
+    if (poison) return;
+    if (node !== body && ts.isFunctionLike(node)) return;
+    if (ts.isReturnStatement(node)) {
+      if (node.expression === undefined) {
+        poison = true;
+        return;
+      }
+      const expr = unwrapOwnExpression(node.expression);
+      if (expr.kind === ts.SyntaxKind.NullKeyword) return;
+      if (ts.isIdentifier(expr) && expr.text === 'undefined') return;
+      returns.push(node.expression);
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(body);
+  if (poison || returns.length === 0) return undefined;
+  return returns;
+}
+
+function awaitImportSpecifier(expr: ts.Expression | undefined): string | undefined {
+  if (expr === undefined) return undefined;
+  const inner = unwrapOwnExpression(ts.isAwaitExpression(expr) ? expr.expression : expr);
+  if (!ts.isCallExpression(inner) || inner.expression.kind !== ts.SyntaxKind.ImportKeyword) return undefined;
+  const arg = inner.arguments[0];
+  if (arg === undefined || !ts.isStringLiteral(arg)) return undefined;
+  if (!arg.text.startsWith('./') && !arg.text.startsWith('../')) return undefined;
+  return arg.text;
+}
+
+function defaultExportedFunction(model: FileModel): UrlFunction | undefined {
+  for (const statement of model.source.statements) {
+    if (
+      ts.isFunctionDeclaration(statement) &&
+      statement.name !== undefined &&
+      statement.modifiers?.some((mod) => mod.kind === ts.SyntaxKind.DefaultKeyword) === true
+    ) {
+      return statement;
+    }
+    if (ts.isExportAssignment(statement) && ts.isIdentifier(statement.expression)) {
+      return model.functions.get(statement.expression.text);
+    }
+  }
+  return undefined;
+}
+
+function defaultExportIdentifier(source: ts.SourceFile | undefined): string | undefined {
+  if (source === undefined) return undefined;
+  for (const statement of source.statements) {
+    if (
+      ts.isFunctionDeclaration(statement) &&
+      statement.name !== undefined &&
+      statement.modifiers?.some((mod) => mod.kind === ts.SyntaxKind.DefaultKeyword) === true
+    ) {
+      return statement.name.text;
+    }
+    if (ts.isExportAssignment(statement) && ts.isIdentifier(statement.expression)) {
+      return statement.expression.text;
+    }
+  }
+  return undefined;
+}
+
+function firstIdentifierParam(fn: UrlFunction): string | undefined {
+  const first = fn.parameters[0];
+  return first !== undefined && ts.isIdentifier(first.name) ? first.name.text : undefined;
+}
+
+function argumentForParameter(fn: UrlFunction, paramName: string, call: ts.CallExpression): ts.Expression | undefined {
+  for (let index = 0; index < fn.parameters.length; index += 1) {
+    const parameter = fn.parameters[index];
+    if (parameter === undefined) continue;
+    if (ts.isIdentifier(parameter.name) && parameter.name.text === paramName) return call.arguments[index];
+    if (!ts.isObjectBindingPattern(parameter.name)) continue;
+    for (const element of parameter.name.elements) {
+      if (!ts.isIdentifier(element.name) || element.name.text !== paramName) continue;
+      const prop = element.propertyName !== undefined && ts.isIdentifier(element.propertyName)
+        ? element.propertyName.text
+        : element.name.text;
+      const argument = call.arguments[index];
+      return argument === undefined ? undefined : objectProperty(argument, prop);
+    }
+  }
+  return undefined;
+}
+
+function objectProperty(expr: ts.Expression, name: string): ts.Expression | undefined {
+  const unwrapped = unwrapOwnExpression(expr);
+  if (!ts.isObjectLiteralExpression(unwrapped)) return undefined;
+  for (const property of unwrapped.properties) {
+    if (ts.isShorthandPropertyAssignment(property) && property.name.text === name) return property.name;
+    if (
+      ts.isPropertyAssignment(property) &&
+      ts.isIdentifier(property.name) &&
+      property.name.text === name
+    ) {
+      return property.initializer;
+    }
+  }
+  return undefined;
+}
+
+function jsxAttributeExpression(
+  node: ts.JsxOpeningElement | ts.JsxSelfClosingElement,
+  name: string,
+): ts.Expression | undefined {
+  for (const attr of node.attributes.properties) {
+    if (!ts.isJsxAttribute(attr) || !ts.isIdentifier(attr.name) || attr.name.text !== name) continue;
+    const init = attr.initializer;
+    if (init === undefined) return undefined;
+    if (ts.isStringLiteral(init)) return init;
+    if (ts.isJsxExpression(init) && init.expression !== undefined && ts.isExpression(init.expression)) {
+      return init.expression;
+    }
+  }
+  return undefined;
+}
+
+function resolvesToDeclaredWrapper(
+  table: ValueTable,
+  name: string,
+  file: string,
+  config: ClientScanConfig,
+): boolean {
+  const declared = table.findFunction(name, file);
+  // No local binding: the configured name still stands, and an unmodeled
+  // declaration stays a finding. A binding that is a different function
+  // (same local name, other module, no client call) is not this wrapper.
+  if (declared === undefined) return true;
+  return containsClientCall(declared.fn, config, declared.file)
+    || containsConfiguredWrapperCall(declared.fn, config, declared.file);
+}
+
+function extractJsxWrapper(
+  node: ts.JsxOpeningElement | ts.JsxSelfClosingElement,
+  file: string,
+  config: ClientScanConfig,
+  table: ValueTable,
+  calls: ClientCall[],
+  unresolved: ClientScanUnresolved[],
+): void {
+  if (!ts.isIdentifier(node.tagName)) return;
+  const wrapperConfig = activeWrapperIn(config, node.tagName.text, file);
+  if (wrapperConfig === undefined || !resolvesToDeclaredWrapper(table, wrapperConfig.name, file, config)) return;
+  const source = table.modelOf(file)?.source;
+  if (source === undefined) return;
+  const bindings = new Map<string, readonly [ts.Expression, string]>();
+  if (wrapperConfig.parameter !== undefined) {
+    const attr = jsxAttributeExpression(node, wrapperConfig.parameter);
+    if (attr !== undefined) bindings.set(wrapperConfig.parameter, [attr, file]);
+  }
+  resolveExtendedWrapper(
+    wrapperConfig,
+    file,
+    config,
+    table,
+    bindings,
+    calls,
+    unresolved,
+    locationOf(file, source, node),
+    [],
+  );
+}
+
+function resolveExtendedWrapper(
+  wrapperConfig: WrapperFunctionConfig,
+  file: string,
+  config: ClientScanConfig,
+  table: ValueTable,
+  bindings: ReadonlyMap<string, readonly [ts.Expression, string]>,
+  calls: ClientCall[],
+  unresolved: ClientScanUnresolved[],
+  location: Location,
+  reads: ResponseRead[],
+): void {
+  const declared = table.findFunction(wrapperConfig.name, file);
+  if (declared === undefined) {
+    unresolved.push({
+      code: FRONTEND_CALL_TARGET_UNRESOLVED,
+      detail: (
+        `wrapper '${wrapperConfig.name}' has no simple single-return client call in the ` +
+        'scanned set; its call targets cannot be resolved statically'
+      ),
+      location,
+    });
+    return;
+  }
+  const body = wrapperBodyTargets(declared.fn, declared.file, wrapperConfig, config, table, bindings, 0, new Set());
+  if (body === 'unmodeled') {
+    unresolved.push({
+      code: FRONTEND_CALL_TARGET_UNRESOLVED,
+      detail: (
+        `wrapper '${wrapperConfig.name}' has no simple single-return client call in the ` +
+        'scanned set; its call targets cannot be resolved statically'
+      ),
+      location,
+    });
+    return;
+  }
+  if (body === 'unresolved') {
+    unresolved.push({
+      code: FRONTEND_CALL_TARGET_UNRESOLVED,
+      detail: `call target cannot be resolved statically (${wrapperConfig.name})`,
+      location,
+    });
+    return;
+  }
+  const byMethod = new Map<HttpMethod, string[]>();
+  for (const target of body) {
+    const list = byMethod.get(target.method) ?? [];
+    list.push(target.raw);
+    byMethod.set(target.method, list);
+  }
+  for (const [method, raws] of byMethod) {
+    recordRawTargets(raws, method, wrapperConfig.name, config, calls, unresolved, location, reads);
+  }
+}
+
+function wrapperBodyTargets(
+  fn: UrlFunction,
+  fnFile: string,
+  entry: WrapperFunctionConfig,
+  config: ClientScanConfig,
+  table: ValueTable,
+  bindings: ReadonlyMap<string, readonly [ts.Expression, string]>,
+  depth: number,
+  stack: Set<string>,
+): { method: HttpMethod; raw: string }[] | 'unmodeled' | 'unresolved' {
+  const stackKey = `${fnFile}::${entry.name}`;
+  if (depth > MAX_WRAPPER_DEPTH || stack.has(stackKey)) return 'unmodeled';
+  stack.add(stackKey);
+  const found: { method: HttpMethod; raw: string }[] = [];
+  let saw = false;
+  let failed = false;
+  const visit = (node: ts.Node): void => {
+    if (failed || !ts.isCallExpression(node)) {
+      if (!failed) ts.forEachChild(node, visit);
+      return;
+    }
+    const client = clientCallOf(node, config, fnFile, table);
+    if (client !== undefined) {
+      saw = true;
+      if (entry.methodFromBody !== true && client.method !== entry.method) {
+        failed = true;
+        return;
+      }
+      const targets = table.callTargets(client.url, fnFile, bindings);
+      if (targets === undefined) {
+        failed = true;
+        return;
+      }
+      const method = entry.methodFromBody === true ? client.method : entry.method;
+      for (const raw of targets) found.push({ method, raw });
+      return;
+    }
+    const nestedName = ts.isIdentifier(node.expression) ? node.expression.text : undefined;
+    const nested = nestedName === undefined ? undefined : activeWrapperIn(config, nestedName, fnFile);
+    if (nested !== undefined && nested.name !== entry.name) {
+      saw = true;
+      const innerFn = table.findFunction(nested.name, fnFile);
+      if (innerFn === undefined) {
+        failed = true;
+        return;
+      }
+      const paramName = nested.parameter ?? firstIdentifierParam(innerFn.fn);
+      const next = new Map(bindings);
+      if (paramName !== undefined) {
+        const argument = argumentForParameter(innerFn.fn, paramName, node);
+        if (argument !== undefined) {
+          const followed = ts.isIdentifier(argument) ? bindings.get(argument.text) : undefined;
+          next.set(paramName, followed ?? [argument, fnFile]);
+        }
+      }
+      const inner = wrapperBodyTargets(innerFn.fn, innerFn.file, nested, config, table, next, depth + 1, stack);
+      if (inner === 'unmodeled' || inner === 'unresolved') {
+        failed = true;
+        return;
+      }
+      found.push(...inner);
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  if (fn.body !== undefined) visit(fn.body);
+  stack.delete(stackKey);
+  if (!saw) return 'unmodeled';
+  if (failed || found.length === 0) return 'unresolved';
+  return found;
+}
+
+function clientCallOf(
+  call: ts.CallExpression,
+  config: ClientScanConfig,
+  file: string,
+  table: ValueTable,
+): { url: ts.Expression; method: HttpMethod } | undefined {
+  const expression = call.expression;
+  if (ts.isIdentifier(expression) && expression.text === 'fetch' && !table.shadowsGlobalFetch(expression)) {
+    const url = call.arguments[0];
+    return url === undefined ? undefined : { url, method: 'GET' };
+  }
+  if (!ts.isPropertyAccessExpression(expression) || !ts.isIdentifier(expression.expression)) return undefined;
+  const objectName = table.configuredClientName(expression.expression, file);
+  const verb = expression.name.text.toLowerCase();
+  if (!(objectName === 'axios' || clientSymbolActiveIn(config, objectName, file)) || !VERB_METHODS.has(verb)) {
+    return undefined;
+  }
+  const url = call.arguments[0];
+  if (url === undefined) return undefined;
+  return { url, method: VERB_METHODS.get(verb) ?? 'GET' };
 }
 
 /**
@@ -2236,11 +3069,21 @@ export function parseClientScanConfigDocument(section: unknown, at: string): Cli
   if (Array.isArray(document['wrapperFunctions'])) {
     config.wrapperFunctions = document['wrapperFunctions'].map((entry) => {
       const record = entry as Record<string, unknown>;
-      const method = normalizeHttpMethodValue(String(record['method'] ?? 'GET'));
+      const methodFromBody = record['methodFromBody'] === true;
+      const method = methodFromBody && record['method'] === undefined
+        ? 'GET'
+        : normalizeHttpMethodValue(String(record['method'] ?? 'GET'));
       if (method === null) {
         throw new Error(`invalid http client config: wrapper method must be a concrete verb at ${at}`);
       }
-      return { name: String(record['name']), method, ...parseEntryScoping(record, 'wrapperFunctions', at) };
+      const parameter = typeof record['parameter'] === 'string' ? record['parameter'] : undefined;
+      return {
+        name: String(record['name']),
+        method,
+        ...(methodFromBody ? { methodFromBody: true } : {}),
+        ...(parameter === undefined ? {} : { parameter }),
+        ...parseEntryScoping(record, 'wrapperFunctions', at),
+      };
     });
   }
   if (Array.isArray(document['urlBuilders'])) {

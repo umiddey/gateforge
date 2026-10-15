@@ -448,7 +448,7 @@ function contractFactFromClientCall(
     framework: clientCall.framework,
     file: sourceRel,
     location,
-    idSuffix: `${sourceRel}:${clientCall.location.line}:${clientCall.location.col}`,
+    idSuffix: `${sourceRel}:${clientCall.location.line}:${clientCall.location.col}${clientCall.idDisambiguator === undefined ? '' : `:${clientCall.idDisambiguator}`}`,
     callsites: [`${clientCall.location.file}:${clientCall.location.line}:${clientCall.location.col}`],
     // The response fields this call site reads (plan 2026-09-25 Phase 4b
     // item 5). Omitted entirely when the code reads none, so a call
