@@ -82,7 +82,6 @@ jobs:
         # the github-pr provider must diff against the fetched remote ref.
         run: |
           git fetch --no-tags --quiet origin "${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"
-          echo "GITHUB_BASE_REF=refs/remotes/origin/${{ github.base_ref }}" >> "$GITHUB_ENV"
 
       - name: Run supervised strict gate
         env:

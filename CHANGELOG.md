@@ -2,6 +2,16 @@
 
 ## 0.15.0
 
+- **Fixed: github-pr base ref in detached PR checkouts:** the changed-file
+  provider and the `test-gates` carry-forward resolver now resolve
+  `GITHUB_BASE_REF` as `<base>` or, when that is not a local ref, as the
+  fetched remote ref `refs/remotes/origin/<base>` — a checkout of the PR
+  head SHA has the base only as the remote-tracking ref, and the gate used
+  to fail with `fatal: Not a valid object name <base>`. Neither ref
+  resolving still fails closed. The strict workflow and the witnessed CI
+  template drop their ineffective `GITHUB_BASE_REF` writes to `$GITHUB_ENV`
+  (GitHub refuses to override `GITHUB_*`); the base `git fetch` and
+  `GATEFORGE_CI_BASE_SHA` stay.
 - **Candidate fast-path tree binding:** `check --candidate-commit` reuses a
   receipt only when the sealed candidate tree matches the commit tree or
   every extra sealed path is git-ignored (`git check-ignore`); non-ignored

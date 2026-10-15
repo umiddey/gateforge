@@ -272,7 +272,7 @@ import {
 } from '../native-freeze.js';
 import type { RuntimeReuseMount } from '../runtime-reuse.js';
 import { loadRuntimeConfigAt, resolveRuntimeReuseDigest } from '../runtime.js';
-import { mergeRequestScopePreflight, resolveProvider } from '../providers.js';
+import { mergeRequestScopePreflight, resolveGithubBaseCommit, resolveProvider } from '../providers.js';
 import { engineIdentity, reportEngineLine } from '../engine-identity.js';
 import { assertReceiptApprovedPolicy, evaluateApprovedPolicy, resolveApprovedPolicyDigest } from '../trusted-policy.js';
 import { resolveAdditionalAppOrigins } from '../additional-app-origins.js';
@@ -1435,7 +1435,7 @@ interface VerifiedCarryForwardParent {
  * Returns:
  *   string | null: verified 40-character base commit, or null when unavailable.
  */
-function resolveCarryForwardBaseSha(
+export function resolveCarryForwardBaseSha(
   io: Io,
   provider: 'github-pr' | 'gitlab-mr' | 'local-staged' | 'all-files',
 ): string | null {
@@ -1444,11 +1444,12 @@ function resolveCarryForwardBaseSha(
     return /^[0-9a-f]{40}$/.test(sha) ? sha : null;
   }
   if (provider !== 'github-pr') return null;
-  const baseRef = io.env['GITHUB_BASE_REF']?.trim() ?? '';
-  if (baseRef.length === 0 || baseRef.startsWith('-') || /[\\s\\0]/.test(baseRef)) return null;
-  const result = spawnSync('git', ['--no-replace-objects', 'merge-base', 'HEAD', baseRef], {
+  const authorityEnv = sanitizedAuthorityEnv(io.env);
+  const baseCommit = resolveGithubBaseCommit(io.cwd, io.env['GITHUB_BASE_REF'] ?? '', authorityEnv);
+  if (baseCommit === null) return null;
+  const result = spawnSync('git', ['--no-replace-objects', 'merge-base', 'HEAD', baseCommit], {
     cwd: io.cwd,
-    env: sanitizedAuthorityEnv(io.env),
+    env: authorityEnv,
     encoding: 'utf8',
   });
   const sha = (result.stdout ?? '').trim();

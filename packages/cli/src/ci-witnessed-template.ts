@@ -172,10 +172,11 @@ jobs:
         run: |
           set -eu
           # The scope provider diffs against the merge base of the base
-          # branch, and it must be a real local ref: export the remote
-          # tracking ref plus the merge-base sha for the run.
+          # branch: fetch the base as a remote-tracking ref (a detached PR
+          # checkout has no local base branch) and export the merge-base
+          # sha for the run. GITHUB_BASE_REF itself is provided by GitHub
+          # and cannot be overridden through $GITHUB_ENV.
           git fetch --no-tags --quiet origin "\${{ github.base_ref }}:refs/remotes/origin/\${{ github.base_ref }}"
-          echo "GITHUB_BASE_REF=refs/remotes/origin/\${{ github.base_ref }}" >> "\$GITHUB_ENV"
           echo "GATEFORGE_CI_BASE_SHA=\$(git merge-base HEAD "refs/remotes/origin/\${{ github.base_ref }}")" >> "\$GITHUB_ENV"
       - name: Witnessed run
         env:
