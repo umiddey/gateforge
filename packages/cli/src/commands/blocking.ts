@@ -334,6 +334,7 @@ ${installStep}      - name: Locate exact merge-base receipt
         env:
           GH_TOKEN: \${{ github.token }}
         run: |
+          # Stays shell-level on purpose: fetch-depth: 0 above makes origin/$GITHUB_BASE_REF authoritative, so the in-process resolver's detached-checkout rules are not needed here.
           base_sha=$(git merge-base "$GITHUB_SHA" "origin/$GITHUB_BASE_REF")
           run_id=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/gateforge.yml/runs?head_sha=$base_sha&status=success&per_page=100" --jq '[.workflow_runs[] | select(.event == "push")][0].id // empty')
           printf 'run_id=%s\\n' "$run_id" >> "$GITHUB_OUTPUT"

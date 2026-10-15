@@ -301,14 +301,13 @@ describe('gateforge enforce', () => {
     // the release version replaced by a token (the pin moves with every
     // release; nothing else may). A release that never declares a source
     // must keep today's output exactly, so the golden digest moves only
-    // with a deliberate change.
+    // with a deliberate change. Current pin: 0.7.1 bytes (version
+    // tokenized) plus the 0.15.0 shell-level comment on the merge-base
+    // receipt step (review m5).
     expect(
       createHash('sha256').update(renderGithubActionsTemplate().replaceAll(VERSION, '<VERSION>')).digest('hex'),
     ).toBe(
-      // The registry-only workflow as shipped before the engine-source
-      // variable existed (0.7.1 bytes, version tokenized) — one byte of
-      // drift fails here.
-      '4834bc33bf0206eacf40644c7f6944e897da363d05b469b6223489debbd703b6',
+      '6eb5f054959016aafc89ba0579dd216277be082675a665cf04770e88b9f97f7e',
     );
     expect(renderGithubActionsTemplate()).toContain(
       '      - name: Install Gateforge\n        run: npm install --no-save --package-lock=false @gate-forge/cli@' +

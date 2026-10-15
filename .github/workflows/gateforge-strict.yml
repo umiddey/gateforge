@@ -77,11 +77,19 @@ jobs:
         # run") for the exact failure modes without this step.
         run: npx playwright install --with-deps chromium
 
+      - name: Install the suite's python test runner
+        # The supervised suite executes real pytest participants
+        # (runner-cli-e2e, witnessed-pytest); with no pytest executable on
+        # PATH they skip or fail — and a skip is never coverage.
+        run: python3 -m pip install --break-system-packages pytest
+
       - name: Resolve pull-request base ref
         # The checkout is a detached PR head: no local base branch exists, so
         # the github-pr provider must diff against the fetched remote ref.
+        env:
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          git fetch --no-tags --quiet origin "${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"
+          git fetch --no-tags --quiet origin "$BASE_REF:refs/remotes/origin/$BASE_REF"
 
       - name: Run supervised strict gate
         env:

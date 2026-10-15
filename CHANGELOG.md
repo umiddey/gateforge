@@ -4,14 +4,16 @@
 
 - **Fixed: github-pr base ref in detached PR checkouts:** the changed-file
   provider and the `test-gates` carry-forward resolver now resolve
-  `GITHUB_BASE_REF` as `<base>` or, when that is not a local ref, as the
-  fetched remote ref `refs/remotes/origin/<base>` — a checkout of the PR
-  head SHA has the base only as the remote-tracking ref, and the gate used
-  to fail with `fatal: Not a valid object name <base>`. Neither ref
-  resolving still fails closed. The strict workflow and the witnessed CI
-  template drop their ineffective `GITHUB_BASE_REF` writes to `$GITHUB_ENV`
-  (GitHub refuses to override `GITHUB_*`); the base `git fetch` and
-  `GATEFORGE_CI_BASE_SHA` stay.
+  `GITHUB_BASE_REF` as the fetched remote ref `refs/remotes/origin/<base>`
+  first and as a local `<base>` only as a fallback — a checkout of the PR
+  head SHA has the base only as the remote-tracking ref, the gate used to
+  fail with `fatal: Not a valid object name <base>`, and a stale local
+  branch of the same name no longer shadows the fetched base. The value
+  must be a valid branch name (`git check-ref-format --branch`): revision
+  syntax and surrounding whitespace fail closed, as does neither candidate
+  resolving. The witnessed CI template drops its `GITHUB_BASE_REF` write
+  to `$GITHUB_ENV` and passes the branch name to the shell through `env:`;
+  the base `git fetch` and `GATEFORGE_CI_BASE_SHA` stay.
 - **Candidate fast-path tree binding:** `check --candidate-commit` reuses a
   receipt only when the sealed candidate tree matches the commit tree or
   every extra sealed path is git-ignored (`git check-ignore`); non-ignored

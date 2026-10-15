@@ -19,7 +19,7 @@
 import { describe, expect, it } from 'vitest';
 import { loadConfig, runExitCode, sha256Canonical, targetArtifactDigestOf, withTempRepo, type TempRepo, type TestCatalog } from '@gate-forge/core';
 import type { RunnerOutcomesDocument } from '@gate-forge/pack-playwright';
-import { currentInputDigest, fixtureFingerprint, installFixture, runCli, FIXED_AT } from './helpers.js';
+import { ciFreeEnv, currentInputDigest, fixtureFingerprint, installFixture, runCli, FIXED_AT } from './helpers.js';
 import { resolveAdoptedBaseline } from '../src/adopted-baseline.js';
 import { trustedPolicyDigestForConfig, issueGateReceipt, sealExecutionResult } from '../src/execution.js';
 import { testReceiptV2Bindings } from './gate-receipts.js';
@@ -324,7 +324,7 @@ async function supervisedSeamEvaluation(repo: TempRepo) {
   try {
     const pipeline = await runPipeline({
       cwd: repo.root,
-      env: { ...process.env },
+      env: ciFreeEnv(),
       config,
       provider: 'all-files',
       stateDir: resolveStateDir(repo.root),

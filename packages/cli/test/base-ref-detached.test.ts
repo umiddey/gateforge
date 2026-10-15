@@ -45,6 +45,25 @@ function expectNoLocalMain(repo: TempRepo): void {
   ).toBe(0);
 }
 
+/**
+ * Builds the SHADOWING fixture: the base is published as
+ * `refs/remotes/origin/main`, but a stale local `main` exists at a
+ * different commit forked off the root — a local ref must never win over
+ * the fetched remote-tracking ref (review finding M1).
+ */
+function makeShadowedCheckout(repo: TempRepo): void {
+  repo.commitFiles({ 'src/root.txt': 'root\n' }, 'root commit');
+  repo.commitFiles({ 'src/base.txt': 'base\n' }, 'base commit');
+  const baseSha = repo.git(['rev-parse', 'main']).stdout.trim();
+  repo.git(['update-ref', 'refs/remotes/origin/main', baseSha]);
+  repo.git(['checkout', '-b', 'feature/pr']);
+  repo.commitFiles({ 'src/pr-change.txt': 'change\n' }, 'pr change');
+  repo.git(['checkout', 'main']);
+  repo.git(['reset', '--hard', 'HEAD~1']);
+  repo.commitFiles({ 'src/stale.txt': 'stale\n' }, 'stale local main commit');
+  repo.git(['checkout', 'feature/pr']);
+}
+
 function io(repo: TempRepo, baseRef: string): Io {
   return { cwd: repo.root, env: { GITHUB_BASE_REF: baseRef }, stdout: process.stdout, stderr: process.stderr };
 }
@@ -99,6 +118,48 @@ describe('github-pr base ref in a detached PR checkout', () => {
       makeDetachedCheckout(repo);
       expect(resolveCarryForwardBaseSha(io(repo, '-main'), 'github-pr')).toBeNull();
       expect(resolveCarryForwardBaseSha(io(repo, 'has space'), 'github-pr')).toBeNull();
+    });
+  });
+
+  it('provider prefers refs/remotes/origin/<base> over a stale local <base>', () => {
+    withTempRepo({}, (repo) => {
+      makeShadowedCheckout(repo);
+      // Pre-fix the unqualified `main` resolved first: the merge base landed
+      // at the fork root and the root, base and stale-local files all leaked
+      // into the diff.
+      const files = githubPrProvider(repo.root, { GITHUB_BASE_REF: 'main' }).changedFiles();
+      expect(files).toEqual(['src/pr-change.txt']);
+    });
+  });
+
+  it('carry-forward resolver prefers refs/remotes/origin/<base> over a stale local <base>', () => {
+    withTempRepo({}, (repo) => {
+      makeShadowedCheckout(repo);
+      const sha = resolveCarryForwardBaseSha(io(repo, 'main'), 'github-pr');
+      expect(sha).toBe(repo.git(['rev-parse', 'refs/remotes/origin/main']).stdout.trim());
+    });
+  });
+
+  it('provider rejects revision syntax such as HEAD or a ref expression', () => {
+    withTempRepo({}, (repo) => {
+      makeDetachedCheckout(repo);
+      expect(() => githubPrProvider(repo.root, { GITHUB_BASE_REF: 'HEAD' }).changedFiles()).toThrow(
+        UsageError,
+      );
+      expect(() =>
+        githubPrProvider(repo.root, { GITHUB_BASE_REF: 'main~1' }).changedFiles(),
+      ).toThrow(UsageError);
+      expect(resolveCarryForwardBaseSha(io(repo, 'main@{1}'), 'github-pr')).toBeNull();
+    });
+  });
+
+  it('provider rejects a base ref with surrounding whitespace instead of trimming it', () => {
+    withTempRepo({}, (repo) => {
+      makeDetachedCheckout(repo);
+      expect(() =>
+        githubPrProvider(repo.root, { GITHUB_BASE_REF: ' main ' }).changedFiles(),
+      ).toThrow(UsageError);
+      expect(resolveCarryForwardBaseSha(io(repo, ' main'), 'github-pr')).toBeNull();
     });
   });
 });
