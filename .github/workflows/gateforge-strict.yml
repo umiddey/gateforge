@@ -54,6 +54,17 @@ jobs:
           node-version: 24
           cache: npm
 
+      - name: Restore the Cypress binary cache
+        # The cypress participants (runner-cli-e2e) execute the REAL
+        # Cypress binary; the lockfile-pinned npm package alone is not
+        # enough. The Electron download is the slow part, so it is
+        # cached; the lockfile hash keys the cache, so a cypress version
+        # bump invalidates it.
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/Cypress
+          key: cypress-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
       - name: Install locked dependencies
         run: npm ci
 
@@ -77,11 +88,30 @@ jobs:
         # run") for the exact failure modes without this step.
         run: npx playwright install --with-deps chromium
 
+      - name: Install the Cypress binary
+        # The cypress participants execute the real Cypress binary that
+        # the lockfile-pinned npm package manages (cached above).
+        # `cypress verify` fails this step when the binary is missing or
+        # unusable, instead of letting the suite skip its cypress cases —
+        # a skip is never coverage.
+        run: |
+          npx cypress install
+          npx cypress verify
+
       - name: Install the suite's python test runner
         # The supervised suite executes real pytest participants
         # (runner-cli-e2e, witnessed-pytest); with no pytest executable on
-        # PATH they skip or fail — and a skip is never coverage.
-        run: python3 -m pip install --break-system-packages pytest
+        # PATH they skip or fail — and a skip is never coverage. The
+        # versions are pinned to the exact ones the suite is verified
+        # with, and the probes below fail this step when a module did
+        # not install (participants run `python3 -m pytest`, so only the
+        # importable modules matter, not PATH scripts; runner-cli-e2e
+        # routes its pytest httpx traffic through the per-test session
+        # proxy, so httpx must be importable too).
+        run: |
+          python3 -m pip install --break-system-packages pytest==9.1.1 httpx==0.28.1
+          python3 -m pytest --version
+          python3 -c "import httpx; print('httpx', httpx.__version__)"
 
       - name: Resolve pull-request base ref
         # The checkout is a detached PR head: no local base branch exists, so
@@ -95,6 +125,13 @@ jobs:
         env:
           GATEFORGE_WITNESS_VERIFIER_KEY: ${{ secrets.GATEFORGE_WITNESS_VERIFIER_KEY }}
           GATEFORGE_APPROVED_POLICY_DIGEST: ${{ secrets.GATEFORGE_APPROVED_POLICY_DIGEST }}
+          # The conditional participants (runner-cli-e2e `describe.skipIf`)
+          # gate on these exact paths: an empty value means the case skips
+          # itself, and a skip is never coverage. CI exports the same
+          # paths the local strict-proof recipe does, so every planned
+          # case executes here too.
+          GATEFORGE_PYTEST_TEST_PYTHON: /usr/bin/python3
+          GATEFORGE_CYPRESS_TEST_BIN: ${{ github.workspace }}/node_modules/.bin/cypress
         run: node_modules/.bin/gateforge test-gates --changed
 
       - name: Check exact candidate receipt

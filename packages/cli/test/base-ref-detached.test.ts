@@ -124,9 +124,10 @@ describe('github-pr base ref in a detached PR checkout', () => {
   it('provider prefers refs/remotes/origin/<base> over a stale local <base>', () => {
     withTempRepo({}, (repo) => {
       makeShadowedCheckout(repo);
-      // Pre-fix the unqualified `main` resolved first: the merge base landed
-      // at the fork root and the root, base and stale-local files all leaked
-      // into the diff.
+      // Pre-fix the unqualified `main` resolved first: the merge base with
+      // the stale local `main` landed at the fork root, so the diff was
+      // `root..HEAD` — src/base.txt and src/pr-change.txt (src/root.txt and
+      // src/stale.txt were not in it).
       const files = githubPrProvider(repo.root, { GITHUB_BASE_REF: 'main' }).changedFiles();
       expect(files).toEqual(['src/pr-change.txt']);
     });
@@ -160,6 +161,29 @@ describe('github-pr base ref in a detached PR checkout', () => {
         githubPrProvider(repo.root, { GITHUB_BASE_REF: ' main ' }).changedFiles(),
       ).toThrow(UsageError);
       expect(resolveCarryForwardBaseSha(io(repo, ' main'), 'github-pr')).toBeNull();
+    });
+  });
+
+  it('provider ignores a replace ref that would redirect the base commit', () => {
+    withTempRepo({}, (repo) => {
+      makeDetachedCheckout(repo);
+      expectNoLocalMain(repo);
+      const baseSha = repo.git(['rev-parse', 'refs/remotes/origin/main']).stdout.trim();
+      // A graft: refs/replace/<base> points the base commit at an ORPHAN
+      // commit (same tree as the PR head plus one extra file) that shares
+      // no ancestry with HEAD. Any base-object read WITHOUT
+      // --no-replace-objects lands on that graft instead of the real
+      // fetched base, so the merge base and the diff both change; the
+      // real PR diff must stay exactly the one file.
+      repo.git(['checkout', '--orphan', 'graft-src']);
+      repo.commitFiles({ 'src/replaced.txt': 'redirected\n' }, 'graft commit');
+      const graft = repo.git(['rev-parse', 'HEAD']).stdout.trim();
+      repo.git(['checkout', '-q', 'feature/pr']);
+      repo.git(['branch', '-q', '-D', 'graft-src']);
+      repo.git(['replace', baseSha, graft]);
+      const files = githubPrProvider(repo.root, { GITHUB_BASE_REF: 'main' }).changedFiles();
+      expect(files).toEqual(['src/pr-change.txt']);
+      expect(resolveCarryForwardBaseSha(io(repo, 'main'), 'github-pr')).toBe(baseSha);
     });
   });
 });

@@ -301,9 +301,9 @@ describe('gateforge enforce', () => {
     // the release version replaced by a token (the pin moves with every
     // release; nothing else may). A release that never declares a source
     // must keep today's output exactly, so the golden digest moves only
-    // with a deliberate change. Current pin: 0.7.1 bytes (version
-    // tokenized) plus the 0.15.0 shell-level comment on the merge-base
-    // receipt step (review m5).
+    // with a deliberate change — one byte of drift fails here. Current
+    // pin: 0.7.1 bytes (version tokenized) plus the 0.15.0 shell-level
+    // merge-base comment in the generated receipt step.
     expect(
       createHash('sha256').update(renderGithubActionsTemplate().replaceAll(VERSION, '<VERSION>')).digest('hex'),
     ).toBe(

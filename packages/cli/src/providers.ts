@@ -8,10 +8,11 @@
  *   vs HEAD.
  * - `github-pr`: `GITHUB_BASE_REF` (base branch name) → the base resolves
  *   as the fetched remote ref `refs/remotes/origin/<base>` first and as a
- *   local `<base>` only as a fallback; then `git merge-base HEAD
- *   <base-commit>` and `git diff --name-only <merge-base> HEAD`.
- * - `gitlab-mr`: `CI_MERGE_REQUEST_DIFF_BASE_SHA` → `git diff --name-only
- *   <base sha> HEAD`.
+ *   local `<base>` only as a fallback; then `git --no-replace-objects
+ *   merge-base HEAD <base-commit>` and `git --no-replace-objects diff
+ *   --name-only <merge-base> HEAD`.
+ * - `gitlab-mr`: `CI_MERGE_REQUEST_DIFF_BASE_SHA` → `git
+ *   --no-replace-objects diff --name-only <base sha> HEAD`.
  *
  * `auto` (config default) picks github-pr when `GITHUB_BASE_REF` is set,
  * gitlab-mr when `CI_MERGE_REQUEST_DIFF_BASE_SHA` is set, else
@@ -151,7 +152,7 @@ export function githubPrProvider(cwd: string, env: NodeJS.ProcessEnv): ChangedFi
       );
       const out = gitOutput(
         cwd,
-        ['diff', '--name-only', mergeBase, 'HEAD'],
+        ['--no-replace-objects', 'diff', '--name-only', mergeBase, 'HEAD'],
         `github-pr provider (diff ${mergeBase}..HEAD)`,
         env,
       );
@@ -173,7 +174,7 @@ export function gitlabMrProvider(cwd: string, env: NodeJS.ProcessEnv): ChangedFi
       }
       const out = gitOutput(
         cwd,
-        ['diff', '--name-only', baseSha, 'HEAD'],
+        ['--no-replace-objects', 'diff', '--name-only', baseSha, 'HEAD'],
         `gitlab-mr provider (diff ${baseSha}..HEAD)`,
         env,
       );

@@ -437,7 +437,7 @@ export async function currentInputDigest(repo: TempRepo, docsExclusions: readonl
     const stateDir = resolveStateDir(repo.root);
     const pipeline = await runPipeline({
       cwd: repo.root,
-      env: { ...process.env },
+      env: ciFreeEnv(),
       config,
       provider: 'all-files',
       stateDir,
