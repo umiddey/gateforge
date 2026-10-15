@@ -77,6 +77,13 @@ jobs:
         # run") for the exact failure modes without this step.
         run: npx playwright install --with-deps chromium
 
+      - name: Resolve pull-request base ref
+        # The checkout is a detached PR head: no local base branch exists, so
+        # the github-pr provider must diff against the fetched remote ref.
+        run: |
+          git fetch --no-tags --quiet origin "${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"
+          echo "GITHUB_BASE_REF=refs/remotes/origin/${{ github.base_ref }}" >> "$GITHUB_ENV"
+
       - name: Run supervised strict gate
         env:
           GATEFORGE_WITNESS_VERIFIER_KEY: ${{ secrets.GATEFORGE_WITNESS_VERIFIER_KEY }}
