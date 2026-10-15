@@ -136,5 +136,6 @@ jobs:
 
       - name: Check exact candidate receipt
         env:
+          GATEFORGE_WITNESS_VERIFIER_KEY: ${{ secrets.GATEFORGE_WITNESS_VERIFIER_KEY }}
           GATEFORGE_APPROVED_POLICY_DIGEST: ${{ secrets.GATEFORGE_APPROVED_POLICY_DIGEST }}
         run: node_modules/.bin/gateforge check --changed --require-e2e --format json
