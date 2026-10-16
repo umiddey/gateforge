@@ -1915,9 +1915,10 @@ direct call sites:
   default the component declared instead of failing closed. The same
   applies when the props travel through a config object into a hook
   with a destructured parameter —
-  `useApiGet({ endpoint: apiEndpoint, detailEndpoint })` — and the
-  guard lives in the hook's body. A usage site that passes an
-  unresolvable value, omits a prop with no
+  `useApiGet({ endpoint: apiEndpoint, detailEndpoint })` — or as
+  several positional arguments — `useApiGet(apiEndpoint,
+  detailEndpoint)` — and the guard lives in the hook's body. A usage
+  site that passes an unresolvable value, omits a prop with no
   default, supplies a non-literal default, passes an attribute without
   a value (`<C detail />` means `true`, not omission), spreads
   (`{...props}`), or passes a member access on a prop

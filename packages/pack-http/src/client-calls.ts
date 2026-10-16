@@ -1234,6 +1234,24 @@ function extractCall(
           if (argument !== undefined) {
             if (paramName !== undefined) bindings.set(paramName, [argument, file]);
             if (
+              call.arguments.length > 1
+              && declared !== undefined
+              && resolveWrapperTargetsThroughPositionalArgs(
+                call,
+                declared,
+                wrapperConfig,
+                file,
+                config,
+                table,
+                calls,
+                unresolved,
+                location,
+                reads,
+              )
+            ) {
+              return;
+            }
+            if (
               resolveWrapperTargetThroughJsxProps(
                 argument,
                 call,
@@ -3640,8 +3658,11 @@ function objectUsageBindings(
     }
     if (ts.isShorthandPropertyAssignment(property)) {
       const bound = usage.get(property.name.text);
-      if (bound === undefined) return undefined;
-      bindings.set(property.name.text, bound);
+      if (bound !== undefined) {
+        bindings.set(property.name.text, bound);
+      } else {
+        bindings.set(property.name.text, [property.name, callFile]);
+      }
       continue;
     }
     return undefined;
@@ -3703,6 +3724,147 @@ function recordWrapperTargetsThroughObjectProps(
     }
     const bodyBindings = objectUsageBindings(object, host, usage, file);
     if (bodyBindings === undefined) {
+      unresolved.push({
+        code: FRONTEND_CALL_TARGET_UNRESOLVED,
+        detail: `call target cannot be resolved statically (${wrapperConfig.name})`,
+        location,
+      });
+      return true;
+    }
+    const body = wrapperBodyTargets(declared.fn, declared.file, wrapperConfig, config, table, bodyBindings, 0, new Set());
+    if (body === 'unmodeled') {
+      unresolved.push({
+        code: FRONTEND_CALL_TARGET_UNRESOLVED,
+        detail: (
+          `wrapper '${wrapperConfig.name}' has no simple single-return client call in the ` +
+          'scanned set; its call targets cannot be resolved statically'
+        ),
+        location,
+      });
+      return true;
+    }
+    if (body === 'unresolved') {
+      unresolved.push({
+        code: FRONTEND_CALL_TARGET_UNRESOLVED,
+        detail: `call target cannot be resolved statically (${wrapperConfig.name})`,
+        location,
+      });
+      return true;
+    }
+    for (const entry of body) {
+      const raws = byMethod.get(entry.method) ?? [];
+      raws.push(entry.raw);
+      byMethod.set(entry.method, raws);
+    }
+  }
+  for (const [method, raws] of byMethod) {
+    recordRawTargets([...new Set(raws)], method, wrapperConfig.name, config, calls, unresolved, location, reads);
+  }
+  return true;
+}
+
+/**
+ * Decides a wrapper call that passes SEVERAL arguments positionally —
+ * `useSearchableDropdown(apiEndpoint, detailEndpoint)` — where later
+ * arguments carry component props a single-argument model would never
+ * bind. Every JSX usage site of the host component contributes the
+ * values it passes and the literal destructuring defaults it omits;
+ * each declared parameter binds its call argument (a bare prop
+ * resolves through that usage's bindings), the referenced prop locals
+ * bind for complex arguments, and the hook body is evaluated once per
+ * usage. Raws are unioned across usages and recorded once per distinct
+ * path per method. Any usage that cannot bind a referenced prop keeps
+ * today's unresolved finding, byte for byte. Returns false when no
+ * argument references one of the component's props — the caller keeps
+ * today's model.
+ */
+function resolveWrapperTargetsThroughPositionalArgs(
+  call: ts.CallExpression,
+  declared: { fn: UrlFunction; file: string },
+  wrapperConfig: WrapperFunctionConfig,
+  file: string,
+  config: ClientScanConfig,
+  table: ValueTable,
+  calls: ClientCall[],
+  unresolved: ClientScanUnresolved[],
+  location: Location,
+  reads: ResponseRead[],
+): boolean {
+  const index = jsxComponentIndex(table);
+  const host = innermostComponent(index.components, file, call);
+  if (host === undefined) return false;
+  const referenced = new Set<string>();
+  for (const argument of call.arguments) {
+    for (const name of argumentPropLocals(argument, host)) referenced.add(name);
+  }
+  if (referenced.size === 0) return false;
+  const sites = index.usages.get(host.name);
+  if (sites === undefined || sites.length === 0) {
+    unresolved.push({
+      code: FRONTEND_CALL_TARGET_UNRESOLVED,
+      detail: `call target cannot be resolved statically (${wrapperConfig.name})`,
+      location,
+    });
+    return true;
+  }
+  const byMethod = new Map<HttpMethod, string[]>();
+  for (const site of sites) {
+    const usage = usagePropBindings(host, site, referenced);
+    if (usage === undefined) {
+      unresolved.push({
+        code: FRONTEND_CALL_TARGET_UNRESOLVED,
+        detail: `call target cannot be resolved statically (${wrapperConfig.name})`,
+        location,
+      });
+      return true;
+    }
+    const bodyBindings = new Map<string, readonly [ts.Expression, string]>();
+    for (const localName of referenced) {
+      const bound = usage.get(localName);
+      if (bound === undefined) {
+        unresolved.push({
+          code: FRONTEND_CALL_TARGET_UNRESOLVED,
+          detail: `call target cannot be resolved statically (${wrapperConfig.name})`,
+          location,
+        });
+        return true;
+      }
+      bodyBindings.set(localName, bound);
+    }
+    let unbindable = false;
+    for (let paramIndex = 0; paramIndex < declared.fn.parameters.length; paramIndex += 1) {
+      const parameter = declared.fn.parameters[paramIndex];
+      const argument = call.arguments[paramIndex];
+      if (parameter === undefined || argument === undefined) continue;
+      if (ts.isIdentifier(parameter.name)) {
+        const value = unwrapOwnExpression(argument);
+        if (ts.isIdentifier(value) && componentPropName(host, value.text) !== undefined) {
+          const bound = usage.get(value.text);
+          if (bound === undefined) {
+            unbindable = true;
+            break;
+          }
+          bodyBindings.set(parameter.name.text, bound);
+        } else {
+          bodyBindings.set(parameter.name.text, [argument, file]);
+        }
+        continue;
+      }
+      if (ts.isObjectBindingPattern(parameter.name)) {
+        const object = unwrapOwnExpression(argument);
+        if (!ts.isObjectLiteralExpression(object)) {
+          unbindable = true;
+          break;
+        }
+        const objectBindings = objectUsageBindings(object, host, usage, file);
+        if (objectBindings === undefined) {
+          unbindable = true;
+          break;
+        }
+        for (const [name, bound] of objectBindings) bodyBindings.set(name, bound);
+      }
+    }
+    if (unbindable) {
       unresolved.push({
         code: FRONTEND_CALL_TARGET_UNRESOLVED,
         detail: `call target cannot be resolved statically (${wrapperConfig.name})`,

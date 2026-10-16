@@ -10,7 +10,8 @@
   branch is proven, instead of failing closed; a usage that passes the
   attribute keeps proving the other branch. The same resolution applies
   when the props travel through a config object into a hook with a
-  destructured parameter and the guard lives in the hook's body. A prop
+  destructured parameter, or as several positional arguments, and the
+  guard lives in the hook's body. A prop
   with no default, a non-literal default (a call, an identifier), an
   attribute present without a value, and spread usages (`{...props}`)
   still block with `FRONTEND_CALL_TARGET_UNRESOLVED`.

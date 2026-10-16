@@ -476,6 +476,44 @@ describe('client scan: JSX prop destructuring defaults', () => {
     expect(result.calls.every((call) => call.location.file === 'src/SearchableDropdown.jsx')).toBe(true);
   });
 
+  it('positional arguments carrying props into a hook resolve omitted defaults', () => {
+    const result = scanFrom('src/SearchableDropdown.jsx', {
+      'src/api.jsx': `
+        import axios from 'axios';
+
+        export const apiClient = axios.create();
+
+        export async function useApiGet(endpoint, detailEndpoint) {
+          const target = detailEndpoint === null ? endpoint : detailEndpoint;
+          const response = await apiClient.get(\`\${target}/x\`);
+          return response.data;
+        }
+      `,
+      'src/SearchableDropdown.jsx': `
+        import { useApiGet } from './api.jsx';
+
+        export function SearchableDropdown({ apiEndpoint, detailEndpoint = null }) {
+          const options = useApiGet(apiEndpoint, detailEndpoint);
+          return <input list={options} />;
+        }
+      `,
+      'src/screens.jsx': `
+        import { SearchableDropdown } from './SearchableDropdown.jsx';
+
+        export function ContractsScreen() {
+          return <SearchableDropdown apiEndpoint="/contracts/" />;
+        }
+
+        export function InvoicesScreen() {
+          return <SearchableDropdown apiEndpoint="/invoices/" />;
+        }
+      `,
+    });
+    expect(result.unresolved).toEqual([]);
+    expect(result.calls.map((call) => call.rawPath).sort()).toEqual(['/contracts//x', '/invoices//x']);
+    expect(result.calls.map((call) => call.canonicalPath).sort()).toEqual(['/contracts/x', '/invoices/x']);
+  });
+
   it('a usage omitting a prop with no destructuring default keeps the finding', () => {
     const result = scanFrom('src/SearchableDropdown.jsx', {
       'src/api.jsx': wrapperApiModule,
