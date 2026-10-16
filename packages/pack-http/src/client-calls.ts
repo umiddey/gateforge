@@ -444,7 +444,11 @@ function unwrapOwnExpression(node: ts.Expression): ts.Expression {
       current = current.expression;
       continue;
     }
-    if (ts.isAsExpression(current) || ts.isNonNullExpression(current)) {
+    if (
+      ts.isAsExpression(current) ||
+      ts.isSatisfiesExpression(current) ||
+      ts.isNonNullExpression(current)
+    ) {
       current = current.expression;
       continue;
     }
@@ -3035,13 +3039,16 @@ function interceptorReplayClient(
 
 /** `error.config` for the handler's own error parameter — and nothing else. */
 function isOwnErrorConfig(expr: ts.Expression | undefined, errorParamName: string | undefined): boolean {
+  if (errorParamName === undefined || expr === undefined) return false;
+  // Real handlers type the config on the way through — PM's
+  // `const config = error.config as RetriableConfig | undefined;` — so
+  // the alias must be recognized through as/satisfies/non-null/parens.
+  const peeled = unwrapOwnExpression(expr);
   return (
-    errorParamName !== undefined &&
-    expr !== undefined &&
-    ts.isPropertyAccessExpression(expr) &&
-    ts.isIdentifier(expr.expression) &&
-    expr.expression.text === errorParamName &&
-    expr.name.text === 'config'
+    ts.isPropertyAccessExpression(peeled) &&
+    ts.isIdentifier(peeled.expression) &&
+    peeled.expression.text === errorParamName &&
+    peeled.name.text === 'config'
   );
 }
 

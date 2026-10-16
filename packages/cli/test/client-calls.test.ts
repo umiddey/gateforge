@@ -46,6 +46,71 @@ describe('client scan: interceptor replays (error.config)', () => {
     expect(result.calls[0]).toMatchObject({ method: 'GET', rawPath: '/contracts', framework: 'apiClient' });
   });
 
+  it('a replay through a const bound to error.config with an as cast is neither a call nor a finding', () => {
+    const result = scanFrom('src/apiClient.ts', {
+      'src/apiClient.ts': `
+        import axios, { AxiosError } from 'axios';
+
+        export const apiClient = axios.create();
+
+        apiClient.interceptors.response.use(
+          (response) => response,
+          async (error: AxiosError) => {
+            const config = error.config as RetriableConfig | undefined;
+            const isPortalRequest = config?.url?.includes('/v1/portal/')
+              || config?.url?.includes('/v1/service-requests/portal/');
+
+            if (error.response?.status === 401 && config && !config._retried && !isPortalRequest) {
+              config._retried = true;
+
+              try {
+                const newToken = await refreshAccessToken();
+                if (newToken) {
+                  config.headers.Authorization = \`Bearer \${newToken}\`;
+                  return apiClient(config);
+                }
+              } catch (refreshError) {
+                console.error('[apiClient] Token refresh failed:', refreshError);
+              }
+
+              window.location.href = '/login';
+              return Promise.reject(error);
+            }
+
+            emitApiError(error);
+            return Promise.reject(error);
+          }
+        );
+      `,
+    });
+    expect(result.unresolved).toEqual([]);
+    expect(result.calls).toEqual([]);
+  });
+
+  it('a replay through satisfies, non-null, and paren-wrapped error.config bindings is neither a call nor a finding', () => {
+    const result = scanFrom('src/apiClient.ts', {
+      'src/apiClient.ts': `
+        import axios from 'axios';
+
+        export const apiClient = axios.create();
+
+        apiClient.interceptors.response.use(
+          (response) => response,
+          async (error) => {
+            const config = (error.config as RetriableConfig | undefined)!;
+            const cfg = error.config satisfies RetriableConfig | undefined;
+            if (config && !config._retried) {
+              return apiClient(cfg);
+            }
+            return apiClient(error.config!);
+          },
+        );
+      `,
+    });
+    expect(result.unresolved).toEqual([]);
+    expect(result.calls).toEqual([]);
+  });
+
   it('a replay passing error.config directly is neither a call nor a finding', () => {
     const result = scanFrom('src/api.jsx', {
       'src/api.jsx': `
