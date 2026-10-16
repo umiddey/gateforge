@@ -1224,15 +1224,20 @@ function extractCall(
         const bindings = new Map<string, readonly [ts.Expression, string]>();
         const declared = table.findFunction(wrapperConfig.name, file);
         const paramName = wrapperConfig.parameter ?? (declared === undefined ? undefined : firstIdentifierParam(declared.fn));
-        if (declared !== undefined && paramName !== undefined) {
-          const argument = argumentForParameter(declared.fn, paramName, call);
+        const takesObjectPattern = declared !== undefined
+          && declared.fn.parameters[0] !== undefined
+          && ts.isObjectBindingPattern(declared.fn.parameters[0].name);
+        if (declared !== undefined && (paramName !== undefined || takesObjectPattern)) {
+          const argument = paramName !== undefined
+            ? argumentForParameter(declared.fn, paramName, call)
+            : call.arguments[0];
           if (argument !== undefined) {
-            bindings.set(paramName, [argument, file]);
+            if (paramName !== undefined) bindings.set(paramName, [argument, file]);
             if (
               resolveWrapperTargetThroughJsxProps(
                 argument,
                 call,
-                paramName,
+                paramName ?? '',
                 wrapperConfig,
                 file,
                 config,
@@ -3542,6 +3547,21 @@ function resolveWrapperTargetThroughPropDefaults(
 ): boolean {
   const referenced = argumentPropLocals(argument, host);
   if (referenced.size === 0) return false;
+  const object = unwrapOwnExpression(argument);
+  if (ts.isObjectLiteralExpression(object)) {
+    return recordWrapperTargetsThroughObjectProps(
+      object,
+      host,
+      wrapperConfig,
+      file,
+      config,
+      table,
+      calls,
+      unresolved,
+      location,
+      reads,
+    );
+  }
   const index = jsxComponentIndex(table);
   const sites = index.usages.get(host.name);
   if (sites === undefined || sites.length === 0) {
@@ -3587,6 +3607,139 @@ function resolveWrapperTargetThroughPropDefaults(
     location,
     reads,
   );
+}
+
+/**
+ * The hook-body bindings one config-object call argument carries: each
+ * property binds the hook's destructured local to the property's value.
+ * A value that NAMES a host prop resolves through that usage's prop
+ * bindings (the passed attribute, or the literal destructuring
+ * default); any other value binds as written and must resolve in the
+ * call file. Undefined — fail closed — for shorthand properties whose
+ * name is not a per-usage-known prop, for spread elements, and for
+ * computed or method properties: what they carry cannot be proven.
+ */
+function objectUsageBindings(
+  object: ts.ObjectLiteralExpression,
+  host: ComponentModel,
+  usage: ExprBinding,
+  callFile: string,
+): ExprBinding | undefined {
+  const bindings = new Map<string, readonly [ts.Expression, string]>();
+  for (const property of object.properties) {
+    if (ts.isPropertyAssignment(property) && ts.isIdentifier(property.name)) {
+      const value = unwrapOwnExpression(property.initializer);
+      if (ts.isIdentifier(value) && componentPropName(host, value.text) !== undefined) {
+        const bound = usage.get(value.text);
+        if (bound === undefined) return undefined;
+        bindings.set(property.name.text, bound);
+      } else {
+        bindings.set(property.name.text, [property.initializer, callFile]);
+      }
+      continue;
+    }
+    if (ts.isShorthandPropertyAssignment(property)) {
+      const bound = usage.get(property.name.text);
+      if (bound === undefined) return undefined;
+      bindings.set(property.name.text, bound);
+      continue;
+    }
+    return undefined;
+  }
+  return bindings;
+}
+
+/**
+ * Decides a wrapper call whose argument is a config OBJECT carrying the
+ * host component's props into a destructured hook parameter —
+ * `useSearchableDropdown({ endpoint: apiEndpoint, detailEndpoint })`.
+ * Every JSX usage site of the component contributes the values it
+ * passes and the literal destructuring defaults it omits; the hook
+ * body is then evaluated once per usage under those bindings, so a
+ * null/undefined default proves a guard inside the HOOK and selects
+ * the matching branch. Raws are unioned across usages and recorded
+ * once per distinct path per method. Any usage that cannot bind a
+ * referenced prop, or a component without usage sites, keeps today's
+ * unresolved finding, byte for byte. Returns false when the object
+ * references none of the component's props or the wrapper has no
+ * simple single-return client call — the caller keeps today's model.
+ */
+function recordWrapperTargetsThroughObjectProps(
+  object: ts.ObjectLiteralExpression,
+  host: ComponentModel,
+  wrapperConfig: WrapperFunctionConfig,
+  file: string,
+  config: ClientScanConfig,
+  table: ValueTable,
+  calls: ClientCall[],
+  unresolved: ClientScanUnresolved[],
+  location: Location,
+  reads: ResponseRead[],
+): boolean {
+  const referenced = argumentPropLocals(object, host);
+  if (referenced.size === 0) return false;
+  const index = jsxComponentIndex(table);
+  const sites = index.usages.get(host.name);
+  if (sites === undefined || sites.length === 0) {
+    unresolved.push({
+      code: FRONTEND_CALL_TARGET_UNRESOLVED,
+      detail: `call target cannot be resolved statically (${wrapperConfig.name})`,
+      location,
+    });
+    return true;
+  }
+  const declared = table.findFunction(wrapperConfig.name, file);
+  if (declared === undefined) return false;
+  const byMethod = new Map<HttpMethod, string[]>();
+  for (const site of sites) {
+    const usage = usagePropBindings(host, site, referenced);
+    if (usage === undefined) {
+      unresolved.push({
+        code: FRONTEND_CALL_TARGET_UNRESOLVED,
+        detail: `call target cannot be resolved statically (${wrapperConfig.name})`,
+        location,
+      });
+      return true;
+    }
+    const bodyBindings = objectUsageBindings(object, host, usage, file);
+    if (bodyBindings === undefined) {
+      unresolved.push({
+        code: FRONTEND_CALL_TARGET_UNRESOLVED,
+        detail: `call target cannot be resolved statically (${wrapperConfig.name})`,
+        location,
+      });
+      return true;
+    }
+    const body = wrapperBodyTargets(declared.fn, declared.file, wrapperConfig, config, table, bodyBindings, 0, new Set());
+    if (body === 'unmodeled') {
+      unresolved.push({
+        code: FRONTEND_CALL_TARGET_UNRESOLVED,
+        detail: (
+          `wrapper '${wrapperConfig.name}' has no simple single-return client call in the ` +
+          'scanned set; its call targets cannot be resolved statically'
+        ),
+        location,
+      });
+      return true;
+    }
+    if (body === 'unresolved') {
+      unresolved.push({
+        code: FRONTEND_CALL_TARGET_UNRESOLVED,
+        detail: `call target cannot be resolved statically (${wrapperConfig.name})`,
+        location,
+      });
+      return true;
+    }
+    for (const entry of body) {
+      const raws = byMethod.get(entry.method) ?? [];
+      raws.push(entry.raw);
+      byMethod.set(entry.method, raws);
+    }
+  }
+  for (const [method, raws] of byMethod) {
+    recordRawTargets([...new Set(raws)], method, wrapperConfig.name, config, calls, unresolved, location, reads);
+  }
+  return true;
 }
 
 /**

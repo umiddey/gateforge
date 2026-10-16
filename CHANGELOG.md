@@ -8,10 +8,12 @@
   with `({ base, detail = null })` — a JSX usage that omits the
   attribute now contributes the default value and the guard's matching
   branch is proven, instead of failing closed; a usage that passes the
-  attribute keeps proving the other branch. A prop with no default, a
-  non-literal default (a call, an identifier), an attribute present
-  without a value, and spread usages (`{...props}`) still block with
-  `FRONTEND_CALL_TARGET_UNRESOLVED`.
+  attribute keeps proving the other branch. The same resolution applies
+  when the props travel through a config object into a hook with a
+  destructured parameter and the guard lives in the hook's body. A prop
+  with no default, a non-literal default (a call, an identifier), an
+  attribute present without a value, and spread usages (`{...props}`)
+  still block with `FRONTEND_CALL_TARGET_UNRESOLVED`.
 - **Fixed: client scan flags on interceptor replays.** Inside the error
   handler of `client.interceptors.response.use`, re-sending the
   intercepted error's own request config on the same client symbol —

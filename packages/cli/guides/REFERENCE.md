@@ -1912,8 +1912,12 @@ direct call sites:
   and, for an attribute it omits, the prop's literal destructuring
   default (string, number, boolean, null, undefined); the guard's
   branch is then proven per usage, so an omitted attribute takes the
-  default the component declared instead of failing closed. A usage
-  site that passes an unresolvable value, omits a prop with no
+  default the component declared instead of failing closed. The same
+  applies when the props travel through a config object into a hook
+  with a destructured parameter —
+  `useApiGet({ endpoint: apiEndpoint, detailEndpoint })` — and the
+  guard lives in the hook's body. A usage site that passes an
+  unresolvable value, omits a prop with no
   default, supplies a non-literal default, passes an attribute without
   a value (`<C detail />` means `true`, not omission), spreads
   (`{...props}`), or passes a member access on a prop
