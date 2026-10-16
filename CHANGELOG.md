@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.15.1
+
+- **Fixed: client scan flags JSX-omitted props with destructuring
+  defaults.** When a declared wrapper's endpoint argument is guarded by
+  a component prop's literal destructuring default — `detail === null`
+  with `({ base, detail = null })` — a JSX usage that omits the
+  attribute now contributes the default value and the guard's matching
+  branch is proven, instead of failing closed; a usage that passes the
+  attribute keeps proving the other branch. The same resolution applies
+  when the props travel through a config object into a hook with a
+  destructured parameter, or as several positional arguments, and the
+  guard lives in the hook's body. A prop
+  with no default, a non-literal default (a call, an identifier), an
+  attribute present without a value, and spread usages (`{...props}`)
+  still block with `FRONTEND_CALL_TARGET_UNRESOLVED`. These per-usage
+  resolvers are additive precision only: when they cannot themselves
+  prove a call — a hook called from other hooks (no JSX usage sites),
+  a usage-supplied value that still leaves the endpoint unproven — the
+  call falls back to the plain configured-parameter model, which
+  resolves or fails closed exactly as before.
+- **Fixed: client scan flags on interceptor replays.** Inside the error
+  handler of `client.interceptors.response.use`, re-sending the
+  intercepted error's own request config on the same client symbol —
+  `client(error.config)`, a `const` bound to it, or a destructured
+  `{ config }` handler parameter — is a replay of a request the scan has
+  already recorded: no call record, no `FRONTEND_CALL_TARGET_UNRESOLVED`.
+  A replay-shaped call on a different client symbol and a config-only
+  call outside any interceptor still block, and concrete calls inside
+  the handler are still recorded.
+- **Fixed: wrapper call targets through JSX props.** A declared wrapper
+  whose endpoint argument is a function component's prop now resolves
+  through every JSX usage site of that component in the scanned set
+  (one unchanged-prop forwarding hop allowed) and emits one call per
+  distinct target. An unresolvable usage site, a member access on a
+  prop, or a component without usage sites keeps the unresolved
+  finding. JSX wrapper usages now bind the wrapper's first parameter
+  when no `parameter` is configured, matching the direct-call contract.
+- **Fixed: run-cache key digested a different detector module than the one
+  that executes:** the plugin cache key resolved a bare package specifier
+  (e.g. `@gate-forge/pack-http`) against the target repository's
+  `node_modules`, while the in-process loader imported the specifier from
+  the CLI's own installation. When the two copies differed (an engine
+  rebuilt at the same version, or a repository with an older installed
+  pack), a changed engine could serve a stale cached scan. One shared
+  resolver (`resolveExecutedModule`) now decides the executed module for
+  both consumers with Node's own resolution from the CLI installation:
+  the loader imports exactly the resolver's entry URL, and the key
+  digests the same resolution's package tree — an unresolvable or
+  unreadable executed module leaves the plugin uncacheable (fail
+  closed), as before.
+
 ## 0.15.0
 
 - **Fixed: github-pr base ref in detached PR checkouts:** the changed-file

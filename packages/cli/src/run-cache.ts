@@ -7,9 +7,11 @@
  *   `--require-e2e` keep their exact checks; a cached contribution is
  *   ordinary detector input, re-validated by the same schemas.
  * - Every key covers every input that can change the result: plugin
- *   id/version/config, the plugin module's bytes (repo-relative module or
- *   the whole installed package), the scanned input bytes, and the
- *   interpreter identity (absolute path, version, installed-package
+ *   id/version/config, the bytes of the module that will EXECUTE (a
+ *   repo-relative module file, or the CLI's own installed package tree
+ *   for a package specifier — the copy the in-process host loads, never
+ *   the repository's `node_modules` copy), the scanned input bytes, and
+ *   the interpreter identity (absolute path, version, installed-package
  *   digest). Pytest keys add the collector argv and suite config.
  * - Any doubt → full scan. An unreadable input, an unresolvable or
  *   non-python interpreter, a corrupt/foreign cache entry, a version or
@@ -21,6 +23,7 @@
  */
 import { spawnSync, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import {
   readdirSync,
   mkdirSync,
@@ -30,7 +33,6 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { createRequire } from 'node:module';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import {
   DetectorOutputSchema,
@@ -38,6 +40,7 @@ import {
   type DetectorOutput,
   type JsonValue,
 } from '@gate-forge/core';
+import { resolveExecutedModule } from './detector-trust.js';
 import { VERSION } from './commands/common.js';
 
 /** Cache entry format version; a mismatch is a miss (never a parse of foreign bytes). */
@@ -373,27 +376,6 @@ function fileDigest(absolutePath: string, repoRelativePath: string): string | nu
 }
 
 /**
- * Resolves a package specifier to its installed package directory via the
- * repo's require context (no module execution).
- *
- * Args:
- *   specifier: bare package specifier (e.g. `@gate-forge/pack-fastapi`).
- *   cwd: repo root owning node_modules resolution.
- *
- * Returns:
- *   string | null: absolute package directory, or null when unresolvable.
- */
-function packageDirOf(specifier: string, cwd: string): string | null {
-  try {
-    const require = createRequire(join(cwd, 'package.json'));
-    const manifestPath = require.resolve(`${specifier}/package.json`);
-    return dirname(manifestPath);
-  } catch {
-    return null;
-  }
-}
-
-/**
  * Digests a whole file tree recursively (relative path + bytes, sorted).
  * Skips nested `node_modules` directories; exceeds the file budget → null
  * (the caller treats the plugin as uncacheable instead of truncating).
@@ -436,25 +418,37 @@ function digestTree(root: string): string | null {
 }
 
 /**
- * Digests the plugin module's bytes: a repo-relative module file's bytes,
- * or (for package specifiers) the whole installed package tree — the
- * detector's python sources live inside the package, so a pack update
- * must invalidate cached results.
+ * Digests the bytes of the module that will EXECUTE (plan 20261016_0330),
+ * via the same shared resolution the plugin host imports with: a
+ * repo-relative module file's bytes, or (for package specifiers) the
+ * whole tree of the package providing the entry Node resolves from the
+ * CLI's own installation — the copy the in-process host actually loads,
+ * NOT the repository's `node_modules` copy (an engine rebuilt at the
+ * same version, or a repo holding an older installed pack, used to get
+ * a stale cache hit because the digested copy differed from the
+ * executing one). The detector's python sources live inside the package,
+ * so a pack update still invalidates cached results.
  *
  * Args:
  *   moduleSpecifier: configured in-process module (`./x.mjs` or package).
- *   cwd: repo root for relative resolution and package lookup.
+ *   cwd: repo root for relative resolution.
+ *   resolveBareEntry: bare-specifier resolution seam; tests inject a
+ *     fixture layout, production uses Node's own resolution.
  *
  * Returns:
  *   string | null: hex digest, or null when unresolvable/unreadable.
  */
-function moduleBytesDigestOf(moduleSpecifier: string, cwd: string): string | null {
-  if (moduleSpecifier.startsWith('./') || moduleSpecifier.startsWith('../')) {
-    return fileDigest(resolve(cwd, moduleSpecifier), moduleSpecifier);
+function moduleBytesDigestOf(
+  moduleSpecifier: string,
+  cwd: string,
+  resolveBareEntry?: (specifier: string) => string,
+): string | null {
+  const executed = resolveExecutedModule(moduleSpecifier, cwd, resolveBareEntry);
+  if (executed === null) return null;
+  if (executed.packageDir === null) {
+    return fileDigest(fileURLToPath(executed.entryUrl), moduleSpecifier);
   }
-  const packageDir = packageDirOf(moduleSpecifier, cwd);
-  if (packageDir === null) return null;
-  return digestTree(packageDir);
+  return digestTree(executed.packageDir);
 }
 
 /**
@@ -560,6 +554,9 @@ function subprocessModuleBytesDigestOf(
  *   inputsDigest: precomputed digest of the expanded scan path bytes.
  *   cwd: repo root (module resolution).
  *   env: process environment for interpreter resolution.
+ *   resolveBareEntry: bare-specifier → entry URL seam for the executed
+ *     module resolution (tests inject a fixture layout; production uses
+ *     Node's own resolution from the CLI installation).
  *
  * Returns:
  *   PluginCacheIdentity | null: identity, or null when uncacheable.
@@ -576,6 +573,7 @@ export function pluginCacheIdentity(
   cwd: string,
   env: NodeJS.ProcessEnv,
   engineVersion = VERSION,
+  resolveBareEntry?: (specifier: string) => string,
 ): PluginCacheIdentity | null {
   let interpreter: PluginCacheIdentity['interpreter'];
   if (plugin.transport === 'subprocess') {
@@ -595,7 +593,7 @@ export function pluginCacheIdentity(
   if (interpreter === null) return null;
   const moduleBytesDigest =
     plugin.transport === 'in-process' && plugin.module !== undefined
-      ? moduleBytesDigestOf(plugin.module, cwd)
+      ? moduleBytesDigestOf(plugin.module, cwd, resolveBareEntry)
       : plugin.transport === 'subprocess'
         ? subprocessModuleBytesDigestOf(plugin.command ?? [], cwd, env)
         : null;
