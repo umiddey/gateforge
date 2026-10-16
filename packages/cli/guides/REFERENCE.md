@@ -62,7 +62,7 @@ first commands; the guides cover the walks:
 | `gateforge tests explain --test <key> [--json]` | Per-test report: requirements, existing-test identity, mapping origin, honest execution status, next action, and the same three-state reuse verdict `New test needed` (`no` / `yes` / `unverified`) `tests suggest` prints — built from the SAME route evidence, so the two surfaces never disagree about one test. `--test` takes the same two key forms as `tests mark` (see above). | 0/2 (unknown or ambiguous key → 2) |
 | `gateforge tests diagnose [--suite <name>] [--json]` | Run the configured pytest diagnostic suites once per suite, isolated (own process, `GATEFORGE_*` stripped, finite timeout). Advisory: exit 0 completed run (≥1 pass, no unexpected failures), 1 test failures, 2 unavailable/incomplete (collection error, timeout, missing interpreter, interruption, zero tests, or only skipped/xfail). Never E2E proof. | 0/1/2 |
 | `gateforge obligations [--json]` | Evaluate policies against the automatically classified graph and dump obligations, blocking entries, and claim assessments. | 0/1/2 |
-| `gateforge check [--changed] [--staged] [--candidate-commit <sha>] [--require-e2e] [--timing] [--no-cache] [--format text\|json\|sarif]` | The full gate: discover → classify → obligations → claims → verdicts → report. `--timing` appends per-step wall-clock timings (detectors, test collection, TS scan, planning, total) — an additive report key in json and one line in text, never an input to any verdict. Detector and pytest-collection results are cached under the excluded run-state dir. Detector keys include plugin config, executable module/script bytes, Python import environment, inputs, interpreter packages, and Gateforge engine version; pytest keys include all Python/config file bytes, collector argv/environment, interpreter identity, and engine version. Unchanged successful pytest collections reuse their node ids; any changed Python byte recollects. Any uncertainty runs fresh. The report carries additive `cache: {hits, misses}` counts. `--no-cache` (or `GATEFORGE_NO_CACHE=1`, or a CI environment) disables cache reads and writes. | 0 clean/waived, 1 unresolved, 2 config/usage error |
+| `gateforge check [--changed] [--staged] [--candidate-commit <sha>] [--require-e2e] [--timing] [--no-cache] [--format text\|json\|sarif]` | The full gate: discover → classify → obligations → claims → verdicts → report. `--timing` appends per-step wall-clock timings (detectors, test collection, TS scan, planning, total) — an additive report key in json and one line in text, never an input to any verdict. Detector and pytest-collection results are cached under the excluded run-state dir. Detector keys include plugin config, the bytes of the module that will execute (for package specifiers the CLI's own installed copy — the one Node actually loads — never the repository's `node_modules` copy; an unresolvable or unreadable executed module leaves the detector uncacheable), Python import environment, inputs, interpreter packages, and Gateforge engine version; pytest keys include all Python/config file bytes, collector argv/environment, interpreter identity, and engine version. Unchanged successful pytest collections reuse their node ids; any changed Python byte recollects. Any uncertainty runs fresh. The report carries additive `cache: {hits, misses}` counts. `--no-cache` (or `GATEFORGE_NO_CACHE=1`, or a CI environment) disables cache reads and writes. | 0 clean/waived, 1 unresolved, 2 config/usage error |
 
 | `gateforge test-gates [--changed] [--scope full\|changed] [--progress stderr\|file:<path>\|off] [--result-only] [--suite <cmd>] [--out <dir>] [--format F] [--witness-url <url>] [--run-token <token>]` | The progress stream (additive, `--progress`, or the `run.progress` config key) prints the registered expected-set size, one line per finished test with exact `N/M` counters and the catalog title, an alive line per quiet minute, and the finish line before grading. It is built from witness-side facts only and never from runner output; a failing test's first error line passes a credential guard and is replaced whole when it matches, and the full guarded diagnosis lands in `.gateforge/test-gates/failures.json`. `auto` (the default) is stderr under `CI=true` and off locally. The stream is not evidence and no gate reads it. Supervised `--changed` plans and runs mapped Playwright tests through the trusted adapter, checks planned/executed completeness, and seals an authenticated receipt only after complete success. `--scope changed` limits a sealed slice to obligations affected by changed files; incomplete mappings block, and `check --require-e2e` accepts it only when it covers every currently changed obligation. `--result-only` requires `--changed --scope changed`, reports selected results plus repository debt, and has no gate authority: without an external witness it uses private temporary state; with `--witness-url` it requires `--out` + `--run-token` shared with the external witness in a separate state directory (not the configured authoritative state directory). It never creates or clears a receipt. `--suite` remains legacy and cannot combine with `--changed` or redefine strict expected cases. Verifier keys use `GATEFORGE_WITNESS_VERIFIER_KEY` or the external key ring selected by `GATEFORGE_WITNESS_VERIFIER_KEY_FILE`. | 0/1/2 (suite failure forces 1) |
 | `gateforge test-gates --chaos <seed> --result-only` | Timing chaos (additive, opt-in, E63): the witness observation proxy releases proxied app RESPONSES on a schedule derived from `<seed>` — a delay in `[0, maxDelayMs]` per response, and, for requests sharing a route key inside one test session, the option of releasing a later response before an earlier one. Only timing changes; bytes, status, headers and evidence semantics never do. The schedule is a pure function of (seed, session identity, route key, k), so the same seed replays it exactly, and the report plus the sealed execution result carry `chaos: { seed, maxDelayMs, reorder, schedule }` (route key = method + pathname, query stripped) with the text line `timing chaos: seed <n>`. Accepted only with `--result-only`: a chaos run finds races, it never seals a receipt. `run.chaos: { maxDelayMs, reorder }` tunes the bounds of a witness the run spawns itself (default 400 ms, reorder on) and never enables chaos by itself — without the flag every run, report and execution result is byte-identical to before. With `--witness-url` nothing is configured on the witness side: the plan travels with the supervisor-authenticated run-context binding (`options.chaos`), which the witness applies before the first session opens, so `run.chaos` tunes the bounds in both cases. A NORMAL run against a witness that was itself started with `GATEFORGE_CHAOS_SEED` exits 2 before any test runs, naming the variable to unset (a perturbed witness can never seal), and a witness too old to accept run options is refused for `--chaos` rather than reporting a schedule it never applied. A normal run against a witness with no plan — including one too old to have the route — is byte-identical to before. A seed that is not a non-negative integer exits 2 with one plain line. |
@@ -1885,6 +1885,52 @@ documents never moves them out of the pin.
 | `volatileFields` | bookkeeping columns that never satisfy an update | column names |
 | `httpClients` | HTTP client-scan settings (was `.gateforge/http-clients.json`) | `clientSymbols`, `wrapperFunctions`, `urlBuilders`, `sameOriginHosts`, `clientScanRoots`, `serverScanRoots` |
 | `fastapi` | Python import roots (was `.gateforge/fastapi.json`) | `importRoots` |
+
+### Frontend client-call models (`httpClients`)
+
+The client scan proves a call's target from the scanned set or types a
+block — it never guesses. Two common frontend shapes resolve beyond the
+direct call sites:
+
+- **Interceptor replays.** Inside the error handler of
+  `client.interceptors.response.use(ok, handler)`, a call that re-sends
+  the intercepted error's own request config on the SAME client symbol —
+  `client(error.config)`, a `const config = error.config` binding, or a
+  destructured `{ config }` handler parameter — is a replay of a request
+  the scan has already recorded: no call record, no finding. Everything
+  else inside the handler keeps today's model: a replay-shaped call on a
+  DIFFERENT client symbol, and a config-only call outside any
+  interceptor, stay `FRONTEND_CALL_TARGET_UNRESOLVED`.
+- **Wrapper props through JSX usage sites.** When a declared wrapper's
+  endpoint argument is a prop of the enclosing function component, the
+  prop resolves through every JSX usage site of that component in the
+  scanned set — one call per distinct resolved target. A usage site may
+  forward another component's prop unchanged (one hop). When the
+  argument depends on the component's props without being a bare prop
+  reference — a guard such as ``detail === null ? `${base}/x` :
+  `${detail}/x` `` — each usage site contributes the value it passes
+  and, for an attribute it omits, the prop's literal destructuring
+  default (string, number, boolean, null, undefined); the guard's
+  branch is then proven per usage, so an omitted attribute takes the
+  default the component declared instead of failing closed. The same
+  applies when the props travel through a config object into a hook
+  with a destructured parameter —
+  `useApiGet({ endpoint: apiEndpoint, detailEndpoint })` — or as
+  several positional arguments — `useApiGet(apiEndpoint,
+  detailEndpoint)` — and the guard lives in the hook's body. A usage
+  site that passes an unresolvable value, omits a prop with no
+  default, supplies a non-literal default, passes an attribute without
+  a value (`<C detail />` means `true`, not omission), spreads
+  (`{...props}`), or passes a member access on a prop
+  (`duplicate.apiBasePath`) — and a component with no usage site —
+  keeps the unresolved finding — fail closed. The per-usage resolvers
+  are additive precision only: a component whose usage sites the scan
+  cannot supply — a hook called from other hooks, never rendered —
+  and an argument the per-usage values still leave unproven fall back
+  to the plain configured-parameter model, which resolves or blocks
+  exactly as before them. A JSX wrapper usage
+  binds the wrapper's first parameter when no `parameter` is
+  configured, the same contract the direct call path applies.
 
 ## Migrating to 0.11
 

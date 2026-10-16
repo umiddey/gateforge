@@ -444,7 +444,11 @@ function unwrapOwnExpression(node: ts.Expression): ts.Expression {
       current = current.expression;
       continue;
     }
-    if (ts.isAsExpression(current) || ts.isNonNullExpression(current)) {
+    if (
+      ts.isAsExpression(current) ||
+      ts.isSatisfiesExpression(current) ||
+      ts.isNonNullExpression(current)
+    ) {
       current = current.expression;
       continue;
     }
@@ -875,6 +879,15 @@ interface ConstValue {
 
 const UNRESOLVED_VALUE: ConstValue = { kind: 'unresolved', text: '' };
 
+/**
+ * Binds a prop whose per-usage value cannot be proven (attribute
+ * omitted with no literal default, non-literal default, attribute
+ * present without a value): every evaluator refuses this node, so a
+ * computation that consults it fails closed while one that never reads
+ * the prop still resolves.
+ */
+const UNPROVEN_PROP_VALUE = ts.factory.createVoidExpression(ts.factory.createNumericLiteral('0'));
+
 /** Cap on alternatives one expression may prove. Above this, fail closed — never a partial set. */
 const MAX_CALL_TARGETS = 32;
 
@@ -882,6 +895,9 @@ const MAX_CALL_TARGETS = 32;
 const MAX_WRAPPER_DEPTH = 4;
 
 type ExprBinding = ReadonlyMap<string, readonly [ts.Expression, string]>;
+
+/** A statically proven scalar: exactly the literal values a destructuring default may take. */
+type ConstScalar = null | undefined | string | number | boolean;
 
 type UrlFunction = ts.FunctionDeclaration | ts.ArrowFunction | ts.FunctionExpression;
 
@@ -1090,10 +1106,19 @@ export function scanClientCalls(
   const insideWrapper = (node: ts.Node): boolean =>
     wrapperSpans.some(([start, end]) => node.getStart(source) >= start && node.getEnd() <= end);
 
+  // `client(...error.config...)` calls inside a registered response-error
+  // handler re-send a request this scan has already recorded; they are
+  // replays, never new call targets. The set fills when the walk reaches
+  // the `.use(...)` registration — an ancestor of the handler body — so
+  // every replay call is known before its node is reached.
+  const replayCalls = new Set<ts.CallExpression>();
   const visit = (node: ts.Node): void => {
     if (!insideWrapper(node)) {
       if (ts.isCallExpression(node)) {
-        extractCall(node, file, config, table, model, calls, unresolved);
+        collectInterceptorReplays(node, file, config, replayCalls);
+        if (!replayCalls.has(node)) {
+          extractCall(node, file, config, table, model, calls, unresolved);
+        }
       } else if (ts.isJsxSelfClosingElement(node) || ts.isJsxOpeningElement(node)) {
         extractJsxWrapper(node, file, config, table, calls, unresolved);
       }
@@ -1208,9 +1233,66 @@ function extractCall(
         const bindings = new Map<string, readonly [ts.Expression, string]>();
         const declared = table.findFunction(wrapperConfig.name, file);
         const paramName = wrapperConfig.parameter ?? (declared === undefined ? undefined : firstIdentifierParam(declared.fn));
-        if (declared !== undefined && paramName !== undefined) {
-          const argument = argumentForParameter(declared.fn, paramName, call);
-          if (argument !== undefined) bindings.set(paramName, [argument, file]);
+        const takesObjectPattern = declared !== undefined
+          && declared.fn.parameters[0] !== undefined
+          && ts.isObjectBindingPattern(declared.fn.parameters[0].name);
+        if (declared !== undefined && (paramName !== undefined || takesObjectPattern)) {
+          const argument = paramName !== undefined
+            ? argumentForParameter(declared.fn, paramName, call)
+            : call.arguments[0];
+          if (argument !== undefined) {
+            if (paramName !== undefined) bindings.set(paramName, [argument, file]);
+            const sandboxCalls: ClientCall[] = [];
+            const sandboxUnresolved: ClientScanUnresolved[] = [];
+            const sandboxReads: ResponseRead[] = [];
+            const singleHandled = resolveWrapperTargetThroughJsxProps(
+              argument,
+              call,
+              paramName ?? '',
+              wrapperConfig,
+              file,
+              config,
+              table,
+              bindings,
+              sandboxCalls,
+              sandboxUnresolved,
+              location,
+              sandboxReads,
+            );
+            const positionalCalls: ClientCall[] = [];
+            const positionalUnresolved: ClientScanUnresolved[] = [];
+            const positionalReads: ResponseRead[] = [];
+            const positionalHandled = resolveWrapperTargetsThroughPositionalArgs(
+              call,
+              declared,
+              wrapperConfig,
+              file,
+              config,
+              table,
+              positionalCalls,
+              positionalUnresolved,
+              location,
+              positionalReads,
+            );
+            if (positionalHandled && positionalUnresolved.length === 0) {
+              calls.push(...positionalCalls);
+              unresolved.push(...positionalUnresolved);
+              reads.push(...positionalReads);
+              return;
+            }
+            if (singleHandled) {
+              calls.push(...sandboxCalls);
+              unresolved.push(...sandboxUnresolved);
+              reads.push(...sandboxReads);
+              return;
+            }
+            if (positionalHandled) {
+              calls.push(...positionalCalls);
+              unresolved.push(...positionalUnresolved);
+              reads.push(...positionalReads);
+              return;
+            }
+          }
         }
         resolveExtendedWrapper(wrapperConfig, file, config, table, bindings, calls, unresolved, location, reads);
       }
@@ -1667,7 +1749,7 @@ class ValueTable {
 
   constructor(
     private readonly config: ClientScanConfig,
-    private readonly scannedFiles: ReadonlyMap<string, string>,
+    readonly scannedFiles: ReadonlyMap<string, string>,
   ) {}
 
   modelOf(file: string): FileModel | undefined {
@@ -2339,7 +2421,8 @@ class ValueTable {
     bindings: ExprBinding | undefined,
     seen: Set<string>,
   ): readonly string[] | undefined {
-    const proven = this.proveStartsWith(node.condition, file, bindings, seen);
+    const proven = this.proveEquality(node.condition, file, bindings, seen)
+      ?? this.proveStartsWith(node.condition, file, bindings, seen);
     if (proven === true) return this.callTargets(node.whenTrue, file, bindings, seen);
     if (proven === false) return this.callTargets(node.whenFalse, file, bindings, seen);
     const whenTrue = this.callTargets(node.whenTrue, file, bindings, seen);
@@ -2374,6 +2457,102 @@ class ValueTable {
     const receiver = this.callTargets(expr.expression.expression, file, bindings, seen);
     if (receiver === undefined || receiver.length !== 1) return undefined;
     return (receiver[0] ?? '').startsWith(probe.text);
+  }
+
+  /**
+   * Proves an `===`/`==`/`!==`/`!=` condition whose two sides are
+   * proven scalars — the guard a component writes around a defaulted
+   * prop (`detail === null`). Loose equality is only decided when one
+   * side is null or undefined: those comparisons never coerce, while
+   * `0 == false` would. Undefined when either side is unproven — the
+   * caller then keeps both arms.
+   */
+  private proveEquality(
+    node: ts.Expression,
+    file: string,
+    bindings: ExprBinding | undefined,
+    seen: Set<string>,
+  ): boolean | undefined {
+    const expr = unwrapOwnExpression(node);
+    if (ts.isPrefixUnaryExpression(expr) && expr.operator === ts.SyntaxKind.ExclamationToken) {
+      const inner = this.proveEquality(expr.operand, file, bindings, seen);
+      return inner === undefined ? undefined : !inner;
+    }
+    if (!ts.isBinaryExpression(expr)) return undefined;
+    const op = expr.operatorToken.kind;
+    const strict = op === ts.SyntaxKind.EqualsEqualsEqualsToken || op === ts.SyntaxKind.ExclamationEqualsEqualsToken;
+    const loose = op === ts.SyntaxKind.EqualsEqualsToken || op === ts.SyntaxKind.ExclamationEqualsToken;
+    if (!strict && !loose) return undefined;
+    const left = this.provenScalar(expr.left, file, bindings, seen);
+    if (left === 'unknown') return undefined;
+    const right = this.provenScalar(expr.right, file, bindings, seen);
+    if (right === 'unknown') return undefined;
+    if (loose && !(left === null || left === undefined) && !(right === null || right === undefined)) return undefined;
+    const equal = strict
+      ? left === right
+      : left === right || ((left === null || left === undefined) && (right === null || right === undefined));
+    return (op === ts.SyntaxKind.ExclamationEqualsEqualsToken || op === ts.SyntaxKind.ExclamationEqualsToken)
+      ? !equal
+      : equal;
+  }
+
+  /**
+   * The proven scalar of an expression — null, undefined, string,
+   * number, boolean — or 'unknown' when the bounded model cannot prove
+   * it. Per-usage prop bindings take precedence, mirroring
+   * identifierTargets: inside the component the destructured prop
+   * shadows any outer constant. Module constants resolve through the
+   * same local/import precedence, so a named `NO_ENDPOINT` sentinel
+   * proves like its literal.
+   */
+  private provenScalar(
+    node: ts.Expression,
+    file: string,
+    bindings: ExprBinding | undefined,
+    seen: Set<string>,
+  ): ConstScalar | 'unknown' {
+    const expr = unwrapOwnExpression(node);
+    if (expr.kind === ts.SyntaxKind.NullKeyword) return null;
+    if (expr.kind === ts.SyntaxKind.TrueKeyword) return true;
+    if (expr.kind === ts.SyntaxKind.FalseKeyword) return false;
+    if (ts.isStringLiteral(expr) || ts.isNoSubstitutionTemplateLiteral(expr)) return expr.text;
+    if (ts.isNumericLiteral(expr)) return Number(expr.text);
+    if (ts.isPrefixUnaryExpression(expr) && expr.operator === ts.SyntaxKind.MinusToken && ts.isNumericLiteral(expr.operand)) {
+      return -Number(expr.operand.text);
+    }
+    if (!ts.isIdentifier(expr)) return 'unknown';
+    if (expr.text === 'undefined') {
+      return this.localConstBinding(expr).state === 'found' ? 'unknown' : undefined;
+    }
+    const bound = bindings?.get(expr.text);
+    if (bound !== undefined) {
+      const key = `${bound[1]}::${expr.text}`;
+      if (seen.has(key)) return 'unknown';
+      seen.add(key);
+      const value = this.provenScalar(bound[0], bound[1], bindings, seen);
+      seen.delete(key);
+      return value;
+    }
+    const local = this.localConstBinding(expr);
+    if (local.state === 'shadowed') return 'unknown';
+    if (local.state === 'found') {
+      const key = `${file}::${expr.text}`;
+      if (seen.has(key)) return 'unknown';
+      seen.add(key);
+      const value = this.provenScalar(local.initializer, file, bindings, seen);
+      seen.delete(key);
+      return value;
+    }
+    const imported = this.importedFrom(file, expr.text);
+    const origin = imported ?? file;
+    const initializer = this.modelOf(origin)?.constants.get(expr.text);
+    if (initializer === undefined) return 'unknown';
+    const key = `${origin}::${expr.text}`;
+    if (seen.has(key)) return 'unknown';
+    seen.add(key);
+    const value = this.provenScalar(initializer, origin, bindings, seen);
+    seen.delete(key);
+    return value;
   }
 
   private expandTemplate(
@@ -2819,22 +2998,38 @@ function extractJsxWrapper(
   if (wrapperConfig === undefined || !resolvesToDeclaredWrapper(table, wrapperConfig.name, file, config)) return;
   const source = table.modelOf(file)?.source;
   if (source === undefined) return;
+  const location = locationOf(file, source, node);
   const bindings = new Map<string, readonly [ts.Expression, string]>();
-  if (wrapperConfig.parameter !== undefined) {
-    const attr = jsxAttributeExpression(node, wrapperConfig.parameter);
-    if (attr !== undefined) bindings.set(wrapperConfig.parameter, [attr, file]);
+  // Absent `parameter` means the first parameter — the original
+  // single-parameter wrapper contract — the same fallback the direct
+  // call path applies.
+  const declared = table.findFunction(wrapperConfig.name, file);
+  const paramName = wrapperConfig.parameter ?? (declared === undefined ? undefined : firstIdentifierParam(declared.fn));
+  if (paramName !== undefined) {
+    const attr = jsxAttributeExpression(node, paramName);
+    if (attr !== undefined) {
+      bindings.set(paramName, [attr, file]);
+      if (
+        resolveWrapperTargetThroughJsxProps(
+          attr,
+          node,
+          paramName,
+          wrapperConfig,
+          file,
+          config,
+          table,
+          bindings,
+          calls,
+          unresolved,
+          location,
+          [],
+        )
+      ) {
+        return;
+      }
+    }
   }
-  resolveExtendedWrapper(
-    wrapperConfig,
-    file,
-    config,
-    table,
-    bindings,
-    calls,
-    unresolved,
-    locationOf(file, source, node),
-    [],
-  );
+  resolveExtendedWrapper(wrapperConfig, file, config, table, bindings, calls, unresolved, location, []);
 }
 
 function resolveExtendedWrapper(
@@ -2961,6 +3156,889 @@ function wrapperBodyTargets(
   if (!saw) return 'unmodeled';
   if (failed || found.length === 0) return 'unresolved';
   return found;
+}
+
+/**
+ * The configured client symbol an `X.interceptors.response.use(...)`
+ * call registers on, or null when the call is not such a registration
+ * on `axios` or a configured client symbol. Request interceptors are
+ * deliberately out of scope: a request-side handler edits the config
+ * BEFORE the first send, so a re-send modeled there would record a call
+ * the scan has never seen.
+ */
+function interceptorReplayClient(
+  call: ts.CallExpression,
+  file: string,
+  config: ClientScanConfig,
+): string | null {
+  const use = call.expression;
+  if (!ts.isPropertyAccessExpression(use) || use.name.text !== 'use') return null;
+  const response = use.expression;
+  if (!ts.isPropertyAccessExpression(response) || response.name.text !== 'response') return null;
+  const interceptors = response.expression;
+  if (!ts.isPropertyAccessExpression(interceptors) || interceptors.name.text !== 'interceptors') return null;
+  const client = interceptors.expression;
+  if (!ts.isIdentifier(client)) return null;
+  if (client.text !== 'axios' && !clientSymbolActiveIn(config, client.text, file)) return null;
+  return client.text;
+}
+
+/** `error.config` for the handler's own error parameter — and nothing else. */
+function isOwnErrorConfig(expr: ts.Expression | undefined, errorParamName: string | undefined): boolean {
+  if (errorParamName === undefined || expr === undefined) return false;
+  // Real handlers type the config on the way through — PM's
+  // `const config = error.config as RetriableConfig | undefined;` — so
+  // the alias must be recognized through as/satisfies/non-null/parens.
+  const peeled = unwrapOwnExpression(expr);
+  return (
+    ts.isPropertyAccessExpression(peeled) &&
+    ts.isIdentifier(peeled.expression) &&
+    peeled.expression.text === errorParamName &&
+    peeled.name.text === 'config'
+  );
+}
+
+/**
+ * Records the replay calls a response-error handler performs: calls on
+ * the SAME client symbol whose single argument is the intercepted
+ * error's own request config — `error.config`, a destructured
+ * `{ config }` parameter binding, or a `const` bound to `error.config`.
+ * Everything else inside the handler keeps today's model — a different
+ * symbol, a different argument, a second argument, a verb call — because
+ * only the re-send-the-original-request shape is a replay of a request
+ * this scan has already recorded.
+ */
+function collectInterceptorReplays(
+  call: ts.CallExpression,
+  file: string,
+  config: ClientScanConfig,
+  replayCalls: Set<ts.CallExpression>,
+): void {
+  const clientName = interceptorReplayClient(call, file, config);
+  if (clientName === null) return;
+  const handler = call.arguments[1];
+  if (handler === undefined || (!ts.isArrowFunction(handler) && !ts.isFunctionExpression(handler))) return;
+  const first = handler.parameters[0];
+  if (first === undefined) return;
+  let errorParamName: string | undefined;
+  const boundConfigNames = new Set<string>();
+  if (ts.isIdentifier(first.name)) {
+    errorParamName = first.name.text;
+  } else if (ts.isObjectBindingPattern(first.name)) {
+    for (const element of first.name.elements) {
+      if (element.dotDotDotToken !== undefined || !ts.isIdentifier(element.name)) continue;
+      const propertyName = element.propertyName === undefined
+        ? element.name.text
+        : ts.isIdentifier(element.propertyName)
+          ? element.propertyName.text
+          : undefined;
+      if (propertyName === 'config') boundConfigNames.add(element.name.text);
+    }
+  } else {
+    return;
+  }
+  const configAliases = new Set<string>();
+  if (errorParamName !== undefined && handler.body !== undefined) {
+    const collectAlias = (node: ts.Node): void => {
+      if (
+        ts.isVariableDeclaration(node) &&
+        ts.isIdentifier(node.name) &&
+        isOwnErrorConfig(node.initializer, errorParamName)
+      ) {
+        configAliases.add(node.name.text);
+      }
+      ts.forEachChild(node, collectAlias);
+    };
+    collectAlias(handler.body);
+  }
+  if (handler.body === undefined) return;
+  const collectReplays = (node: ts.Node): void => {
+    if (ts.isCallExpression(node)) {
+      const expression = node.expression;
+      const argument = node.arguments[0];
+      if (
+        ts.isIdentifier(expression) &&
+        expression.text === clientName &&
+        node.arguments.length === 1 &&
+        argument !== undefined &&
+        (isOwnErrorConfig(argument, errorParamName) ||
+          (ts.isIdentifier(argument) && (boundConfigNames.has(argument.text) || configAliases.has(argument.text))))
+      ) {
+        replayCalls.add(node);
+        return;
+      }
+    }
+    ts.forEachChild(node, collectReplays);
+  };
+  collectReplays(handler.body);
+}
+
+/** One scanned function-like that models a JSX component: first parameter is `props` or destructured. */
+interface ComponentModel {
+  name: string;
+  file: string;
+  fn: ts.FunctionDeclaration | ts.ArrowFunction | ts.FunctionExpression;
+  source: ts.SourceFile;
+}
+
+/** Components in the scanned set and every JSX element that instantiates them. */
+interface JsxComponentIndex {
+  components: Map<string, ComponentModel>;
+  usages: Map<string, Array<{ file: string; element: ts.JsxOpeningElement | ts.JsxSelfClosingElement }>>;
+}
+
+const jsxComponentIndexCache = new WeakMap<ValueTable, JsxComponentIndex>();
+
+/**
+ * Builds (once per scan) the component/usage index the JSX prop flow
+ * resolves through: module-scope function-likes whose first parameter is
+ * `props` or destructured, plus every JSX element with an identifier
+ * tagName. The whole scanned set participates — usage sites are
+ * dataflow inputs, and scan scoping narrows fact emission, not the
+ * dataflow's ability to resolve product code.
+ */
+function jsxComponentIndex(table: ValueTable): JsxComponentIndex {
+  const cached = jsxComponentIndexCache.get(table);
+  if (cached !== undefined) return cached;
+  const index: JsxComponentIndex = { components: new Map(), usages: new Map() };
+  for (const file of [...table.scannedFiles.keys()].sort()) {
+    const model = table.modelOf(file);
+    if (model === undefined) continue;
+    for (const [name, fn] of model.functions) {
+      if (index.components.has(name)) continue;
+      const first = fn.parameters[0];
+      if (first === undefined) continue;
+      if (!ts.isIdentifier(first.name) && !ts.isObjectBindingPattern(first.name)) continue;
+      index.components.set(name, { name, file, fn, source: model.source });
+    }
+    const collectUsages = (node: ts.Node): void => {
+      if (ts.isJsxSelfClosingElement(node) || ts.isJsxOpeningElement(node)) {
+        if (ts.isIdentifier(node.tagName)) {
+          const sites = index.usages.get(node.tagName.text) ?? [];
+          sites.push({ file, element: node });
+          index.usages.set(node.tagName.text, sites);
+        }
+      }
+      ts.forEachChild(node, collectUsages);
+    };
+    collectUsages(model.source);
+  }
+  jsxComponentIndexCache.set(table, index);
+  return index;
+}
+
+/**
+ * The prop name `localName` binds inside a destructured first parameter,
+ * or undefined. Renames count (`{ apiEndpoint: endpoint }` binds the
+ * `apiEndpoint` prop under the local `endpoint`); rest elements and
+ * non-identifier names bind nothing — an unbound name fails closed.
+ */
+function componentPropName(component: ComponentModel, localName: string): string | undefined {
+  const first = component.fn.parameters[0];
+  if (first === undefined || !ts.isObjectBindingPattern(first.name)) return undefined;
+  for (const element of first.name.elements) {
+    if (!ts.isBindingElement(element) || element.dotDotDotToken !== undefined || !ts.isIdentifier(element.name)) continue;
+    const propName = element.propertyName === undefined
+      ? element.name.text
+      : ts.isIdentifier(element.propertyName)
+        ? element.propertyName.text
+        : undefined;
+    if (propName !== undefined && element.name.text === localName) return propName;
+  }
+  return undefined;
+}
+
+/**
+ * The component-prop reference an expression resolves to inside
+ * `component`: a destructured prop (`apiEndpoint`), a `props.` access
+ * (`props.apiEndpoint`), either with a member path (`duplicate.apiBasePath`,
+ * `props.row.apiBasePath`). Undefined for anything else.
+ */
+function componentPropRef(
+  expr: ts.Expression,
+  component: ComponentModel,
+): { propName: string; path: readonly string[] } | undefined {
+  const first = component.fn.parameters[0];
+  if (first === undefined) return undefined;
+  const takesPropsObject = ts.isIdentifier(first.name) && first.name.text === 'props';
+  const segments: string[] = [];
+  let current: ts.Expression = expr;
+  while (ts.isPropertyAccessExpression(current)) {
+    segments.unshift(current.name.text);
+    current = current.expression;
+  }
+  if (!ts.isIdentifier(current)) return undefined;
+  if (segments.length === 0) {
+    const propName = componentPropName(component, current.text);
+    return propName === undefined ? undefined : { propName, path: [] };
+  }
+  if (takesPropsObject && current.text === 'props') {
+    const propName = segments[0];
+    return propName === undefined ? undefined : { propName, path: segments.slice(1) };
+  }
+  const propName = componentPropName(component, current.text);
+  return propName === undefined ? undefined : { propName, path: segments };
+}
+
+/** The innermost indexed component of `file` whose span contains `node`. */
+function innermostComponent(
+  components: ReadonlyMap<string, ComponentModel>,
+  file: string,
+  node: ts.Node,
+): ComponentModel | undefined {
+  let best: ComponentModel | undefined;
+  let bestStart = -1;
+  for (const component of components.values()) {
+    if (component.file !== file) continue;
+    const start = component.fn.getStart(component.source);
+    if (node.getStart(component.source) < start || node.getEnd() > component.fn.getEnd()) continue;
+    if (best === undefined || start > bestStart) {
+      best = component;
+      bestStart = start;
+    }
+  }
+  return best;
+}
+
+/**
+ * Every target a component prop provably carries, read off the
+ * component's JSX usage sites in the scanned set. Each site must pass a
+ * literal or statically resolvable value; a value may also forward
+ * another component's prop unchanged, which resolves through THAT
+ * component's sites — exactly one hop, then the value must be concrete.
+ * A missing attribute, an unresolvable value, a second hop, or a
+ * component without usage sites fails closed: a guessed target would
+ * certify a route the server may never serve.
+ */
+function propTargetsThroughUsages(
+  index: JsxComponentIndex,
+  component: ComponentModel,
+  propName: string,
+  depth: number,
+  stack: ReadonlySet<string>,
+  table: ValueTable,
+): readonly string[] | 'unresolved' {
+  const stackKey = `${component.file}::${component.name}::${propName}`;
+  if (stack.has(stackKey)) return 'unresolved';
+  const sites = index.usages.get(component.name);
+  if (sites === undefined || sites.length === 0) return 'unresolved';
+  const nextStack = new Set(stack);
+  nextStack.add(stackKey);
+  const targets: string[] = [];
+  for (const site of sites) {
+    const attr = jsxAttributeExpression(site.element, propName);
+    if (attr === undefined) return 'unresolved';
+    const enclosing = innermostComponent(index.components, site.file, site.element);
+    if (enclosing !== undefined) {
+      const forwarded = componentPropRef(attr, enclosing);
+      if (forwarded !== undefined) {
+        if (forwarded.path.length > 0 || depth >= 1) return 'unresolved';
+        const deeper = propTargetsThroughUsages(index, enclosing, forwarded.propName, depth + 1, nextStack, table);
+        if (deeper === 'unresolved') return 'unresolved';
+        targets.push(...deeper);
+        continue;
+      }
+    }
+    const direct = table.callTargets(attr, site.file);
+    if (direct === undefined || direct.length === 0) return 'unresolved';
+    targets.push(...direct);
+  }
+  return targets;
+}
+
+/** True for exactly the literal scalars a destructuring default may take: string, number, boolean, null, undefined. */
+function isLiteralScalar(expr: ts.Expression): boolean {
+  const unwrapped = unwrapOwnExpression(expr);
+  return unwrapped.kind === ts.SyntaxKind.NullKeyword
+    || unwrapped.kind === ts.SyntaxKind.TrueKeyword
+    || unwrapped.kind === ts.SyntaxKind.FalseKeyword
+    || ts.isStringLiteral(unwrapped)
+    || ts.isNoSubstitutionTemplateLiteral(unwrapped)
+    || ts.isNumericLiteral(unwrapped)
+    || (ts.isPrefixUnaryExpression(unwrapped)
+      && unwrapped.operator === ts.SyntaxKind.MinusToken
+      && ts.isNumericLiteral(unwrapped.operand))
+    || (ts.isIdentifier(unwrapped) && unwrapped.text === 'undefined');
+}
+
+/**
+ * The literal initializer a destructured prop binds when its attribute
+ * is omitted, or undefined. Renames count (`{ apiEndpoint: endpoint =
+ * '/x/' }`); anything beyond a literal scalar — a call, an identifier,
+ * a computed value — is not a provable default and fails closed, as
+ * does a prop declared without an initializer.
+ */
+function componentPropDefault(component: ComponentModel, propName: string): ts.Expression | undefined {
+  const first = component.fn.parameters[0];
+  if (first === undefined || !ts.isObjectBindingPattern(first.name)) return undefined;
+  for (const element of first.name.elements) {
+    if (!ts.isBindingElement(element) || element.dotDotDotToken !== undefined || !ts.isIdentifier(element.name)) continue;
+    const bound = element.propertyName === undefined
+      ? element.name.text
+      : ts.isIdentifier(element.propertyName)
+        ? element.propertyName.text
+        : undefined;
+    if (bound !== propName) continue;
+    const initializer = element.initializer;
+    if (initializer === undefined) return undefined;
+    return isLiteralScalar(initializer) ? initializer : undefined;
+  }
+  return undefined;
+}
+
+/**
+ * The argument's identifiers that name one of the component's
+ * destructured props — the value references a per-usage binding must
+ * cover. Property-access names (`x.detail`) and object-literal keys
+ * are positions, not value references.
+ */
+function argumentPropLocals(argument: ts.Expression, component: ComponentModel): Set<string> {
+  const names = new Set<string>();
+  const visit = (node: ts.Node): void => {
+    if (ts.isIdentifier(node) && componentPropName(component, node.text) !== undefined && !isPositionalName(node)) {
+      names.add(node.text);
+    }
+    node.forEachChild(visit);
+  };
+  visit(argument);
+  return names;
+}
+
+/** True when `node` sits in a property-name position rather than a value position. */
+function isPositionalName(node: ts.Identifier): boolean {
+  const parent = node.parent;
+  if (ts.isPropertyAccessExpression(parent) && parent.name === node) return true;
+  if (ts.isPropertyAssignment(parent) && parent.name === node) return true;
+  if (ts.isMethodDeclaration(parent) && parent.name === node) return true;
+  return false;
+}
+
+/**
+ * One usage site's binding of the referenced destructured props to
+ * statically known values: the attribute the site passes, or — when
+ * the site omits the attribute — the prop's literal destructuring
+ * default (evaluated in the component's file). A prop whose value
+ * cannot be proven at this site (omitted with no default or with a
+ * non-literal default, attribute present without a value) binds to
+ * `UNPROVEN_PROP_VALUE`: the evaluation fails only if it consults the
+ * prop, so a guard the URL never reads cannot block a provable target.
+ * Undefined when the site cannot bind the props AT ALL: a spread
+ * attribute (`{...props}`) may carry any of them with unknown values.
+ * Undefined fails closed at the caller.
+ */
+function usagePropBindings(
+  component: ComponentModel,
+  site: { file: string; element: ts.JsxOpeningElement | ts.JsxSelfClosingElement },
+  referenced: ReadonlySet<string>,
+): ExprBinding | undefined {
+  for (const attribute of site.element.attributes.properties) {
+    if (ts.isJsxSpreadAttribute(attribute)) return undefined;
+  }
+  const bindings = new Map<string, readonly [ts.Expression, string]>();
+  for (const localName of referenced) {
+    const propName = componentPropName(component, localName);
+    if (propName === undefined) return undefined;
+    const attribute = jsxAttributeExpression(site.element, propName);
+    if (attribute !== undefined) {
+      bindings.set(localName, [attribute, site.file]);
+      continue;
+    }
+    let presentWithoutValue = false;
+    for (const attribute of site.element.attributes.properties) {
+      if (ts.isJsxAttribute(attribute) && ts.isIdentifier(attribute.name) && attribute.name.text === propName) {
+        presentWithoutValue = true;
+        break;
+      }
+    }
+    if (presentWithoutValue) {
+      bindings.set(localName, [UNPROVEN_PROP_VALUE, component.file]);
+      continue;
+    }
+    const initializer = componentPropDefault(component, propName);
+    if (initializer === undefined) {
+      bindings.set(localName, [UNPROVEN_PROP_VALUE, component.file]);
+      continue;
+    }
+    bindings.set(localName, [initializer, component.file]);
+  }
+  return bindings;
+}
+
+/**
+ * Decides a wrapper call whose endpoint argument DEPENDS on the host
+ * component's props without being a bare prop reference — a ternary
+ * guard like ``detail === null ? `${base}/x` : `${detail}/x` `` over a
+ * destructured prop. Every JSX usage site of the component contributes
+ * a value for each prop the argument references (the attribute passed,
+ * or the prop's literal destructuring default when omitted), and the
+ * argument is evaluated once per usage under those bindings: a
+ * null/undefined default proves the guard and selects the matching
+ * branch. The wrapper is then evaluated once per distinct resolved
+ * target, emitting one call per distinct target. A usage that cannot
+ * bind a referenced prop keeps today's unresolved finding, byte for
+ * byte. Everything the resolver cannot itself prove — a host without
+ * JSX usage sites (a hook), a usage-supplied value that still leaves
+ * the argument unproven — defers: the caller falls through to the
+ * plain configured-parameter model, which fails closed on its own.
+ * Returns false when the argument references none of the component's
+ * props — the caller keeps today's model.
+ */
+function resolveWrapperTargetThroughPropDefaults(
+  argument: ts.Expression,
+  host: ComponentModel,
+  paramName: string,
+  wrapperConfig: WrapperFunctionConfig,
+  file: string,
+  config: ClientScanConfig,
+  table: ValueTable,
+  baseBindings: ReadonlyMap<string, readonly [ts.Expression, string]>,
+  calls: ClientCall[],
+  unresolved: ClientScanUnresolved[],
+  location: Location,
+  reads: ResponseRead[],
+): boolean {
+  const referenced = argumentPropLocals(argument, host);
+  if (referenced.size === 0) return false;
+  const object = unwrapOwnExpression(argument);
+  if (ts.isObjectLiteralExpression(object)) {
+    return recordWrapperTargetsThroughObjectProps(
+      object,
+      host,
+      wrapperConfig,
+      file,
+      config,
+      table,
+      calls,
+      unresolved,
+      location,
+      reads,
+    );
+  }
+  const index = jsxComponentIndex(table);
+  const sites = index.usages.get(host.name);
+  if (sites === undefined || sites.length === 0) {
+    // A host with no JSX usage sites (a hook called from other hooks)
+    // has no per-usage values; the plain configured-parameter model may
+    // still resolve the call. Defer rather than preempt it with a
+    // finding the baseline did not emit.
+    return false;
+  }
+  const targets: string[] = [];
+  for (const site of sites) {
+    const bindings = usagePropBindings(host, site, referenced);
+    if (bindings === undefined) {
+      unresolved.push({
+        code: FRONTEND_CALL_TARGET_UNRESOLVED,
+        detail: `call target cannot be resolved statically (${wrapperConfig.name})`,
+        location,
+      });
+      return true;
+    }
+    const resolved = table.callTargets(argument, file, bindings);
+    if (resolved === undefined || resolved.length === 0) {
+      // The usage supplied values, but the argument still cannot be
+      // proven under them. The plain configured-parameter model may
+      // resolve the call more coarsely (an unbound hole becomes a
+      // `${}` slot exactly as before this resolver existed). Defer.
+      return false;
+    }
+    targets.push(...resolved);
+  }
+  return recordWrapperTargets(
+    targets,
+    paramName,
+    wrapperConfig,
+    file,
+    config,
+    table,
+    baseBindings,
+    calls,
+    unresolved,
+    location,
+    reads,
+  );
+}
+
+/**
+ * The hook-body bindings one config-object call argument carries: each
+ * property binds the hook's destructured local to the property's value.
+ * A value that NAMES a host prop resolves through that usage's prop
+ * bindings (the passed attribute, or the literal destructuring
+ * default); any other value binds as written and must resolve in the
+ * call file. Undefined — fail closed — for shorthand properties whose
+ * name is not a per-usage-known prop, for spread elements, and for
+ * computed or method properties: what they carry cannot be proven.
+ */
+function objectUsageBindings(
+  object: ts.ObjectLiteralExpression,
+  host: ComponentModel,
+  usage: ExprBinding,
+  callFile: string,
+): ExprBinding | undefined {
+  const bindings = new Map<string, readonly [ts.Expression, string]>();
+  for (const property of object.properties) {
+    if (ts.isPropertyAssignment(property) && ts.isIdentifier(property.name)) {
+      const value = unwrapOwnExpression(property.initializer);
+      if (ts.isIdentifier(value) && componentPropName(host, value.text) !== undefined) {
+        const bound = usage.get(value.text);
+        if (bound === undefined) return undefined;
+        bindings.set(property.name.text, bound);
+      } else {
+        bindings.set(property.name.text, [property.initializer, callFile]);
+      }
+      continue;
+    }
+    if (ts.isShorthandPropertyAssignment(property)) {
+      const bound = usage.get(property.name.text);
+      if (bound !== undefined) {
+        bindings.set(property.name.text, bound);
+      } else {
+        bindings.set(property.name.text, [property.name, callFile]);
+      }
+      continue;
+    }
+    return undefined;
+  }
+  return bindings;
+}
+
+/**
+ * Decides a wrapper call whose argument is a config OBJECT carrying the
+ * host component's props into a destructured hook parameter —
+ * `useSearchableDropdown({ endpoint: apiEndpoint, detailEndpoint })`.
+ * Every JSX usage site of the component contributes the values it
+ * passes and the literal destructuring defaults it omits; the hook
+ * body is then evaluated once per usage under those bindings, so a
+ * null/undefined default proves a guard inside the HOOK and selects
+ * the matching branch. Raws are unioned across usages and recorded
+ * once per distinct path per method. A usage that cannot bind a
+ * referenced prop keeps today's unresolved finding, byte for byte.
+ * Everything the resolver cannot itself prove — a host without JSX
+ * usage sites (a hook), a hook body that stays unproven or a wrapper
+ * with no modeled client call — defers: the caller falls through to
+ * the plain configured-parameter model, which fails closed on its
+ * own. Returns false when the object references none of the
+ * component's props or the wrapper has no simple single-return client
+ * call — the caller keeps today's model.
+ */
+function recordWrapperTargetsThroughObjectProps(
+  object: ts.ObjectLiteralExpression,
+  host: ComponentModel,
+  wrapperConfig: WrapperFunctionConfig,
+  file: string,
+  config: ClientScanConfig,
+  table: ValueTable,
+  calls: ClientCall[],
+  unresolved: ClientScanUnresolved[],
+  location: Location,
+  reads: ResponseRead[],
+): boolean {
+  const referenced = argumentPropLocals(object, host);
+  if (referenced.size === 0) return false;
+  const index = jsxComponentIndex(table);
+  const sites = index.usages.get(host.name);
+  if (sites === undefined || sites.length === 0) {
+    // A host with no JSX usage sites (a hook called from other hooks)
+    // has no per-usage values; the plain configured-parameter model may
+    // still resolve the call. Defer rather than preempt it with a
+    // finding the baseline did not emit.
+    return false;
+  }
+  const declared = table.findFunction(wrapperConfig.name, file);
+  if (declared === undefined) return false;
+  const byMethod = new Map<HttpMethod, string[]>();
+  for (const site of sites) {
+    const usage = usagePropBindings(host, site, referenced);
+    if (usage === undefined) {
+      unresolved.push({
+        code: FRONTEND_CALL_TARGET_UNRESOLVED,
+        detail: `call target cannot be resolved statically (${wrapperConfig.name})`,
+        location,
+      });
+      return true;
+    }
+    const bodyBindings = objectUsageBindings(object, host, usage, file);
+    if (bodyBindings === undefined) {
+      unresolved.push({
+        code: FRONTEND_CALL_TARGET_UNRESOLVED,
+        detail: `call target cannot be resolved statically (${wrapperConfig.name})`,
+        location,
+      });
+      return true;
+    }
+    const body = wrapperBodyTargets(declared.fn, declared.file, wrapperConfig, config, table, bodyBindings, 0, new Set());
+    if (body === 'unmodeled') {
+      // The wrapper itself is not modeled - the plain extended-wrapper
+      // model below emits exactly this finding with today's wording.
+      // Defer so the wording and the fallback stay in one place.
+      return false;
+    }
+    if (body === 'unresolved') {
+      // The hook body cannot be proven under the per-usage values. The
+      // plain configured-parameter model may still resolve the call
+      // more coarsely (unbound holes become `${}` slots). Defer.
+      return false;
+    }
+    for (const entry of body) {
+      const raws = byMethod.get(entry.method) ?? [];
+      raws.push(entry.raw);
+      byMethod.set(entry.method, raws);
+    }
+  }
+  for (const [method, raws] of byMethod) {
+    recordRawTargets([...new Set(raws)], method, wrapperConfig.name, config, calls, unresolved, location, reads);
+  }
+  return true;
+}
+
+/**
+ * Decides a wrapper call whose POSITIONAL arguments carry the host
+ * component's props — `useSearchableDropdown(apiEndpoint,
+ * detailEndpoint)`, or a config object the single-argument model
+ * cannot bind (`parameter`-extracted or destructured-parameter
+ * shapes). Runs after the single-argument chain: it engages only the
+ * calls that chain left unresolved. Every JSX usage site of the host
+ * component contributes the values it passes and the literal
+ * destructuring defaults it omits; each declared parameter binds its
+ * call argument (a bare prop resolves through that usage's bindings),
+ * the referenced prop locals bind for complex arguments, and the hook
+ * body is evaluated once per usage. Raws are unioned across usages and
+ * recorded once per distinct path per method. The resolver is a
+ * precision upgrade only: every failure to bind or prove — a host
+ * without JSX usage sites (a hook), a usage that cannot bind a
+ * referenced prop, an unbindable argument, an unproven hook body —
+ * defers to the plain configured-parameter model, which resolves or
+ * fails closed exactly as before this resolver existed. Returns false
+ * when no argument references one of the component's props — the
+ * caller keeps today's model.
+ */
+function resolveWrapperTargetsThroughPositionalArgs(
+  call: ts.CallExpression,
+  declared: { fn: UrlFunction; file: string },
+  wrapperConfig: WrapperFunctionConfig,
+  file: string,
+  config: ClientScanConfig,
+  table: ValueTable,
+  calls: ClientCall[],
+  unresolved: ClientScanUnresolved[],
+  location: Location,
+  reads: ResponseRead[],
+): boolean {
+  const index = jsxComponentIndex(table);
+  const host = innermostComponent(index.components, file, call);
+  if (host === undefined) return false;
+  const referenced = new Set<string>();
+  for (const argument of call.arguments) {
+    for (const name of argumentPropLocals(argument, host)) referenced.add(name);
+  }
+  if (referenced.size === 0) return false;
+  const sites = index.usages.get(host.name);
+  if (sites === undefined || sites.length === 0) {
+    // A host with no JSX usage sites (a hook called from other hooks,
+    // never rendered) has no per-usage values to bind - but the plain
+    // configured-parameter model may still resolve the call. Defer;
+    // claiming it here would turn every hook-to-hook call into a
+    // finding the baseline did not emit.
+    return false;
+  }
+  const byMethod = new Map<HttpMethod, string[]>();
+  for (const site of sites) {
+    const usage = usagePropBindings(host, site, referenced);
+    if (usage === undefined) {
+      unresolved.push({
+        code: FRONTEND_CALL_TARGET_UNRESOLVED,
+        detail: `call target cannot be resolved statically (${wrapperConfig.name})`,
+        location,
+      });
+      return true;
+    }
+    const bodyBindings = new Map<string, readonly [ts.Expression, string]>();
+    for (const localName of referenced) {
+      const bound = usage.get(localName);
+      if (bound !== undefined) bodyBindings.set(localName, bound);
+    }
+    let unbindable = false;
+    for (let paramIndex = 0; paramIndex < declared.fn.parameters.length; paramIndex += 1) {
+      const parameter = declared.fn.parameters[paramIndex];
+      const argument = call.arguments[paramIndex];
+      if (parameter === undefined || argument === undefined) continue;
+      if (ts.isIdentifier(parameter.name)) {
+        const value = unwrapOwnExpression(argument);
+        if (ts.isIdentifier(value) && componentPropName(host, value.text) !== undefined) {
+          const bound = usage.get(value.text);
+          if (bound === undefined) {
+            unbindable = true;
+            break;
+          }
+          bodyBindings.set(parameter.name.text, bound);
+        } else {
+          bodyBindings.set(parameter.name.text, [argument, file]);
+        }
+        continue;
+      }
+      if (ts.isObjectBindingPattern(parameter.name)) {
+        const object = unwrapOwnExpression(argument);
+        if (!ts.isObjectLiteralExpression(object)) {
+          unbindable = true;
+          break;
+        }
+        const objectBindings = objectUsageBindings(object, host, usage, file);
+        if (objectBindings === undefined) {
+          unbindable = true;
+          break;
+        }
+        for (const [name, bound] of objectBindings) bodyBindings.set(name, bound);
+      }
+    }
+    if (unbindable) {
+      // This call's arguments cannot be bound per usage. Defer: the
+      // plain configured-parameter model decides, keeping today's
+      // finding when it cannot resolve the call either.
+      return false;
+    }
+    const body = wrapperBodyTargets(declared.fn, declared.file, wrapperConfig, config, table, bodyBindings, 0, new Set());
+    if (body === 'unmodeled') {
+      // The wrapper itself is not modeled - the plain extended-wrapper
+      // model below emits exactly this finding with today's wording.
+      // Defer so the wording and the fallback stay in one place.
+      return false;
+    }
+    if (body === 'unresolved') {
+      // The hook body cannot be proven under the per-usage values. The
+      // plain configured-parameter model may still resolve the call
+      // more coarsely (unbound holes become `${}` slots). Defer.
+      return false;
+    }
+    for (const entry of body) {
+      const raws = byMethod.get(entry.method) ?? [];
+      raws.push(entry.raw);
+      byMethod.set(entry.method, raws);
+    }
+  }
+  for (const [method, raws] of byMethod) {
+    recordRawTargets([...new Set(raws)], method, wrapperConfig.name, config, calls, unresolved, location, reads);
+  }
+  return true;
+}
+
+/**
+ * Emits the wrapper's calls for an already-resolved set of endpoint
+ * targets: the declared wrapper body is evaluated once per distinct
+ * target with the target bound to the wrapper's parameter, and the
+ * raws are recorded per method. Returns false when the wrapper has no
+ * simple single-return client call in the scanned set — the caller
+ * keeps today's model. A body that cannot be evaluated keeps today's
+ * unresolved finding.
+ */
+function recordWrapperTargets(
+  targets: readonly string[],
+  paramName: string,
+  wrapperConfig: WrapperFunctionConfig,
+  file: string,
+  config: ClientScanConfig,
+  table: ValueTable,
+  baseBindings: ReadonlyMap<string, readonly [ts.Expression, string]>,
+  calls: ClientCall[],
+  unresolved: ClientScanUnresolved[],
+  location: Location,
+  reads: ResponseRead[],
+): boolean {
+  const declared = table.findFunction(wrapperConfig.name, file);
+  if (declared === undefined) return false;
+  const byMethod = new Map<HttpMethod, string[]>();
+  for (const target of new Set(targets)) {
+    const bindings = new Map(baseBindings);
+    bindings.set(paramName, [ts.factory.createStringLiteral(target), file]);
+    const body = wrapperBodyTargets(declared.fn, declared.file, wrapperConfig, config, table, bindings, 0, new Set());
+    if (body === 'unmodeled' || body === 'unresolved') {
+      unresolved.push({
+        code: FRONTEND_CALL_TARGET_UNRESOLVED,
+        detail: `call target cannot be resolved statically (${wrapperConfig.name})`,
+        location,
+      });
+      return true;
+    }
+    for (const entry of body) {
+      const raws = byMethod.get(entry.method) ?? [];
+      raws.push(entry.raw);
+      byMethod.set(entry.method, raws);
+    }
+  }
+  for (const [method, raws] of byMethod) {
+    recordRawTargets([...new Set(raws)], method, wrapperConfig.name, config, calls, unresolved, location, reads);
+  }
+  return true;
+}
+
+/**
+ * Decides a wrapper call whose endpoint argument is a prop of the
+ * enclosing function component: the prop is resolved through every JSX
+ * usage site of that component (one forwarding hop allowed) and the
+ * wrapper is evaluated once per distinct resolved target, emitting one
+ * call per distinct target. When the argument is not a bare
+ * component-prop reference, the argument is resolved through the
+ * component's destructuring defaults instead (see
+ * resolveWrapperTargetThroughPropDefaults); when it references no
+ * destructured prop either, the caller keeps today's model. A prop the
+ * usage sites cannot resolve keeps today's unresolved finding, byte for
+ * byte.
+ */
+function resolveWrapperTargetThroughJsxProps(
+  argument: ts.Expression,
+  hostNode: ts.Node,
+  paramName: string,
+  wrapperConfig: WrapperFunctionConfig,
+  file: string,
+  config: ClientScanConfig,
+  table: ValueTable,
+  baseBindings: ReadonlyMap<string, readonly [ts.Expression, string]>,
+  calls: ClientCall[],
+  unresolved: ClientScanUnresolved[],
+  location: Location,
+  reads: ResponseRead[],
+): boolean {
+  const index = jsxComponentIndex(table);
+  const host = innermostComponent(index.components, file, hostNode);
+  if (host === undefined) return false;
+  const ref = componentPropRef(unwrapOwnExpression(argument), host);
+  if (ref === undefined || ref.path.length > 0) {
+    return resolveWrapperTargetThroughPropDefaults(
+      argument,
+      host,
+      paramName,
+      wrapperConfig,
+      file,
+      config,
+      table,
+      baseBindings,
+      calls,
+      unresolved,
+      location,
+      reads,
+    );
+  }
+  const targets = propTargetsThroughUsages(index, host, ref.propName, 0, new Set(), table);
+  if (targets === 'unresolved') {
+    unresolved.push({
+      code: FRONTEND_CALL_TARGET_UNRESOLVED,
+      detail: `call target cannot be resolved statically (${wrapperConfig.name})`,
+      location,
+    });
+    return true;
+  }
+  return recordWrapperTargets(
+    targets,
+    paramName,
+    wrapperConfig,
+    file,
+    config,
+    table,
+    baseBindings,
+    calls,
+    unresolved,
+    location,
+    reads,
+  );
 }
 
 function clientCallOf(
