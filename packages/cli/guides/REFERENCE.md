@@ -1923,7 +1923,12 @@ direct call sites:
   a value (`<C detail />` means `true`, not omission), spreads
   (`{...props}`), or passes a member access on a prop
   (`duplicate.apiBasePath`) — and a component with no usage site —
-  keeps the unresolved finding — fail closed. A JSX wrapper usage
+  keeps the unresolved finding — fail closed. The per-usage resolvers
+  are additive precision only: a component whose usage sites the scan
+  cannot supply — a hook called from other hooks, never rendered —
+  and an argument the per-usage values still leave unproven fall back
+  to the plain configured-parameter model, which resolves or blocks
+  exactly as before them. A JSX wrapper usage
   binds the wrapper's first parameter when no `parameter` is
   configured, the same contract the direct call path applies.
 

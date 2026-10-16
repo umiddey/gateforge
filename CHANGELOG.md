@@ -14,7 +14,12 @@
   guard lives in the hook's body. A prop
   with no default, a non-literal default (a call, an identifier), an
   attribute present without a value, and spread usages (`{...props}`)
-  still block with `FRONTEND_CALL_TARGET_UNRESOLVED`.
+  still block with `FRONTEND_CALL_TARGET_UNRESOLVED`. These per-usage
+  resolvers are additive precision only: when they cannot themselves
+  prove a call — a hook called from other hooks (no JSX usage sites),
+  a usage-supplied value that still leaves the endpoint unproven — the
+  call falls back to the plain configured-parameter model, which
+  resolves or fails closed exactly as before.
 - **Fixed: client scan flags on interceptor replays.** Inside the error
   handler of `client.interceptors.response.use`, re-sending the
   intercepted error's own request config on the same client symbol —

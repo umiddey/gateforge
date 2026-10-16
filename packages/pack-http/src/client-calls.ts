@@ -3574,11 +3574,14 @@ function usagePropBindings(
  * argument is evaluated once per usage under those bindings: a
  * null/undefined default proves the guard and selects the matching
  * branch. The wrapper is then evaluated once per distinct resolved
- * target, emitting one call per distinct target. Any usage that cannot
- * bind a referenced prop, or a component without usage sites, keeps
- * today's unresolved finding, byte for byte. Returns false when the
- * argument references none of the component's props — the caller keeps
- * today's model.
+ * target, emitting one call per distinct target. A usage that cannot
+ * bind a referenced prop keeps today's unresolved finding, byte for
+ * byte. Everything the resolver cannot itself prove — a host without
+ * JSX usage sites (a hook), a usage-supplied value that still leaves
+ * the argument unproven — defers: the caller falls through to the
+ * plain configured-parameter model, which fails closed on its own.
+ * Returns false when the argument references none of the component's
+ * props — the caller keeps today's model.
  */
 function resolveWrapperTargetThroughPropDefaults(
   argument: ts.Expression,
@@ -3614,12 +3617,11 @@ function resolveWrapperTargetThroughPropDefaults(
   const index = jsxComponentIndex(table);
   const sites = index.usages.get(host.name);
   if (sites === undefined || sites.length === 0) {
-    unresolved.push({
-      code: FRONTEND_CALL_TARGET_UNRESOLVED,
-      detail: `call target cannot be resolved statically (${wrapperConfig.name})`,
-      location,
-    });
-    return true;
+    // A host with no JSX usage sites (a hook called from other hooks)
+    // has no per-usage values; the plain configured-parameter model may
+    // still resolve the call. Defer rather than preempt it with a
+    // finding the baseline did not emit.
+    return false;
   }
   const targets: string[] = [];
   for (const site of sites) {
@@ -3634,12 +3636,11 @@ function resolveWrapperTargetThroughPropDefaults(
     }
     const resolved = table.callTargets(argument, file, bindings);
     if (resolved === undefined || resolved.length === 0) {
-      unresolved.push({
-        code: FRONTEND_CALL_TARGET_UNRESOLVED,
-        detail: `call target cannot be resolved statically (${wrapperConfig.name})`,
-        location,
-      });
-      return true;
+      // The usage supplied values, but the argument still cannot be
+      // proven under them. The plain configured-parameter model may
+      // resolve the call more coarsely (an unbound hole becomes a
+      // `${}` slot exactly as before this resolver existed). Defer.
+      return false;
     }
     targets.push(...resolved);
   }
@@ -3710,11 +3711,15 @@ function objectUsageBindings(
  * body is then evaluated once per usage under those bindings, so a
  * null/undefined default proves a guard inside the HOOK and selects
  * the matching branch. Raws are unioned across usages and recorded
- * once per distinct path per method. Any usage that cannot bind a
- * referenced prop, or a component without usage sites, keeps today's
- * unresolved finding, byte for byte. Returns false when the object
- * references none of the component's props or the wrapper has no
- * simple single-return client call — the caller keeps today's model.
+ * once per distinct path per method. A usage that cannot bind a
+ * referenced prop keeps today's unresolved finding, byte for byte.
+ * Everything the resolver cannot itself prove — a host without JSX
+ * usage sites (a hook), a hook body that stays unproven or a wrapper
+ * with no modeled client call — defers: the caller falls through to
+ * the plain configured-parameter model, which fails closed on its
+ * own. Returns false when the object references none of the
+ * component's props or the wrapper has no simple single-return client
+ * call — the caller keeps today's model.
  */
 function recordWrapperTargetsThroughObjectProps(
   object: ts.ObjectLiteralExpression,
@@ -3733,12 +3738,11 @@ function recordWrapperTargetsThroughObjectProps(
   const index = jsxComponentIndex(table);
   const sites = index.usages.get(host.name);
   if (sites === undefined || sites.length === 0) {
-    unresolved.push({
-      code: FRONTEND_CALL_TARGET_UNRESOLVED,
-      detail: `call target cannot be resolved statically (${wrapperConfig.name})`,
-      location,
-    });
-    return true;
+    // A host with no JSX usage sites (a hook called from other hooks)
+    // has no per-usage values; the plain configured-parameter model may
+    // still resolve the call. Defer rather than preempt it with a
+    // finding the baseline did not emit.
+    return false;
   }
   const declared = table.findFunction(wrapperConfig.name, file);
   if (declared === undefined) return false;
@@ -3764,23 +3768,16 @@ function recordWrapperTargetsThroughObjectProps(
     }
     const body = wrapperBodyTargets(declared.fn, declared.file, wrapperConfig, config, table, bodyBindings, 0, new Set());
     if (body === 'unmodeled') {
-      unresolved.push({
-        code: FRONTEND_CALL_TARGET_UNRESOLVED,
-        detail: (
-          `wrapper '${wrapperConfig.name}' has no simple single-return client call in the ` +
-          'scanned set; its call targets cannot be resolved statically'
-        ),
-        location,
-      });
-      return true;
+      // The wrapper itself is not modeled - the plain extended-wrapper
+      // model below emits exactly this finding with today's wording.
+      // Defer so the wording and the fallback stay in one place.
+      return false;
     }
     if (body === 'unresolved') {
-      unresolved.push({
-        code: FRONTEND_CALL_TARGET_UNRESOLVED,
-        detail: `call target cannot be resolved statically (${wrapperConfig.name})`,
-        location,
-      });
-      return true;
+      // The hook body cannot be proven under the per-usage values. The
+      // plain configured-parameter model may still resolve the call
+      // more coarsely (unbound holes become `${}` slots). Defer.
+      return false;
     }
     for (const entry of body) {
       const raws = byMethod.get(entry.method) ?? [];
@@ -3806,10 +3803,14 @@ function recordWrapperTargetsThroughObjectProps(
  * call argument (a bare prop resolves through that usage's bindings),
  * the referenced prop locals bind for complex arguments, and the hook
  * body is evaluated once per usage. Raws are unioned across usages and
- * recorded once per distinct path per method. Any usage that cannot
- * bind a referenced prop keeps today's unresolved finding, byte for
- * byte. Returns false when no argument references one of the
- * component's props — the caller keeps today's model.
+ * recorded once per distinct path per method. The resolver is a
+ * precision upgrade only: every failure to bind or prove — a host
+ * without JSX usage sites (a hook), a usage that cannot bind a
+ * referenced prop, an unbindable argument, an unproven hook body —
+ * defers to the plain configured-parameter model, which resolves or
+ * fails closed exactly as before this resolver existed. Returns false
+ * when no argument references one of the component's props — the
+ * caller keeps today's model.
  */
 function resolveWrapperTargetsThroughPositionalArgs(
   call: ts.CallExpression,
@@ -3833,12 +3834,12 @@ function resolveWrapperTargetsThroughPositionalArgs(
   if (referenced.size === 0) return false;
   const sites = index.usages.get(host.name);
   if (sites === undefined || sites.length === 0) {
-    unresolved.push({
-      code: FRONTEND_CALL_TARGET_UNRESOLVED,
-      detail: `call target cannot be resolved statically (${wrapperConfig.name})`,
-      location,
-    });
-    return true;
+    // A host with no JSX usage sites (a hook called from other hooks,
+    // never rendered) has no per-usage values to bind - but the plain
+    // configured-parameter model may still resolve the call. Defer;
+    // claiming it here would turn every hook-to-hook call into a
+    // finding the baseline did not emit.
+    return false;
   }
   const byMethod = new Map<HttpMethod, string[]>();
   for (const site of sites) {
@@ -3890,32 +3891,23 @@ function resolveWrapperTargetsThroughPositionalArgs(
       }
     }
     if (unbindable) {
-      unresolved.push({
-        code: FRONTEND_CALL_TARGET_UNRESOLVED,
-        detail: `call target cannot be resolved statically (${wrapperConfig.name})`,
-        location,
-      });
-      return true;
+      // This call's arguments cannot be bound per usage. Defer: the
+      // plain configured-parameter model decides, keeping today's
+      // finding when it cannot resolve the call either.
+      return false;
     }
     const body = wrapperBodyTargets(declared.fn, declared.file, wrapperConfig, config, table, bodyBindings, 0, new Set());
     if (body === 'unmodeled') {
-      unresolved.push({
-        code: FRONTEND_CALL_TARGET_UNRESOLVED,
-        detail: (
-          `wrapper '${wrapperConfig.name}' has no simple single-return client call in the ` +
-          'scanned set; its call targets cannot be resolved statically'
-        ),
-        location,
-      });
-      return true;
+      // The wrapper itself is not modeled - the plain extended-wrapper
+      // model below emits exactly this finding with today's wording.
+      // Defer so the wording and the fallback stay in one place.
+      return false;
     }
     if (body === 'unresolved') {
-      unresolved.push({
-        code: FRONTEND_CALL_TARGET_UNRESOLVED,
-        detail: `call target cannot be resolved statically (${wrapperConfig.name})`,
-        location,
-      });
-      return true;
+      // The hook body cannot be proven under the per-usage values. The
+      // plain configured-parameter model may still resolve the call
+      // more coarsely (unbound holes become `${}` slots). Defer.
+      return false;
     }
     for (const entry of body) {
       const raws = byMethod.get(entry.method) ?? [];
