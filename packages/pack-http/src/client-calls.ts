@@ -879,6 +879,15 @@ interface ConstValue {
 
 const UNRESOLVED_VALUE: ConstValue = { kind: 'unresolved', text: '' };
 
+/**
+ * Binds a prop whose per-usage value cannot be proven (attribute
+ * omitted with no literal default, non-literal default, attribute
+ * present without a value): every evaluator refuses this node, so a
+ * computation that consults it fails closed while one that never reads
+ * the prop still resolves.
+ */
+const UNPROVEN_PROP_VALUE = ts.factory.createVoidExpression(ts.factory.createNumericLiteral('0'));
+
 /** Cap on alternatives one expression may prove. Above this, fail closed — never a partial set. */
 const MAX_CALL_TARGETS = 32;
 
@@ -1233,40 +1242,54 @@ function extractCall(
             : call.arguments[0];
           if (argument !== undefined) {
             if (paramName !== undefined) bindings.set(paramName, [argument, file]);
-            if (
-              call.arguments.length > 1
-              && declared !== undefined
-              && resolveWrapperTargetsThroughPositionalArgs(
-                call,
-                declared,
-                wrapperConfig,
-                file,
-                config,
-                table,
-                calls,
-                unresolved,
-                location,
-                reads,
-              )
-            ) {
+            const sandboxCalls: ClientCall[] = [];
+            const sandboxUnresolved: ClientScanUnresolved[] = [];
+            const sandboxReads: ResponseRead[] = [];
+            const singleHandled = resolveWrapperTargetThroughJsxProps(
+              argument,
+              call,
+              paramName ?? '',
+              wrapperConfig,
+              file,
+              config,
+              table,
+              bindings,
+              sandboxCalls,
+              sandboxUnresolved,
+              location,
+              sandboxReads,
+            );
+            const positionalCalls: ClientCall[] = [];
+            const positionalUnresolved: ClientScanUnresolved[] = [];
+            const positionalReads: ResponseRead[] = [];
+            const positionalHandled = resolveWrapperTargetsThroughPositionalArgs(
+              call,
+              declared,
+              wrapperConfig,
+              file,
+              config,
+              table,
+              positionalCalls,
+              positionalUnresolved,
+              location,
+              positionalReads,
+            );
+            if (positionalHandled && positionalUnresolved.length === 0) {
+              calls.push(...positionalCalls);
+              unresolved.push(...positionalUnresolved);
+              reads.push(...positionalReads);
               return;
             }
-            if (
-              resolveWrapperTargetThroughJsxProps(
-                argument,
-                call,
-                paramName ?? '',
-                wrapperConfig,
-                file,
-                config,
-                table,
-                bindings,
-                calls,
-                unresolved,
-                location,
-                reads,
-              )
-            ) {
+            if (singleHandled) {
+              calls.push(...sandboxCalls);
+              unresolved.push(...sandboxUnresolved);
+              reads.push(...sandboxReads);
+              return;
+            }
+            if (positionalHandled) {
+              calls.push(...positionalCalls);
+              unresolved.push(...positionalUnresolved);
+              reads.push(...positionalReads);
               return;
             }
           }
@@ -3494,12 +3517,14 @@ function isPositionalName(node: ts.Identifier): boolean {
  * One usage site's binding of the referenced destructured props to
  * statically known values: the attribute the site passes, or — when
  * the site omits the attribute — the prop's literal destructuring
- * default (evaluated in the component's file). Undefined when the
- * binding cannot be proven for ANY referenced prop: an attribute
- * present without a value (`<C detail />` means `true`, which is not
- * the omitted case), an omission with no default or a non-literal
- * default, or a spread attribute (`{...props}`), which may bind
- * anything. Undefined fails closed at the caller.
+ * default (evaluated in the component's file). A prop whose value
+ * cannot be proven at this site (omitted with no default or with a
+ * non-literal default, attribute present without a value) binds to
+ * `UNPROVEN_PROP_VALUE`: the evaluation fails only if it consults the
+ * prop, so a guard the URL never reads cannot block a provable target.
+ * Undefined when the site cannot bind the props AT ALL: a spread
+ * attribute (`{...props}`) may carry any of them with unknown values.
+ * Undefined fails closed at the caller.
  */
 function usagePropBindings(
   component: ComponentModel,
@@ -3525,9 +3550,15 @@ function usagePropBindings(
         break;
       }
     }
-    if (presentWithoutValue) return undefined;
+    if (presentWithoutValue) {
+      bindings.set(localName, [UNPROVEN_PROP_VALUE, component.file]);
+      continue;
+    }
     const initializer = componentPropDefault(component, propName);
-    if (initializer === undefined) return undefined;
+    if (initializer === undefined) {
+      bindings.set(localName, [UNPROVEN_PROP_VALUE, component.file]);
+      continue;
+    }
     bindings.set(localName, [initializer, component.file]);
   }
   return bindings;
@@ -3764,19 +3795,21 @@ function recordWrapperTargetsThroughObjectProps(
 }
 
 /**
- * Decides a wrapper call that passes SEVERAL arguments positionally —
- * `useSearchableDropdown(apiEndpoint, detailEndpoint)` — where later
- * arguments carry component props a single-argument model would never
- * bind. Every JSX usage site of the host component contributes the
- * values it passes and the literal destructuring defaults it omits;
- * each declared parameter binds its call argument (a bare prop
- * resolves through that usage's bindings), the referenced prop locals
- * bind for complex arguments, and the hook body is evaluated once per
- * usage. Raws are unioned across usages and recorded once per distinct
- * path per method. Any usage that cannot bind a referenced prop keeps
- * today's unresolved finding, byte for byte. Returns false when no
- * argument references one of the component's props — the caller keeps
- * today's model.
+ * Decides a wrapper call whose POSITIONAL arguments carry the host
+ * component's props — `useSearchableDropdown(apiEndpoint,
+ * detailEndpoint)`, or a config object the single-argument model
+ * cannot bind (`parameter`-extracted or destructured-parameter
+ * shapes). Runs after the single-argument chain: it engages only the
+ * calls that chain left unresolved. Every JSX usage site of the host
+ * component contributes the values it passes and the literal
+ * destructuring defaults it omits; each declared parameter binds its
+ * call argument (a bare prop resolves through that usage's bindings),
+ * the referenced prop locals bind for complex arguments, and the hook
+ * body is evaluated once per usage. Raws are unioned across usages and
+ * recorded once per distinct path per method. Any usage that cannot
+ * bind a referenced prop keeps today's unresolved finding, byte for
+ * byte. Returns false when no argument references one of the
+ * component's props — the caller keeps today's model.
  */
 function resolveWrapperTargetsThroughPositionalArgs(
   call: ts.CallExpression,
@@ -3821,15 +3854,7 @@ function resolveWrapperTargetsThroughPositionalArgs(
     const bodyBindings = new Map<string, readonly [ts.Expression, string]>();
     for (const localName of referenced) {
       const bound = usage.get(localName);
-      if (bound === undefined) {
-        unresolved.push({
-          code: FRONTEND_CALL_TARGET_UNRESOLVED,
-          detail: `call target cannot be resolved statically (${wrapperConfig.name})`,
-          location,
-        });
-        return true;
-      }
-      bodyBindings.set(localName, bound);
+      if (bound !== undefined) bodyBindings.set(localName, bound);
     }
     let unbindable = false;
     for (let paramIndex = 0; paramIndex < declared.fn.parameters.length; paramIndex += 1) {
