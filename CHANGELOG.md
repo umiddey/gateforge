@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+- **Fixed: client scan flags on interceptor replays.** Inside the error
+  handler of `client.interceptors.response.use`, re-sending the
+  intercepted error's own request config on the same client symbol —
+  `client(error.config)`, a `const` bound to it, or a destructured
+  `{ config }` handler parameter — is a replay of a request the scan has
+  already recorded: no call record, no `FRONTEND_CALL_TARGET_UNRESOLVED`.
+  A replay-shaped call on a different client symbol and a config-only
+  call outside any interceptor still block, and concrete calls inside
+  the handler are still recorded.
+- **Fixed: wrapper call targets through JSX props.** A declared wrapper
+  whose endpoint argument is a function component's prop now resolves
+  through every JSX usage site of that component in the scanned set
+  (one unchanged-prop forwarding hop allowed) and emits one call per
+  distinct target. An unresolvable usage site, a member access on a
+  prop, or a component without usage sites keeps the unresolved
+  finding. JSX wrapper usages now bind the wrapper's first parameter
+  when no `parameter` is configured, matching the direct-call contract.
+
 ## 0.15.0
 
 - **Fixed: github-pr base ref in detached PR checkouts:** the changed-file

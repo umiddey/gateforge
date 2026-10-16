@@ -1090,10 +1090,19 @@ export function scanClientCalls(
   const insideWrapper = (node: ts.Node): boolean =>
     wrapperSpans.some(([start, end]) => node.getStart(source) >= start && node.getEnd() <= end);
 
+  // `client(...error.config...)` calls inside a registered response-error
+  // handler re-send a request this scan has already recorded; they are
+  // replays, never new call targets. The set fills when the walk reaches
+  // the `.use(...)` registration — an ancestor of the handler body — so
+  // every replay call is known before its node is reached.
+  const replayCalls = new Set<ts.CallExpression>();
   const visit = (node: ts.Node): void => {
     if (!insideWrapper(node)) {
       if (ts.isCallExpression(node)) {
-        extractCall(node, file, config, table, model, calls, unresolved);
+        collectInterceptorReplays(node, file, config, replayCalls);
+        if (!replayCalls.has(node)) {
+          extractCall(node, file, config, table, model, calls, unresolved);
+        }
       } else if (ts.isJsxSelfClosingElement(node) || ts.isJsxOpeningElement(node)) {
         extractJsxWrapper(node, file, config, table, calls, unresolved);
       }
@@ -1210,7 +1219,27 @@ function extractCall(
         const paramName = wrapperConfig.parameter ?? (declared === undefined ? undefined : firstIdentifierParam(declared.fn));
         if (declared !== undefined && paramName !== undefined) {
           const argument = argumentForParameter(declared.fn, paramName, call);
-          if (argument !== undefined) bindings.set(paramName, [argument, file]);
+          if (argument !== undefined) {
+            bindings.set(paramName, [argument, file]);
+            if (
+              resolveWrapperTargetThroughJsxProps(
+                argument,
+                call,
+                paramName,
+                wrapperConfig,
+                file,
+                config,
+                table,
+                bindings,
+                calls,
+                unresolved,
+                location,
+                reads,
+              )
+            ) {
+              return;
+            }
+          }
         }
         resolveExtendedWrapper(wrapperConfig, file, config, table, bindings, calls, unresolved, location, reads);
       }
@@ -1667,7 +1696,7 @@ class ValueTable {
 
   constructor(
     private readonly config: ClientScanConfig,
-    private readonly scannedFiles: ReadonlyMap<string, string>,
+    readonly scannedFiles: ReadonlyMap<string, string>,
   ) {}
 
   modelOf(file: string): FileModel | undefined {
@@ -2819,22 +2848,38 @@ function extractJsxWrapper(
   if (wrapperConfig === undefined || !resolvesToDeclaredWrapper(table, wrapperConfig.name, file, config)) return;
   const source = table.modelOf(file)?.source;
   if (source === undefined) return;
+  const location = locationOf(file, source, node);
   const bindings = new Map<string, readonly [ts.Expression, string]>();
-  if (wrapperConfig.parameter !== undefined) {
-    const attr = jsxAttributeExpression(node, wrapperConfig.parameter);
-    if (attr !== undefined) bindings.set(wrapperConfig.parameter, [attr, file]);
+  // Absent `parameter` means the first parameter — the original
+  // single-parameter wrapper contract — the same fallback the direct
+  // call path applies.
+  const declared = table.findFunction(wrapperConfig.name, file);
+  const paramName = wrapperConfig.parameter ?? (declared === undefined ? undefined : firstIdentifierParam(declared.fn));
+  if (paramName !== undefined) {
+    const attr = jsxAttributeExpression(node, paramName);
+    if (attr !== undefined) {
+      bindings.set(paramName, [attr, file]);
+      if (
+        resolveWrapperTargetThroughJsxProps(
+          attr,
+          node,
+          paramName,
+          wrapperConfig,
+          file,
+          config,
+          table,
+          bindings,
+          calls,
+          unresolved,
+          location,
+          [],
+        )
+      ) {
+        return;
+      }
+    }
   }
-  resolveExtendedWrapper(
-    wrapperConfig,
-    file,
-    config,
-    table,
-    bindings,
-    calls,
-    unresolved,
-    locationOf(file, source, node),
-    [],
-  );
+  resolveExtendedWrapper(wrapperConfig, file, config, table, bindings, calls, unresolved, location, []);
 }
 
 function resolveExtendedWrapper(
@@ -2961,6 +3006,356 @@ function wrapperBodyTargets(
   if (!saw) return 'unmodeled';
   if (failed || found.length === 0) return 'unresolved';
   return found;
+}
+
+/**
+ * The configured client symbol an `X.interceptors.response.use(...)`
+ * call registers on, or null when the call is not such a registration
+ * on `axios` or a configured client symbol. Request interceptors are
+ * deliberately out of scope: a request-side handler edits the config
+ * BEFORE the first send, so a re-send modeled there would record a call
+ * the scan has never seen.
+ */
+function interceptorReplayClient(
+  call: ts.CallExpression,
+  file: string,
+  config: ClientScanConfig,
+): string | null {
+  const use = call.expression;
+  if (!ts.isPropertyAccessExpression(use) || use.name.text !== 'use') return null;
+  const response = use.expression;
+  if (!ts.isPropertyAccessExpression(response) || response.name.text !== 'response') return null;
+  const interceptors = response.expression;
+  if (!ts.isPropertyAccessExpression(interceptors) || interceptors.name.text !== 'interceptors') return null;
+  const client = interceptors.expression;
+  if (!ts.isIdentifier(client)) return null;
+  if (client.text !== 'axios' && !clientSymbolActiveIn(config, client.text, file)) return null;
+  return client.text;
+}
+
+/** `error.config` for the handler's own error parameter — and nothing else. */
+function isOwnErrorConfig(expr: ts.Expression | undefined, errorParamName: string | undefined): boolean {
+  return (
+    errorParamName !== undefined &&
+    expr !== undefined &&
+    ts.isPropertyAccessExpression(expr) &&
+    ts.isIdentifier(expr.expression) &&
+    expr.expression.text === errorParamName &&
+    expr.name.text === 'config'
+  );
+}
+
+/**
+ * Records the replay calls a response-error handler performs: calls on
+ * the SAME client symbol whose single argument is the intercepted
+ * error's own request config — `error.config`, a destructured
+ * `{ config }` parameter binding, or a `const` bound to `error.config`.
+ * Everything else inside the handler keeps today's model — a different
+ * symbol, a different argument, a second argument, a verb call — because
+ * only the re-send-the-original-request shape is a replay of a request
+ * this scan has already recorded.
+ */
+function collectInterceptorReplays(
+  call: ts.CallExpression,
+  file: string,
+  config: ClientScanConfig,
+  replayCalls: Set<ts.CallExpression>,
+): void {
+  const clientName = interceptorReplayClient(call, file, config);
+  if (clientName === null) return;
+  const handler = call.arguments[1];
+  if (handler === undefined || (!ts.isArrowFunction(handler) && !ts.isFunctionExpression(handler))) return;
+  const first = handler.parameters[0];
+  if (first === undefined) return;
+  let errorParamName: string | undefined;
+  const boundConfigNames = new Set<string>();
+  if (ts.isIdentifier(first.name)) {
+    errorParamName = first.name.text;
+  } else if (ts.isObjectBindingPattern(first.name)) {
+    for (const element of first.name.elements) {
+      if (element.dotDotDotToken !== undefined || !ts.isIdentifier(element.name)) continue;
+      const propertyName = element.propertyName === undefined
+        ? element.name.text
+        : ts.isIdentifier(element.propertyName)
+          ? element.propertyName.text
+          : undefined;
+      if (propertyName === 'config') boundConfigNames.add(element.name.text);
+    }
+  } else {
+    return;
+  }
+  const configAliases = new Set<string>();
+  if (errorParamName !== undefined && handler.body !== undefined) {
+    const collectAlias = (node: ts.Node): void => {
+      if (
+        ts.isVariableDeclaration(node) &&
+        ts.isIdentifier(node.name) &&
+        isOwnErrorConfig(node.initializer, errorParamName)
+      ) {
+        configAliases.add(node.name.text);
+      }
+      ts.forEachChild(node, collectAlias);
+    };
+    collectAlias(handler.body);
+  }
+  if (handler.body === undefined) return;
+  const collectReplays = (node: ts.Node): void => {
+    if (ts.isCallExpression(node)) {
+      const expression = node.expression;
+      const argument = node.arguments[0];
+      if (
+        ts.isIdentifier(expression) &&
+        expression.text === clientName &&
+        node.arguments.length === 1 &&
+        argument !== undefined &&
+        (isOwnErrorConfig(argument, errorParamName) ||
+          (ts.isIdentifier(argument) && (boundConfigNames.has(argument.text) || configAliases.has(argument.text))))
+      ) {
+        replayCalls.add(node);
+        return;
+      }
+    }
+    ts.forEachChild(node, collectReplays);
+  };
+  collectReplays(handler.body);
+}
+
+/** One scanned function-like that models a JSX component: first parameter is `props` or destructured. */
+interface ComponentModel {
+  name: string;
+  file: string;
+  fn: ts.FunctionDeclaration | ts.ArrowFunction | ts.FunctionExpression;
+  source: ts.SourceFile;
+}
+
+/** Components in the scanned set and every JSX element that instantiates them. */
+interface JsxComponentIndex {
+  components: Map<string, ComponentModel>;
+  usages: Map<string, Array<{ file: string; element: ts.JsxOpeningElement | ts.JsxSelfClosingElement }>>;
+}
+
+const jsxComponentIndexCache = new WeakMap<ValueTable, JsxComponentIndex>();
+
+/**
+ * Builds (once per scan) the component/usage index the JSX prop flow
+ * resolves through: module-scope function-likes whose first parameter is
+ * `props` or destructured, plus every JSX element with an identifier
+ * tagName. The whole scanned set participates — usage sites are
+ * dataflow inputs, and scan scoping narrows fact emission, not the
+ * dataflow's ability to resolve product code.
+ */
+function jsxComponentIndex(table: ValueTable): JsxComponentIndex {
+  const cached = jsxComponentIndexCache.get(table);
+  if (cached !== undefined) return cached;
+  const index: JsxComponentIndex = { components: new Map(), usages: new Map() };
+  for (const file of [...table.scannedFiles.keys()].sort()) {
+    const model = table.modelOf(file);
+    if (model === undefined) continue;
+    for (const [name, fn] of model.functions) {
+      if (index.components.has(name)) continue;
+      const first = fn.parameters[0];
+      if (first === undefined) continue;
+      if (!ts.isIdentifier(first.name) && !ts.isObjectBindingPattern(first.name)) continue;
+      index.components.set(name, { name, file, fn, source: model.source });
+    }
+    const collectUsages = (node: ts.Node): void => {
+      if (ts.isJsxSelfClosingElement(node) || ts.isJsxOpeningElement(node)) {
+        if (ts.isIdentifier(node.tagName)) {
+          const sites = index.usages.get(node.tagName.text) ?? [];
+          sites.push({ file, element: node });
+          index.usages.set(node.tagName.text, sites);
+        }
+      }
+      ts.forEachChild(node, collectUsages);
+    };
+    collectUsages(model.source);
+  }
+  jsxComponentIndexCache.set(table, index);
+  return index;
+}
+
+/**
+ * The prop name `localName` binds inside a destructured first parameter,
+ * or undefined. Renames count (`{ apiEndpoint: endpoint }` binds the
+ * `apiEndpoint` prop under the local `endpoint`); rest elements and
+ * non-identifier names bind nothing — an unbound name fails closed.
+ */
+function componentPropName(component: ComponentModel, localName: string): string | undefined {
+  const first = component.fn.parameters[0];
+  if (first === undefined || !ts.isObjectBindingPattern(first.name)) return undefined;
+  for (const element of first.name.elements) {
+    if (!ts.isBindingElement(element) || element.dotDotDotToken !== undefined || !ts.isIdentifier(element.name)) continue;
+    const propName = element.propertyName === undefined
+      ? element.name.text
+      : ts.isIdentifier(element.propertyName)
+        ? element.propertyName.text
+        : undefined;
+    if (propName !== undefined && element.name.text === localName) return propName;
+  }
+  return undefined;
+}
+
+/**
+ * The component-prop reference an expression resolves to inside
+ * `component`: a destructured prop (`apiEndpoint`), a `props.` access
+ * (`props.apiEndpoint`), either with a member path (`duplicate.apiBasePath`,
+ * `props.row.apiBasePath`). Undefined for anything else.
+ */
+function componentPropRef(
+  expr: ts.Expression,
+  component: ComponentModel,
+): { propName: string; path: readonly string[] } | undefined {
+  const first = component.fn.parameters[0];
+  if (first === undefined) return undefined;
+  const takesPropsObject = ts.isIdentifier(first.name) && first.name.text === 'props';
+  const segments: string[] = [];
+  let current: ts.Expression = expr;
+  while (ts.isPropertyAccessExpression(current)) {
+    segments.unshift(current.name.text);
+    current = current.expression;
+  }
+  if (!ts.isIdentifier(current)) return undefined;
+  if (segments.length === 0) {
+    const propName = componentPropName(component, current.text);
+    return propName === undefined ? undefined : { propName, path: [] };
+  }
+  if (takesPropsObject && current.text === 'props') {
+    const propName = segments[0];
+    return propName === undefined ? undefined : { propName, path: segments.slice(1) };
+  }
+  const propName = componentPropName(component, current.text);
+  return propName === undefined ? undefined : { propName, path: segments };
+}
+
+/** The innermost indexed component of `file` whose span contains `node`. */
+function innermostComponent(
+  components: ReadonlyMap<string, ComponentModel>,
+  file: string,
+  node: ts.Node,
+): ComponentModel | undefined {
+  let best: ComponentModel | undefined;
+  let bestStart = -1;
+  for (const component of components.values()) {
+    if (component.file !== file) continue;
+    const start = component.fn.getStart(component.source);
+    if (node.getStart(component.source) < start || node.getEnd() > component.fn.getEnd()) continue;
+    if (best === undefined || start > bestStart) {
+      best = component;
+      bestStart = start;
+    }
+  }
+  return best;
+}
+
+/**
+ * Every target a component prop provably carries, read off the
+ * component's JSX usage sites in the scanned set. Each site must pass a
+ * literal or statically resolvable value; a value may also forward
+ * another component's prop unchanged, which resolves through THAT
+ * component's sites — exactly one hop, then the value must be concrete.
+ * A missing attribute, an unresolvable value, a second hop, or a
+ * component without usage sites fails closed: a guessed target would
+ * certify a route the server may never serve.
+ */
+function propTargetsThroughUsages(
+  index: JsxComponentIndex,
+  component: ComponentModel,
+  propName: string,
+  depth: number,
+  stack: ReadonlySet<string>,
+  table: ValueTable,
+): readonly string[] | 'unresolved' {
+  const stackKey = `${component.file}::${component.name}::${propName}`;
+  if (stack.has(stackKey)) return 'unresolved';
+  const sites = index.usages.get(component.name);
+  if (sites === undefined || sites.length === 0) return 'unresolved';
+  const nextStack = new Set(stack);
+  nextStack.add(stackKey);
+  const targets: string[] = [];
+  for (const site of sites) {
+    const attr = jsxAttributeExpression(site.element, propName);
+    if (attr === undefined) return 'unresolved';
+    const enclosing = innermostComponent(index.components, site.file, site.element);
+    if (enclosing !== undefined) {
+      const forwarded = componentPropRef(attr, enclosing);
+      if (forwarded !== undefined) {
+        if (forwarded.path.length > 0 || depth >= 1) return 'unresolved';
+        const deeper = propTargetsThroughUsages(index, enclosing, forwarded.propName, depth + 1, nextStack, table);
+        if (deeper === 'unresolved') return 'unresolved';
+        targets.push(...deeper);
+        continue;
+      }
+    }
+    const direct = table.callTargets(attr, site.file);
+    if (direct === undefined || direct.length === 0) return 'unresolved';
+    targets.push(...direct);
+  }
+  return targets;
+}
+
+/**
+ * Decides a wrapper call whose endpoint argument is a prop of the
+ * enclosing function component: the prop is resolved through every JSX
+ * usage site of that component (one forwarding hop allowed) and the
+ * wrapper is evaluated once per distinct resolved target, emitting one
+ * call per distinct target. Returns false when the argument is not a
+ * component-prop reference — the caller keeps today's model. A prop the
+ * usage sites cannot resolve keeps today's unresolved finding, byte for
+ * byte.
+ */
+function resolveWrapperTargetThroughJsxProps(
+  argument: ts.Expression,
+  hostNode: ts.Node,
+  paramName: string,
+  wrapperConfig: WrapperFunctionConfig,
+  file: string,
+  config: ClientScanConfig,
+  table: ValueTable,
+  baseBindings: ReadonlyMap<string, readonly [ts.Expression, string]>,
+  calls: ClientCall[],
+  unresolved: ClientScanUnresolved[],
+  location: Location,
+  reads: ResponseRead[],
+): boolean {
+  const index = jsxComponentIndex(table);
+  const host = innermostComponent(index.components, file, hostNode);
+  if (host === undefined) return false;
+  const ref = componentPropRef(unwrapOwnExpression(argument), host);
+  if (ref === undefined || ref.path.length > 0) return false;
+  const targets = propTargetsThroughUsages(index, host, ref.propName, 0, new Set(), table);
+  if (targets === 'unresolved') {
+    unresolved.push({
+      code: FRONTEND_CALL_TARGET_UNRESOLVED,
+      detail: `call target cannot be resolved statically (${wrapperConfig.name})`,
+      location,
+    });
+    return true;
+  }
+  const declared = table.findFunction(wrapperConfig.name, file);
+  if (declared === undefined) return false;
+  const byMethod = new Map<HttpMethod, string[]>();
+  for (const target of new Set(targets)) {
+    const bindings = new Map(baseBindings);
+    bindings.set(paramName, [ts.factory.createStringLiteral(target), file]);
+    const body = wrapperBodyTargets(declared.fn, declared.file, wrapperConfig, config, table, bindings, 0, new Set());
+    if (body === 'unmodeled' || body === 'unresolved') {
+      unresolved.push({
+        code: FRONTEND_CALL_TARGET_UNRESOLVED,
+        detail: `call target cannot be resolved statically (${wrapperConfig.name})`,
+        location,
+      });
+      return true;
+    }
+    for (const entry of body) {
+      const raws = byMethod.get(entry.method) ?? [];
+      raws.push(entry.raw);
+      byMethod.set(entry.method, raws);
+    }
+  }
+  for (const [method, raws] of byMethod) {
+    recordRawTargets([...new Set(raws)], method, wrapperConfig.name, config, calls, unresolved, location, reads);
+  }
+  return true;
 }
 
 function clientCallOf(

@@ -1886,6 +1886,32 @@ documents never moves them out of the pin.
 | `httpClients` | HTTP client-scan settings (was `.gateforge/http-clients.json`) | `clientSymbols`, `wrapperFunctions`, `urlBuilders`, `sameOriginHosts`, `clientScanRoots`, `serverScanRoots` |
 | `fastapi` | Python import roots (was `.gateforge/fastapi.json`) | `importRoots` |
 
+### Frontend client-call models (`httpClients`)
+
+The client scan proves a call's target from the scanned set or types a
+block — it never guesses. Two common frontend shapes resolve beyond the
+direct call sites:
+
+- **Interceptor replays.** Inside the error handler of
+  `client.interceptors.response.use(ok, handler)`, a call that re-sends
+  the intercepted error's own request config on the SAME client symbol —
+  `client(error.config)`, a `const config = error.config` binding, or a
+  destructured `{ config }` handler parameter — is a replay of a request
+  the scan has already recorded: no call record, no finding. Everything
+  else inside the handler keeps today's model: a replay-shaped call on a
+  DIFFERENT client symbol, and a config-only call outside any
+  interceptor, stay `FRONTEND_CALL_TARGET_UNRESOLVED`.
+- **Wrapper props through JSX usage sites.** When a declared wrapper's
+  endpoint argument is a prop of the enclosing function component, the
+  prop resolves through every JSX usage site of that component in the
+  scanned set — one call per distinct resolved target. A usage site may
+  forward another component's prop unchanged (one hop). A usage site
+  that passes an unresolvable value, a member access on a prop
+  (`duplicate.apiBasePath`), or a component with no usage site keeps the
+  unresolved finding — fail closed. A JSX wrapper usage binds the
+  wrapper's first parameter when no `parameter` is configured, the same
+  contract the direct call path applies.
+
 ## Migrating to 0.11
 
 0.11.0 folds four owner-answer FILES into the two documents above. Nothing
