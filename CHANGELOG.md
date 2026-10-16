@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **Fixed: client scan flags JSX-omitted props with destructuring
+  defaults.** When a declared wrapper's endpoint argument is guarded by
+  a component prop's literal destructuring default — `detail === null`
+  with `({ base, detail = null })` — a JSX usage that omits the
+  attribute now contributes the default value and the guard's matching
+  branch is proven, instead of failing closed; a usage that passes the
+  attribute keeps proving the other branch. A prop with no default, a
+  non-literal default (a call, an identifier), an attribute present
+  without a value, and spread usages (`{...props}`) still block with
+  `FRONTEND_CALL_TARGET_UNRESOLVED`.
 - **Fixed: client scan flags on interceptor replays.** Inside the error
   handler of `client.interceptors.response.use`, re-sending the
   intercepted error's own request config on the same client symbol —

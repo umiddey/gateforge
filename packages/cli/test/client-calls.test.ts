@@ -370,3 +370,141 @@ describe('client scan: JSX prop wrapper targets', () => {
     expect(result.calls).toEqual([]);
   });
 });
+
+describe('client scan: JSX prop destructuring defaults', () => {
+  const wrapperApiModule = `
+    import axios from 'axios';
+
+    export const apiClient = axios.create();
+
+    export async function useApiGet(path) {
+      const response = await apiClient.get(path);
+      return response.data;
+    }
+  `;
+
+  const defaultedDropdown = `
+    import { useApiGet } from './api.jsx';
+
+    export function SearchableDropdown({ base, detail = null }) {
+      const options = useApiGet(detail === null ? \`\${base}/x\` : \`\${detail}/x\`);
+      return <input list={options} />;
+    }
+  `;
+
+  it('a usage omitting a prop with a literal destructuring default resolves through the default', () => {
+    const result = scanFrom('src/SearchableDropdown.jsx', {
+      'src/api.jsx': wrapperApiModule,
+      'src/SearchableDropdown.jsx': defaultedDropdown,
+      'src/screens.jsx': `
+        import { SearchableDropdown } from './SearchableDropdown.jsx';
+
+        export function ContractsScreen() {
+          return <SearchableDropdown base="/contracts/" />;
+        }
+
+        export function InvoicesScreen() {
+          return <SearchableDropdown base="/invoices/" />;
+        }
+      `,
+    });
+    expect(result.unresolved).toEqual([]);
+    expect(result.calls.map((call) => call.rawPath).sort()).toEqual(['/contracts//x', '/invoices//x']);
+    expect(result.calls.map((call) => call.canonicalPath).sort()).toEqual(['/contracts/x', '/invoices/x']);
+    expect(result.calls.every((call) => call.framework === 'useApiGet')).toBe(true);
+    expect(result.calls.every((call) => call.method === 'GET')).toBe(true);
+    expect(result.calls.every((call) => call.location.file === 'src/SearchableDropdown.jsx')).toBe(true);
+  });
+
+  it('a usage passing the defaulted prop selects the other ternary branch', () => {
+    const result = scanFrom('src/SearchableDropdown.jsx', {
+      'src/api.jsx': wrapperApiModule,
+      'src/SearchableDropdown.jsx': defaultedDropdown,
+      'src/screens.jsx': `
+        import { SearchableDropdown } from './SearchableDropdown.jsx';
+
+        export function ContractsScreen() {
+          return <SearchableDropdown base="/contracts/" detail="/b" />;
+        }
+
+        export function InvoicesScreen() {
+          return <SearchableDropdown base="/invoices/" />;
+        }
+      `,
+    });
+    expect(result.unresolved).toEqual([]);
+    expect(result.calls.map((call) => call.rawPath).sort()).toEqual(['/b/x', '/invoices//x']);
+  });
+
+  it('a usage omitting a prop with no destructuring default keeps the finding', () => {
+    const result = scanFrom('src/SearchableDropdown.jsx', {
+      'src/api.jsx': wrapperApiModule,
+      'src/SearchableDropdown.jsx': `
+        import { useApiGet } from './api.jsx';
+
+        export function SearchableDropdown({ base, detail }) {
+          const options = useApiGet(detail === null ? \`\${base}/x\` : \`\${detail}/x\`);
+          return <input list={options} />;
+        }
+      `,
+      'src/screens.jsx': `
+        import { SearchableDropdown } from './SearchableDropdown.jsx';
+
+        export function ContractsScreen() {
+          return <SearchableDropdown base="/contracts/" />;
+        }
+      `,
+    });
+    expect(result.unresolved).toHaveLength(1);
+    expect(result.unresolved[0]?.code).toBe(FRONTEND_CALL_TARGET_UNRESOLVED);
+    expect(result.unresolved[0]?.detail).toBe('call target cannot be resolved statically (useApiGet)');
+    expect(result.calls).toEqual([]);
+  });
+
+  it('a non-literal destructuring default keeps the finding', () => {
+    const result = scanFrom('src/SearchableDropdown.jsx', {
+      'src/api.jsx': wrapperApiModule,
+      'src/SearchableDropdown.jsx': `
+        import { useApiGet } from './api.jsx';
+
+        function makePath() {
+          return '/generated/';
+        }
+
+        export function SearchableDropdown({ base, detail = makePath() }) {
+          const options = useApiGet(detail === null ? \`\${base}/x\` : \`\${detail}/x\`);
+          return <input list={options} />;
+        }
+      `,
+      'src/screens.jsx': `
+        import { SearchableDropdown } from './SearchableDropdown.jsx';
+
+        export function ContractsScreen() {
+          return <SearchableDropdown base="/contracts/" />;
+        }
+      `,
+    });
+    expect(result.unresolved).toHaveLength(1);
+    expect(result.unresolved[0]?.code).toBe(FRONTEND_CALL_TARGET_UNRESOLVED);
+    expect(result.unresolved[0]?.detail).toBe('call target cannot be resolved statically (useApiGet)');
+    expect(result.calls).toEqual([]);
+  });
+
+  it('a spread usage keeps the finding', () => {
+    const result = scanFrom('src/SearchableDropdown.jsx', {
+      'src/api.jsx': wrapperApiModule,
+      'src/SearchableDropdown.jsx': defaultedDropdown,
+      'src/screens.jsx': `
+        import { SearchableDropdown } from './SearchableDropdown.jsx';
+
+        export function MysteryScreen(props) {
+          return <SearchableDropdown {...props} />;
+        }
+      `,
+    });
+    expect(result.unresolved).toHaveLength(1);
+    expect(result.unresolved[0]?.code).toBe(FRONTEND_CALL_TARGET_UNRESOLVED);
+    expect(result.unresolved[0]?.detail).toBe('call target cannot be resolved statically (useApiGet)');
+    expect(result.calls).toEqual([]);
+  });
+});

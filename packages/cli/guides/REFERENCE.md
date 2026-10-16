@@ -1905,12 +1905,22 @@ direct call sites:
   endpoint argument is a prop of the enclosing function component, the
   prop resolves through every JSX usage site of that component in the
   scanned set — one call per distinct resolved target. A usage site may
-  forward another component's prop unchanged (one hop). A usage site
-  that passes an unresolvable value, a member access on a prop
-  (`duplicate.apiBasePath`), or a component with no usage site keeps the
-  unresolved finding — fail closed. A JSX wrapper usage binds the
-  wrapper's first parameter when no `parameter` is configured, the same
-  contract the direct call path applies.
+  forward another component's prop unchanged (one hop). When the
+  argument depends on the component's props without being a bare prop
+  reference — a guard such as ``detail === null ? `${base}/x` :
+  `${detail}/x` `` — each usage site contributes the value it passes
+  and, for an attribute it omits, the prop's literal destructuring
+  default (string, number, boolean, null, undefined); the guard's
+  branch is then proven per usage, so an omitted attribute takes the
+  default the component declared instead of failing closed. A usage
+  site that passes an unresolvable value, omits a prop with no
+  default, supplies a non-literal default, passes an attribute without
+  a value (`<C detail />` means `true`, not omission), spreads
+  (`{...props}`), or passes a member access on a prop
+  (`duplicate.apiBasePath`) — and a component with no usage site —
+  keeps the unresolved finding — fail closed. A JSX wrapper usage
+  binds the wrapper's first parameter when no `parameter` is
+  configured, the same contract the direct call path applies.
 
 ## Migrating to 0.11
 
