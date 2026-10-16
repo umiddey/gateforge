@@ -65,21 +65,7 @@ function packageDir(nameOrDetectorId: string): string {
   if (!short) throw new UsageError(`unknown bundled detector '${nameOrDetectorId}'`);
   // Walk up from this file to the CLI package root (holds package.json
   // named @gate-forge/cli).
-  let dir = dirname(dirname(fileURLToPath(import.meta.url))); // src/ -> package root
-  let cliRoot: string | null = null;
-  for (let depth = 0; depth < 8 && dir !== dirname(dir); depth++) {
-    const manifest = join(dir, 'package.json');
-    try {
-      const parsed = JSON.parse(readFileSync(manifest, 'utf8')) as { name?: string };
-      if (parsed.name === '@gate-forge/cli') {
-        cliRoot = dir;
-        break;
-      }
-    } catch {
-      // keep walking
-    }
-    dir = dirname(dir);
-  }
+  const cliRoot = cliPackageRootOrNull(dirname(fileURLToPath(import.meta.url)));
   if (cliRoot === null) {
     throw new UsageError(`cannot locate the @gate-forge/cli package root for '${nameOrDetectorId}'`);
   }
@@ -102,6 +88,102 @@ function packageDir(nameOrDetectorId: string): string {
     `bundled detector '${nameOrDetectorId}' (${packageNameFor(nameOrDetectorId)}) is not installed; ` +
       'scan-completeness evidence requires the genuine package',
   );
+}
+
+/**
+ * Walks up from `startDir` to the nearest `package.json` named
+ * `@gate-forge/cli` (the CLI package root), or null when there is none.
+ * Shared by the trusted-detector resolution and the executed-module
+ * resolver so both anchor to the same installation.
+ */
+function cliPackageRootOrNull(startDir: string): string | null {
+  let dir = startDir;
+  for (let depth = 0; depth < 8 && dir !== dirname(dir); depth++) {
+    const manifest = join(dir, 'package.json');
+    try {
+      const parsed = JSON.parse(readFileSync(manifest, 'utf8')) as { name?: string };
+      if (parsed.name === '@gate-forge/cli') return dir;
+    } catch {
+      // keep walking
+    }
+    dir = dirname(dir);
+  }
+  return null;
+}
+
+/** The package name a bare specifier loads from (subpaths stripped). */
+function packageNameOf(moduleSpecifier: string): string | null {
+  const segments = moduleSpecifier.split('/');
+  const packageName = segments[0]!.startsWith('@')
+    ? segments.length >= 2
+      ? `${segments[0]}/${segments[1]}`
+      : null
+    : segments[0]!;
+  return packageName !== null && packageName.length > 0 ? packageName : null;
+}
+
+/**
+ * Resolves the module an in-process plugin will EXECUTE — the same copy
+ * the plugin host's dynamic import loads — so the run-cache key digests
+ * exactly those bytes (plan 20261016_0330). Repo-relative specifiers
+ * resolve against the repository root. Anything else is a package
+ * specifier, and Node loads it from the CLI's own installation, so the
+ * candidate walk anchors at the CLI package root: the monorepo workspace
+ * sibling first (`packages/<short>`, which npm links into `node_modules`),
+ * then every ancestor `node_modules`. A candidate counts only when its
+ * manifest name matches, and the realpath is returned so symlinked
+ * workspace installs name the same real bytes ESM canonicalization loads.
+ *
+ * Args:
+ *   moduleSpecifier: configured in-process module (`./x.mjs` or package).
+ *   cwd: repository root for relative resolution.
+ *   cliModuleDir: CLI module directory anchoring the package walk;
+ *     defaults to this module's own directory.
+ *
+ * Returns:
+ *   string | null: absolute path of the executed module file (relative
+ *   specifiers) or package directory (package specifiers), or null when
+ *   the executed package cannot be located.
+ */
+export function resolveInProcessModulePath(
+  moduleSpecifier: string,
+  cwd: string,
+  cliModuleDir: string = dirname(fileURLToPath(import.meta.url)),
+): string | null {
+  if (moduleSpecifier.startsWith('./') || moduleSpecifier.startsWith('../')) {
+    return resolve(cwd, moduleSpecifier);
+  }
+  // A bare specifier's package name: `@scope/pkg/sub` → `@scope/pkg`,
+  // `pkg/sub` → `pkg`; a dangling `@scope` names no package.
+  const segments = moduleSpecifier.split('/');
+  const packageName = segments[0]!.startsWith('@')
+    ? segments.length >= 2
+      ? `${segments[0]}/${segments[1]}`
+      : null
+    : segments[0]!;
+  if (packageName === null || packageName.length === 0) return null;
+  const cliRoot = cliPackageRootOrNull(cliModuleDir);
+  if (cliRoot === null) return null;
+  const candidates: string[] = [];
+  if (packageName.startsWith('@gate-forge/')) {
+    candidates.push(join(dirname(cliRoot), packageName.slice('@gate-forge/'.length)));
+  }
+  for (let dir = cliRoot; ; dir = dirname(dir)) {
+    candidates.push(join(dir, 'node_modules', packageName));
+    if (dir === dirname(dir)) break;
+  }
+  for (const candidate of candidates) {
+    try {
+      const real = realpathSync(candidate);
+      const manifest = JSON.parse(readFileSync(join(real, 'package.json'), 'utf8')) as {
+        name?: string;
+      };
+      if (manifest.name === packageName) return real;
+    } catch {
+      // probe next
+    }
+  }
+  return null;
 }
 
 /** The package name that must provide a bundled detector. */
