@@ -32,7 +32,6 @@
  * Determinism: plugins run in config order, each contribution feeds
  * `buildResourceGraph` verbatim, and the graph owns all sorting.
  */
-import { pathToFileURL } from 'node:url';
 import {
   DetectorOutputSchema,
   type ConfigPlugin,
@@ -41,7 +40,7 @@ import {
 } from '@gate-forge/core';
 import { PluginSession, type DiscoverContext, type DiscoverSections } from '@gate-forge/plugin-protocol';
 import { UsageError } from './errors.js';
-import { resolveInProcessModulePath } from './detector-trust.js';
+import { resolveExecutedModule } from './detector-trust.js';
 import {
   digestPathListInputs,
   lookupPluginCache,
@@ -258,21 +257,16 @@ async function runInProcessPlugin(
   if (moduleSpecifier === undefined) {
     throw new UsageError(`in-process plugin '${plugin.id}' has no module (config error)`);
   }
-  // Resolve ONCE through the shared resolver; the run-cache key digests
-  // the SAME resolution (moduleBytesDigestOf → resolveInProcessModulePath),
-  // so the keyed bytes are the bytes that execute (plan 20261016_0330).
-  // Relative specifiers import the resolved file; a package specifier is
-  // still imported by name — Node picks the exports entry INSIDE the
-  // package directory the resolver vetted, so the digested tree covers
-  // every byte that loads. When the resolver cannot see the copy Node
-  // would load, the key is null (uncacheable, fail closed) and the import
-  // attempt below still decides the run, exactly as before.
-  const executedModule = resolveInProcessModulePath(moduleSpecifier, cwd);
-  const resolved =
-    executedModule !== null &&
-    (moduleSpecifier.startsWith('./') || moduleSpecifier.startsWith('../'))
-      ? pathToFileURL(executedModule).href
-      : moduleSpecifier;
+  // Resolve ONCE through the shared resolver and import EXACTLY the entry
+  // it returns; the run-cache key digests the SAME resolution's package
+  // dir (moduleBytesDigestOf → resolveExecutedModule), so the keyed bytes
+  // are the bytes that execute — there is no second lookup that could
+  // drift (plan 20261016_0330). When the resolver cannot resolve a bare
+  // specifier from the CLI installation, the key is null (uncacheable,
+  // fail closed) and importing the name below still decides the run with
+  // today's error, exactly as before.
+  const executedModule = resolveExecutedModule(moduleSpecifier, cwd);
+  const resolved = executedModule === null ? moduleSpecifier : executedModule.entryUrl;
   let api: InProcessPluginModule;
   try {
     const loaded = (await import(resolved)) as { default?: unknown; discover?: unknown };

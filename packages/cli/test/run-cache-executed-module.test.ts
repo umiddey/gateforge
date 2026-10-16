@@ -1,56 +1,75 @@
 /**
  * Run-cache key binds the EXECUTED plugin module's bytes (plan
  * 20261016_0330): for a package specifier the executing copy is the
- * CLI's own bundled/installed package, not the target repository's
- * `node_modules` copy — Node resolves the bare specifier from the
- * importing CLI, so an engine rebuilt at the same version (or a repo
- * with an older installed pack) used to get a stale cache HIT while the
- * executed bytes differed from the digested bytes.
+ * CLI's own installed package — resolved by Node's own resolution from
+ * the CLI module — not the target repository's `node_modules` copy. The
+ * loader imports EXACTLY the resolver's entry URL and the key digests
+ * the SAME resolution's package dir, so an engine rebuilt at the same
+ * version (or a repo with an older installed pack) can no longer serve
+ * a stale cache HIT.
  *
  * Fixture: a target repo whose `node_modules` holds pack copy A and a
- * synthetic CLI layout whose bundled package dir holds copy B. The cache
- * key must change when B changes and stay stable when nothing changes,
- * and fail closed to a null (uncacheable) key when the executed module
- * cannot be resolved or read.
+ * synthetic CLI installation whose `node_modules` holds copy B (the
+ * resolution is anchored at the fixture CLI, mirroring the production
+ * default with `createRequire`). The cache key must change when B
+ * changes and stay stable when nothing changes, and fail closed to a
+ * null (uncacheable) key when the executed module cannot be resolved or
+ * read. One further test pins the loader's URL to Node's own answer for
+ * a REAL package.
  */
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
+import { resolveExecutedModule } from '../src/detector-trust.js';
 import { pluginCacheIdentity, type PluginCacheIdentity } from '../src/run-cache.js';
 
-/** One fake installed pack: manifest + the bytes a detector edit would touch. */
+/** One fake installed pack: manifest (with a resolvable entry) + the bytes a detector edit would touch. */
 function writePack(packDir: string, discoverBody: string): void {
   mkdirSync(join(packDir, 'dist'), { recursive: true });
   writeFileSync(
     join(packDir, 'package.json'),
-    `${JSON.stringify({ name: '@gate-forge/pack-http', version: '1.0.0' })}\n`,
+    `${JSON.stringify({
+      name: '@gate-forge/pack-http',
+      version: '1.0.0',
+      exports: { '.': './dist/index.js' },
+    })}\n`,
   );
   writeFileSync(join(packDir, 'dist', 'index.js'), discoverBody);
 }
 
 /**
  * Builds the two-copy world: `repo/node_modules/@gate-forge/pack-http`
- * (copy A, what the OLD key digested) and `<base>/cli/packages/pack-http`
- * (copy B, the CLI's bundled package — what actually executes). The
- * anchor is the CLI's module directory the shared resolver walks up from.
+ * (copy A, what the OLD key digested) and
+ * `<base>/cli/packages/cli/node_modules/@gate-forge/pack-http` (copy B,
+ * the CLI's installed package — what actually executes).
  */
-function twoCopyFixture(): { repo: string; anchor: string; bundledPack: string } {
+function twoCopyFixture(): { repo: string; cliRoot: string; bundledPack: string } {
   const base = mkdtempSync(join(tmpdir(), 'gf-runcache-key-'));
   const repo = join(base, 'repo');
-  const cliPackageRoot = join(base, 'cli', 'packages', 'cli');
-  const anchor = join(cliPackageRoot, 'dist');
-  const repoPack = join(repo, 'node_modules', '@gate-forge', 'pack-http');
-  const bundledPack = join(base, 'cli', 'packages', 'pack-http');
-  mkdirSync(join(repo, 'node_modules', '@gate-forge'), { recursive: true });
-  mkdirSync(anchor, { recursive: true });
-  writeFileSync(
-    join(cliPackageRoot, 'package.json'),
-    `${JSON.stringify({ name: '@gate-forge/cli', version: '0.0.0-test' })}\n`,
-  );
-  writePack(repoPack, 'export const discover = () => ({ copy: "repo" });\n');
+  const cliRoot = join(base, 'cli', 'packages', 'cli');
+  const bundledPack = join(cliRoot, 'node_modules', '@gate-forge', 'pack-http');
+  // The resolution anchor must be a REAL module — Node's require.resolve
+  // stats the parent chain before walking node_modules.
+  mkdirSync(join(cliRoot, 'dist'), { recursive: true });
+  writeFileSync(join(cliRoot, 'dist', 'index.mjs'), 'export {};\n');
   writePack(bundledPack, 'export const discover = () => ({ copy: "bundled" });\n');
-  return { repo, anchor, bundledPack };
+  mkdirSync(join(repo, 'node_modules', '@gate-forge'), { recursive: true });
+  writePack(join(repo, 'node_modules', '@gate-forge', 'pack-http'), 'export const discover = () => ({ copy: "repo" });\n');
+  return { repo, cliRoot, bundledPack };
+}
+
+/**
+ * The production injectee anchored at a FIXTURE CLI: the same Node
+ * resolution (`createRequire(...).resolve`) walks the fixture layout, so
+ * the tests exercise the real algorithm, not a hand-rolled mapping.
+ */
+function fixtureResolveBare(cliRoot: string): (specifier: string) => string {
+  const anchorModule = join(cliRoot, 'dist', 'index.mjs');
+  return (specifier: string): string =>
+    pathToFileURL(createRequire(anchorModule).resolve(specifier)).href;
 }
 
 const PACK_HTTP_PLUGIN = {
@@ -60,14 +79,14 @@ const PACK_HTTP_PLUGIN = {
   module: '@gate-forge/pack-http',
 } as const;
 
-function identityFor(repo: string, anchor: string): PluginCacheIdentity | null {
+function identityFor(repo: string, cliRoot: string): PluginCacheIdentity | null {
   return pluginCacheIdentity(
     PACK_HTTP_PLUGIN,
     'inputs-digest',
     repo,
     process.env,
     '0.0.0-test',
-    anchor,
+    fixtureResolveBare(cliRoot),
   );
 }
 
@@ -81,33 +100,33 @@ afterEach(() => {
 
 describe('run-cache executed-module digest', () => {
   it('changes the key when the bundled (executed) pack copy changes while the repo copy stays', () => {
-    const { repo, anchor, bundledPack } = twoCopyFixture();
-    createdFixtures.push(join(bundledPack, '..', '..'));
-    const before = identityFor(repo, anchor);
+    const { repo, cliRoot, bundledPack } = twoCopyFixture();
+    createdFixtures.push(join(cliRoot, '..', '..'));
+    const before = identityFor(repo, cliRoot);
     expect(before).not.toBeNull();
     writeFileSync(
       join(bundledPack, 'dist', 'index.js'),
       'export const discover = () => ({ copy: "bundled-v2" });\n',
     );
-    const after = identityFor(repo, anchor);
+    const after = identityFor(repo, cliRoot);
     expect(after).not.toBeNull();
     expect(after?.moduleBytesDigest).not.toBe(before?.moduleBytesDigest);
     expect(after).not.toEqual(before);
   });
 
   it('keeps the key identical while both copies stay unchanged', () => {
-    const { repo, anchor, bundledPack } = twoCopyFixture();
-    createdFixtures.push(join(bundledPack, '..', '..'));
-    expect(identityFor(repo, anchor)).toEqual(identityFor(repo, anchor));
+    const { repo, cliRoot } = twoCopyFixture();
+    createdFixtures.push(join(cliRoot, '..', '..'));
+    expect(identityFor(repo, cliRoot)).toEqual(identityFor(repo, cliRoot));
   });
 
   it('fails closed to a null key when the executed module is unreadable', () => {
-    const { repo, anchor, bundledPack } = twoCopyFixture();
-    createdFixtures.push(join(bundledPack, '..', '..'));
+    const { repo, cliRoot, bundledPack } = twoCopyFixture();
+    createdFixtures.push(join(cliRoot, '..', '..'));
     const executedFile = join(bundledPack, 'dist', 'index.js');
     chmodSync(executedFile, 0o000);
     try {
-      expect(identityFor(repo, anchor)).toBeNull();
+      expect(identityFor(repo, cliRoot)).toBeNull();
     } finally {
       chmodSync(executedFile, 0o644);
     }
@@ -117,18 +136,37 @@ describe('run-cache executed-module digest', () => {
     const base = mkdtempSync(join(tmpdir(), 'gf-runcache-key-'));
     createdFixtures.push(base);
     const repo = join(base, 'repo');
-    const cliPackageRoot = join(base, 'cli', 'packages', 'cli');
-    const anchor = join(cliPackageRoot, 'dist');
+    const cliRoot = join(base, 'cli', 'packages', 'cli');
     mkdirSync(join(repo, 'node_modules', '@gate-forge', 'pack-http', 'dist'), { recursive: true });
-    mkdirSync(anchor, { recursive: true });
-    writeFileSync(
-      join(cliPackageRoot, 'package.json'),
-      `${JSON.stringify({ name: '@gate-forge/cli', version: '0.0.0-test' })}\n`,
-    );
-    // Only the REPO holds the pack; the CLI installation has none, so the
-    // executed module does not resolve and the key must be null — even
-    // though the old repo-copy lookup would happily digest copy A.
+    // The CLI module anchor is real; only the PACK is missing, so Node's
+    // own resolution from the CLI module throws MODULE_NOT_FOUND and the
+    // key must be null — even though the old repo-copy lookup would
+    // happily digest copy A.
+    mkdirSync(join(cliRoot, 'dist'), { recursive: true });
+    writeFileSync(join(cliRoot, 'dist', 'index.mjs'), 'export {};\n');
     writePack(join(repo, 'node_modules', '@gate-forge', 'pack-http'), 'export const discover = () => ({});\n');
-    expect(identityFor(repo, anchor)).toBeNull();
+    expect(identityFor(repo, cliRoot)).toBeNull();
+  });
+
+  it("imports the resolver's entry URL and loads the same module Node loads by name", async () => {
+    const base = mkdtempSync(join(tmpdir(), 'gf-runcache-key-'));
+    createdFixtures.push(base);
+    // Resolution anchors at the CLI installation, never the (empty) repo.
+    const resolved = resolveExecutedModule('@gate-forge/pack-http', base);
+    expect(resolved).not.toBeNull();
+    expect(resolved?.packageDir).not.toBeNull();
+    // Node's own answer, resolved independently from THIS test module:
+    const nodeEntryHref = pathToFileURL(
+      realpathSync(createRequire(import.meta.url).resolve('@gate-forge/pack-http')),
+    ).href;
+    expect(resolved?.entryUrl).toBe(nodeEntryHref);
+    // The loader imports the entry URL; that must be the SAME instance
+    // an import by name produces (realpath-canonical ESM identity).
+    // Dynamic import is the subject of this test — it intentionally
+    // exercises the module-loading boundary the plugin host uses, and a
+    // static import cannot express a runtime-computed specifier:
+    const viaEntry = (await import(resolved!.entryUrl)) as { default?: unknown };
+    const viaName = (await import('@gate-forge/pack-http')) as { default?: unknown };
+    expect(viaEntry.default).toBe(viaName.default);
   });
 });

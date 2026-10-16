@@ -23,6 +23,7 @@
  */
 import { spawnSync, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import {
   readdirSync,
   mkdirSync,
@@ -39,7 +40,7 @@ import {
   type DetectorOutput,
   type JsonValue,
 } from '@gate-forge/core';
-import { resolveInProcessModulePath } from './detector-trust.js';
+import { resolveExecutedModule } from './detector-trust.js';
 import { VERSION } from './commands/common.js';
 
 /** Cache entry format version; a mismatch is a miss (never a parse of foreign bytes). */
@@ -420,18 +421,19 @@ function digestTree(root: string): string | null {
  * Digests the bytes of the module that will EXECUTE (plan 20261016_0330),
  * via the same shared resolution the plugin host imports with: a
  * repo-relative module file's bytes, or (for package specifiers) the
- * whole tree of the CLI's own installed package — the copy Node actually
- * loads, NOT the repository's `node_modules` copy (an engine rebuilt at
- * the same version, or a repo holding an older installed pack, used to
- * get a stale cache hit because the digested copy differed from the
+ * whole tree of the package providing the entry Node resolves from the
+ * CLI's own installation — the copy the in-process host actually loads,
+ * NOT the repository's `node_modules` copy (an engine rebuilt at the
+ * same version, or a repo holding an older installed pack, used to get
+ * a stale cache hit because the digested copy differed from the
  * executing one). The detector's python sources live inside the package,
  * so a pack update still invalidates cached results.
  *
  * Args:
  *   moduleSpecifier: configured in-process module (`./x.mjs` or package).
  *   cwd: repo root for relative resolution.
- *   cliModuleDir: CLI anchor for package resolution; tests inject a
- *     fixture layout, production uses the running CLI's own.
+ *   resolveBareEntry: bare-specifier resolution seam; tests inject a
+ *     fixture layout, production uses Node's own resolution.
  *
  * Returns:
  *   string | null: hex digest, or null when unresolvable/unreadable.
@@ -439,14 +441,14 @@ function digestTree(root: string): string | null {
 function moduleBytesDigestOf(
   moduleSpecifier: string,
   cwd: string,
-  cliModuleDir?: string,
+  resolveBareEntry?: (specifier: string) => string,
 ): string | null {
-  const executedPath = resolveInProcessModulePath(moduleSpecifier, cwd, cliModuleDir);
-  if (executedPath === null) return null;
-  if (moduleSpecifier.startsWith('./') || moduleSpecifier.startsWith('../')) {
-    return fileDigest(executedPath, moduleSpecifier);
+  const executed = resolveExecutedModule(moduleSpecifier, cwd, resolveBareEntry);
+  if (executed === null) return null;
+  if (executed.packageDir === null) {
+    return fileDigest(fileURLToPath(executed.entryUrl), moduleSpecifier);
   }
-  return digestTree(executedPath);
+  return digestTree(executed.packageDir);
 }
 
 /**
@@ -552,6 +554,9 @@ function subprocessModuleBytesDigestOf(
  *   inputsDigest: precomputed digest of the expanded scan path bytes.
  *   cwd: repo root (module resolution).
  *   env: process environment for interpreter resolution.
+ *   resolveBareEntry: bare-specifier → entry URL seam for the executed
+ *     module resolution (tests inject a fixture layout; production uses
+ *     Node's own resolution from the CLI installation).
  *
  * Returns:
  *   PluginCacheIdentity | null: identity, or null when uncacheable.
@@ -568,7 +573,7 @@ export function pluginCacheIdentity(
   cwd: string,
   env: NodeJS.ProcessEnv,
   engineVersion = VERSION,
-  cliModuleDir?: string,
+  resolveBareEntry?: (specifier: string) => string,
 ): PluginCacheIdentity | null {
   let interpreter: PluginCacheIdentity['interpreter'];
   if (plugin.transport === 'subprocess') {
@@ -588,7 +593,7 @@ export function pluginCacheIdentity(
   if (interpreter === null) return null;
   const moduleBytesDigest =
     plugin.transport === 'in-process' && plugin.module !== undefined
-      ? moduleBytesDigestOf(plugin.module, cwd, cliModuleDir)
+      ? moduleBytesDigestOf(plugin.module, cwd, resolveBareEntry)
       : plugin.transport === 'subprocess'
         ? subprocessModuleBytesDigestOf(plugin.command ?? [], cwd, env)
         : null;

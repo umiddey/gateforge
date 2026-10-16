@@ -5,15 +5,16 @@
 - **Fixed: run-cache key digested a different detector module than the one
   that executes:** the plugin cache key resolved a bare package specifier
   (e.g. `@gate-forge/pack-http`) against the target repository's
-  `node_modules`, while the in-process loader imports the specifier from
+  `node_modules`, while the in-process loader imported the specifier from
   the CLI's own installation. When the two copies differed (an engine
   rebuilt at the same version, or a repository with an older installed
   pack), a changed engine could serve a stale cached scan. One shared
-  resolver (`resolveInProcessModulePath`) now decides the executed module
-  for both the loader and the cache key: the key digests the bytes of the
-  copy Node actually loads — the CLI's bundled package for package
-  specifiers — and an unresolvable or unreadable executed module leaves
-  the plugin uncacheable (fail closed), as before.
+  resolver (`resolveExecutedModule`) now decides the executed module for
+  both consumers with Node's own resolution from the CLI installation:
+  the loader imports exactly the resolver's entry URL, and the key
+  digests the same resolution's package tree — an unresolvable or
+  unreadable executed module leaves the plugin uncacheable (fail
+  closed), as before.
 
 ## 0.15.0
 

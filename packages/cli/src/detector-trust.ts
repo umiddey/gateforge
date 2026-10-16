@@ -20,7 +20,8 @@
  * package is a supply-chain escalation outside the A1/A2 model — but a
  * repository-local module can no longer impersonate a bundled detector.
  */
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { createRequire } from 'node:module';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { readFileSync, realpathSync } from 'node:fs';
 import type { GateforgeConfig } from '@gate-forge/core';
@@ -111,47 +112,61 @@ function cliPackageRootOrNull(startDir: string): string | null {
   return null;
 }
 
-/** The package name a bare specifier loads from (subpaths stripped). */
-function packageNameOf(moduleSpecifier: string): string | null {
-  const segments = moduleSpecifier.split('/');
-  const packageName = segments[0]!.startsWith('@')
-    ? segments.length >= 2
-      ? `${segments[0]}/${segments[1]}`
-      : null
-    : segments[0]!;
-  return packageName !== null && packageName.length > 0 ? packageName : null;
+/**
+ * Resolves a bare specifier with Node's OWN resolution from this module's
+ * CLI installation, to the entry file URL the loader must import. Bound
+ * here (not `import.meta.resolve`) because that syntax is unavailable in
+ * test runners (probe: `typeof import.meta.resolve` === undefined under
+ * vitest) — `createRequire(<this module>).resolve` runs the same Node
+ * resolution algorithm (node_modules walk + `exports`, `default`
+ * condition) and works in every runner. The indirection is also the
+ * tests' seam: fixtures inject a resolver anchored at their own layout.
+ */
+const resolveBareEntryFromCliInstall = (specifier: string): string =>
+  pathToFileURL(createRequire(import.meta.url).resolve(specifier)).href;
+
+/** Where an in-process plugin's module lives and what the loader must import. */
+export interface ExecutedModuleResolution {
+  /** Canonical file URL of the entry file — EXACTLY what the loader imports. */
+  entryUrl: string;
+  /**
+   * Real directory of the package providing the entry (bare specifiers),
+   * the tree the run-cache key digests; null for repo-relative modules
+   * (the key digests the entry file itself).
+   */
+  packageDir: string | null;
 }
 
 /**
- * Resolves the module an in-process plugin will EXECUTE — the same copy
- * the plugin host's dynamic import loads — so the run-cache key digests
- * exactly those bytes (plan 20261016_0330). Repo-relative specifiers
- * resolve against the repository root. Anything else is a package
- * specifier, and Node loads it from the CLI's own installation, so the
- * candidate walk anchors at the CLI package root: the monorepo workspace
- * sibling first (`packages/<short>`, which npm links into `node_modules`),
- * then every ancestor `node_modules`. A candidate counts only when its
- * manifest name matches, and the realpath is returned so symlinked
- * workspace installs name the same real bytes ESM canonicalization loads.
+ * Resolves the module an in-process plugin will EXECUTE so the run-cache
+ * key digests exactly those bytes (plan 20261016_0330). Repo-relative
+ * specifiers resolve against the repository root. Anything else is a
+ * package specifier: Node's own resolution (via
+ * {@link resolveBareEntryFromCliInstall}) picks the entry from the CLI's
+ * own installation, the entry is canonicalized with realpath (what ESM
+ * loading does anyway, so importing this URL IS importing by name), and
+ * the walk up to the `package.json` whose name matches the specifier
+ * yields the executed package directory. There is ONE resolution: the
+ * loader imports `entryUrl`, the key digests `packageDir` (or the entry
+ * file for relative modules) — no second lookup to drift.
  *
  * Args:
  *   moduleSpecifier: configured in-process module (`./x.mjs` or package).
  *   cwd: repository root for relative resolution.
- *   cliModuleDir: CLI module directory anchoring the package walk;
- *     defaults to this module's own directory.
+ *   resolveBareEntry: bare-specifier → entry file URL; defaults to the
+ *     CLI installation's own Node resolution (test seam for fixtures).
  *
  * Returns:
- *   string | null: absolute path of the executed module file (relative
- *   specifiers) or package directory (package specifiers), or null when
- *   the executed package cannot be located.
+ *   ExecutedModuleResolution | null: null when the specifier names no
+ *   package, Node cannot resolve it, or the entry file is unreadable.
  */
-export function resolveInProcessModulePath(
+export function resolveExecutedModule(
   moduleSpecifier: string,
   cwd: string,
-  cliModuleDir: string = dirname(fileURLToPath(import.meta.url)),
-): string | null {
+  resolveBareEntry: (specifier: string) => string = resolveBareEntryFromCliInstall,
+): ExecutedModuleResolution | null {
   if (moduleSpecifier.startsWith('./') || moduleSpecifier.startsWith('../')) {
-    return resolve(cwd, moduleSpecifier);
+    return { entryUrl: pathToFileURL(resolve(cwd, moduleSpecifier)).href, packageDir: null };
   }
   // A bare specifier's package name: `@scope/pkg/sub` → `@scope/pkg`,
   // `pkg/sub` → `pkg`; a dangling `@scope` names no package.
@@ -162,27 +177,34 @@ export function resolveInProcessModulePath(
       : null
     : segments[0]!;
   if (packageName === null || packageName.length === 0) return null;
-  const cliRoot = cliPackageRootOrNull(cliModuleDir);
-  if (cliRoot === null) return null;
-  const candidates: string[] = [];
-  if (packageName.startsWith('@gate-forge/')) {
-    candidates.push(join(dirname(cliRoot), packageName.slice('@gate-forge/'.length)));
+  let entryPath: string;
+  try {
+    entryPath = fileURLToPath(resolveBareEntry(moduleSpecifier));
+  } catch {
+    return null; // unresolvable from the CLI installation → uncacheable
   }
-  for (let dir = cliRoot; ; dir = dirname(dir)) {
-    candidates.push(join(dir, 'node_modules', packageName));
-    if (dir === dirname(dir)) break;
+  let realEntry: string;
+  try {
+    realEntry = realpathSync(entryPath);
+  } catch {
+    return null;
   }
-  for (const candidate of candidates) {
+  let dir = dirname(realEntry);
+  for (let depth = 0; depth < 32 && dir !== dirname(dir); depth++) {
     try {
-      const real = realpathSync(candidate);
-      const manifest = JSON.parse(readFileSync(join(real, 'package.json'), 'utf8')) as {
+      const parsed = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as {
         name?: string;
       };
-      if (manifest.name === packageName) return real;
+      if (parsed.name === packageName) {
+        return { entryUrl: pathToFileURL(realEntry).href, packageDir: dir };
+      }
     } catch {
-      // probe next
+      // keep walking
     }
+    dir = dirname(dir);
   }
+  // The entry lives outside every package.json matching the specifier —
+  // refuse to key bytes we cannot attribute (fail closed).
   return null;
 }
 
