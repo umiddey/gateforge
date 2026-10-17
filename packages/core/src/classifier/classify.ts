@@ -487,7 +487,8 @@ function exposureCoverageHolds(policy: ClassifierPolicy, scan: ClassifierScanInp
     // so every requested path stays in scope (fail closed).
     eligible = requested;
   } else {
-    eligible = requested.filter((path) => scan.eligiblePaths?.includes(path) === true);
+    const eligibleSet = new Set(scan.eligiblePaths);
+    eligible = requested.filter((path) => eligibleSet.has(path));
   }
   if (eligible.length === 0) return false;
   for (const path of eligible) {
