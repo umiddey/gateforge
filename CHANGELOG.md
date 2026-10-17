@@ -23,21 +23,28 @@
   (`` `${BACKEND_URL}/api/v1/x/${token}` `` becomes `/api/v1/x/${}`).
   A hole the scan cannot trace to a config read, and a host with no
   static path after it, keep the call unresolved.
-- **Fixed: the exhaustive exposure-coverage check now scopes to the paths
-  the decision rests on, not every requested path.** The internality
-  certificate's exposure-negative proof demanded that EVERY file in
-  `scan.requestedPaths` be covered by an exhaustive `exposure.*` coverage
-  rule and reported by that rule's detector. With broad scan roots
-  (`**/*`) the requested set includes README, package manifests, and docs
-  that no code detector parses, so the certificate was unreachable for
-  any repository with wide scanRoots whatever rules were configured —
-  every internal-intent resource stayed conservatively user-facing
-  (`INCOMPLETE_PROOF_SCOPE`). The check now runs per resource over its
-  own source path (the same decision-relevant scoping the per-resource
-  lifecycle proof uses). Fail-closed is unchanged: a proof path that was
-  never requested, that no exhaustive rule claims, or that the granting
-  rule's detector did not report scanning still blocks, and repositories
-  without an exhaustive exposure rule keep the conservative default.
+- **Fixed: the exhaustive exposure-coverage check now scopes to the
+  requested paths a code detector could parse, not every requested
+  path.** The internality certificate's exposure-negative proof demanded
+  that EVERY file in `scan.requestedPaths` be covered by an exhaustive
+  `exposure.*` coverage rule and reported by that rule's detector. With
+  broad scan roots (`**/*`) the requested set includes README, package
+  manifests, and docs that no code detector parses, so the certificate
+  was unreachable for any repository with wide scanRoots whatever rules
+  were configured — every internal-intent resource stayed conservatively
+  user-facing (`INCOMPLETE_PROOF_SCOPE`). The check stays run-wide — a
+  table is exposed, if at all, from other files (route handlers, API
+  modules), so scoping the negative proof to a resource's own source
+  would certify `internal` while those files went unchecked — and it now
+  derives its scope generically as the requested paths inside the
+  pipeline-reported detector input set (the `project.paths.include`
+  discovery scope, carried as `scan.eligiblePaths`), excluding only
+  non-code files no detector consumes. Fail-closed is unchanged: a host
+  that does not report its detector input set keeps every requested path
+  in scope, an eligible path that no exhaustive rule claims, or that the
+  granting rule's detector did not report scanning, still blocks, and
+  repositories without an exhaustive exposure rule keep the conservative
+  default.
 
 ## 0.15.1
 
