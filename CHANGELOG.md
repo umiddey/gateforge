@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+- **Fixed: client scan resolves wrapper verbs forwarded through an
+  options spread.** A declared wrapper whose request-options parameter
+  is spread into the fetch options it issues —
+  `fetch(url, { ...options, headers })` — now takes each call site's
+  verb from the argument bound to that parameter: an explicit `method`
+  wins, a spread provably free of `method` never overwrites an earlier
+  explicit verb, and a call site whose options cannot be proven stays
+  unresolved (never an invented GET). Wrapper call sites now bind every
+  identifier parameter positionally (previously only the endpoint
+  parameter was bound). A declared fixed-method wrapper resolves when
+  its spread body proves the declared verb, stays unresolved when the
+  body proves a different verb, and keeps its declared verb when the
+  body proves nothing.
+- **Fixed: client scan resolves runtime base-URL hosts in template
+  URLs.** A template URL whose leading hole is a module constant the
+  scan can trace to a runtime config read — `import.meta.env` /
+  `process.env` directly, or through a scanned `getEnv(key)`-style
+  helper — resolves to the static path that follows
+  (`` `${BACKEND_URL}/api/v1/x/${token}` `` becomes `/api/v1/x/${}`).
+  A hole the scan cannot trace to a config read, and a host with no
+  static path after it, keep the call unresolved.
+
 ## 0.15.1
 
 - **Fixed: client scan flags JSX-omitted props with destructuring

@@ -894,6 +894,9 @@ const MAX_CALL_TARGETS = 32;
 /** Calls of a declared wrapper into another declared wrapper, before fail closed. */
 const MAX_WRAPPER_DEPTH = 4;
 
+/** Identifier hops followed when recognising a runtime base-URL host, before fail closed. */
+const MAX_BASE_HOPS = 4;
+
 type ExprBinding = ReadonlyMap<string, readonly [ts.Expression, string]>;
 
 /** A statically proven scalar: exactly the literal values a destructuring default may take. */
@@ -935,6 +938,32 @@ function languageKindFor(file: string): ts.ScriptKind {
 
 function parseSource(sourceText: string, file: string): ts.SourceFile {
   return ts.createSourceFile(file, sourceText, ts.ScriptTarget.Latest, true, languageKindFor(file));
+}
+
+/**
+ * True when the subtree reads runtime configuration: an `import.meta.env`
+ * or `process.env` access at any depth (optional chains and computed
+ * members included). Such a value is a host/port the scan can never
+ * prove, which is what the template base-hole model keys on.
+ */
+function referencesRuntimeEnv(root: ts.Node): boolean {
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    if (
+      ts.isPropertyAccessExpression(node) &&
+      node.name.text === 'env' &&
+      // `import.meta` parses as a MetaProperty, not a property chain.
+      ((ts.isMetaProperty(node.expression) && node.expression.name.text === 'meta') ||
+        (ts.isIdentifier(node.expression) && node.expression.text === 'process'))
+    ) {
+      found = true;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(root);
+  return found;
 }
 
 /** Collects module-scope constants and configured wrapper declarations. */
@@ -1233,6 +1262,17 @@ function extractCall(
         const bindings = new Map<string, readonly [ts.Expression, string]>();
         const declared = table.findFunction(wrapperConfig.name, file);
         const paramName = wrapperConfig.parameter ?? (declared === undefined ? undefined : firstIdentifierParam(declared.fn));
+        // Every remaining identifier parameter binds positionally, so the
+        // request-options model can prove a verb the body forwards
+        // (`fetch(url, { ...options })`); an absent argument binds nothing.
+        if (declared !== undefined) {
+          declared.fn.parameters.forEach((parameter, index) => {
+            if (index === 0 && paramName !== undefined) return;
+            if (!ts.isIdentifier(parameter.name)) return;
+            const positional = call.arguments[index];
+            if (positional !== undefined) bindings.set(parameter.name.text, [positional, file]);
+          });
+        }
         const takesObjectPattern = declared !== undefined
           && declared.fn.parameters[0] !== undefined
           && ts.isObjectBindingPattern(declared.fn.parameters[0].name);
@@ -1359,7 +1399,7 @@ interface Evaluator {
   optionsMethod(
     node: ts.Expression,
     file: string,
-    bindings?: ReadonlyMap<string, [ts.Expression, string]>,
+    bindings?: ExprBinding,
     depth?: number,
   ): OptionsMethod;
 }
@@ -1417,7 +1457,7 @@ class BoundTable implements Evaluator {
   optionsMethod(
     node: ts.Expression,
     file: string,
-    bindings?: ReadonlyMap<string, [ts.Expression, string]>,
+    bindings?: ExprBinding,
     depth = 0,
   ): OptionsMethod {
     if (
@@ -1457,33 +1497,53 @@ function extractClientCall(
   let method: HttpMethod | null = defaultMethod === 'GET' ? 'GET' : defaultMethod;
   const optionsNode = call.arguments[1];
   if (optionsNode !== undefined && ts.isObjectLiteralExpression(optionsNode)) {
-    for (const property of optionsNode.properties) {
-      const isMethod =
-        (ts.isPropertyAssignment(property) && ts.isIdentifier(property.name) && property.name.text === 'method') ||
-        (ts.isShorthandPropertyAssignment(property) && property.name.text === 'method');
-      if (isMethod) {
-        const initializer = ts.isPropertyAssignment(property)
-          ? property.initializer
-          : property.name;
-        const resolved = table.evaluate(initializer, file);
-        if (resolved.kind === 'literal') {
-          const normalized = normalizeHttpMethodValue(resolved.text);
-          if (normalized === null) {
+    if (optionsNode.properties.some(ts.isSpreadAssignment)) {
+      // `{...base, method: ...}`: the verb participates in JavaScript's
+      // last-writer-wins order across the spread, so a wrapper's options
+      // parameter spread into the literal carries the CALL SITE's verb.
+      // The bounded options model answers for the whole literal — a verb
+      // it cannot prove stays unresolved and is never assumed to be GET.
+      const resolved = table.optionsMethod(optionsNode, file);
+      if (resolved.kind === 'unproven') {
+        unresolved.push({
+          code: HTTP_METHOD_DYNAMIC,
+          detail:
+            'call request options spread another options object whose method ' +
+            'cannot be proven statically; the verb is never assumed to be GET',
+          location,
+        });
+        return;
+      }
+      if (resolved.kind === 'proven') method = resolved.method;
+    } else {
+      for (const property of optionsNode.properties) {
+        const isMethod =
+          (ts.isPropertyAssignment(property) && ts.isIdentifier(property.name) && property.name.text === 'method') ||
+          (ts.isShorthandPropertyAssignment(property) && property.name.text === 'method');
+        if (isMethod) {
+          const initializer = ts.isPropertyAssignment(property)
+            ? property.initializer
+            : property.name;
+          const resolved = table.evaluate(initializer, file);
+          if (resolved.kind === 'literal') {
+            const normalized = normalizeHttpMethodValue(resolved.text);
+            if (normalized === null) {
+              unresolved.push({
+                code: HTTP_METHOD_DYNAMIC,
+                detail: `fetch call method '${resolved.text}' is not a concrete supported verb`,
+                location,
+              });
+              return;
+            }
+            method = normalized;
+          } else {
             unresolved.push({
               code: HTTP_METHOD_DYNAMIC,
-              detail: `fetch call method '${resolved.text}' is not a concrete supported verb`,
+              detail: 'fetch call method is computed and cannot be proven statically',
               location,
             });
             return;
           }
-          method = normalized;
-        } else {
-          unresolved.push({
-            code: HTTP_METHOD_DYNAMIC,
-            detail: 'fetch call method is computed and cannot be proven statically',
-            location,
-          });
-          return;
         }
       }
     }
@@ -2194,7 +2254,7 @@ class ValueTable {
   optionsMethod(
     node: ts.Expression,
     file: string,
-    bindings: ReadonlyMap<string, [ts.Expression, string]> = new Map(),
+    bindings: ExprBinding = new Map(),
     depth = 0,
   ): OptionsMethod {
     if (depth > MAX_OPTIONS_HOPS) return UNPROVEN_OPTIONS;
@@ -2219,13 +2279,18 @@ class ValueTable {
   private optionsMethodOfObject(
     object: ts.ObjectLiteralExpression,
     file: string,
-    bindings: ReadonlyMap<string, [ts.Expression, string]>,
+    bindings: ExprBinding,
     depth: number,
   ): OptionsMethod {
     let result: OptionsMethod = ABSENT_OPTIONS;
     for (const property of object.properties) {
       if (ts.isSpreadAssignment(property)) {
-        result = this.optionsMethod(property.expression, file, bindings, depth + 1);
+        const spread = this.optionsMethod(property.expression, file, bindings, depth + 1);
+        if (spread.kind === 'unproven') return UNPROVEN_OPTIONS;
+        // JavaScript overwrite order: a spread that provably carries a
+        // method wins; a spread provably free of `method` adds nothing,
+        // so an earlier explicit method survives it.
+        if (spread.kind === 'proven') result = spread;
       } else if (
         (ts.isPropertyAssignment(property) || ts.isShorthandPropertyAssignment(property)) &&
         ts.isIdentifier(property.name) &&
@@ -2245,7 +2310,7 @@ class ValueTable {
   private verbOfLiteral(
     node: ts.Expression,
     file: string,
-    bindings: ReadonlyMap<string, [ts.Expression, string]>,
+    bindings: ExprBinding,
   ): OptionsMethod {
     const bound = ts.isIdentifier(node) ? bindings.get(node.text) : undefined;
     const resolved =
@@ -2259,7 +2324,7 @@ class ValueTable {
   private optionsMethodThroughCall(
     call: ts.CallExpression,
     file: string,
-    bindings: ReadonlyMap<string, [ts.Expression, string]>,
+    bindings: ExprBinding,
     depth: number,
   ): OptionsMethod {
     const name = ts.isIdentifier(call.expression) ? call.expression.text : '';
@@ -2583,10 +2648,23 @@ class ValueTable {
         const holeFile = bound?.[1] ?? file;
         const hole = bound === undefined ? this.evaluate(span.expression, file) : this.evaluate(holeExpr, holeFile);
         if (hole.kind === 'unresolved') {
-          if (pieces.some((piece) => !piece.rooted)) return undefined;
-          const suffix = this.trailingQuerySuffix(node, span, holeExpr, holeFile);
-          const slot = suffix ? '?' : '${}';
-          for (const piece of pieces) next.push({ text: piece.text + slot + span.literal.text, rooted: true });
+          if (
+            span.literal.text.startsWith('/') &&
+            pieces.every((piece) => !piece.rooted) &&
+            this.isRuntimeBaseHole(span.expression, file, bindings)
+          ) {
+            // The hole is a runtime base URL (env/config host): the
+            // request's addressable path starts at the static literal
+            // that follows it, so the host is dropped, not invented.
+            for (const piece of pieces) {
+              next.push({ text: piece.text + span.literal.text, rooted: true });
+            }
+          } else {
+            if (pieces.some((piece) => !piece.rooted)) return undefined;
+            const suffix = this.trailingQuerySuffix(node, span, holeExpr, holeFile);
+            const slot = suffix ? '?' : '${}';
+            for (const piece of pieces) next.push({ text: piece.text + slot + span.literal.text, rooted: true });
+          }
         } else {
           for (const piece of pieces) {
             next.push({
@@ -2600,6 +2678,37 @@ class ValueTable {
       pieces = next;
     }
     return pieces.map((piece) => piece.text);
+  }
+
+  /**
+   * True when the hole stands for a runtime base URL the model can SEE
+   * derives from configuration: an identifier bound to a module-scope
+   * constant whose initializer reads `import.meta.env` / `process.env`,
+   * directly or through a call to a function in the scanned set that
+   * does (a `getEnv(key)` helper). Such a host is dropped by the
+   * template model — never proven, never invented. Anything the model
+   * cannot trace to a config read is false: an unknown hole must keep
+   * the call unresolved.
+   */
+  private isRuntimeBaseHole(
+    expression: ts.Expression,
+    file: string,
+    bindings: ExprBinding | undefined,
+    depth = 0,
+  ): boolean {
+    if (depth > MAX_BASE_HOPS) return false;
+    const identifier = unwrapOwnExpression(expression);
+    if (!ts.isIdentifier(identifier)) return false;
+    const bound = bindings?.get(identifier.text);
+    if (bound !== undefined) return this.isRuntimeBaseHole(bound[0], bound[1], bindings, depth + 1);
+    const constant = this.resolveConstantInitializer(identifier.text, file, new Set());
+    if (constant === undefined) return false;
+    const [initializer, origin] = constant;
+    if (referencesRuntimeEnv(initializer)) return true;
+    const initCall = unwrapOwnExpression(initializer);
+    if (!ts.isCallExpression(initCall) || !ts.isIdentifier(initCall.expression)) return false;
+    const declared = this.functionOf(initCall.expression.text, origin);
+    return declared?.body !== undefined && referencesRuntimeEnv(declared.body);
   }
 
   /** Path-absolute hole alternatives only. Query-shaped holes stay on the suffix model. */
@@ -3107,10 +3216,20 @@ function wrapperBodyTargets(
       if (!failed) ts.forEachChild(node, visit);
       return;
     }
-    const client = clientCallOf(node, config, fnFile, table);
+    const client = clientCallOf(node, config, fnFile, table, bindings);
     if (client !== undefined) {
       saw = true;
-      if (entry.methodFromBody !== true && client.method !== entry.method) {
+      if (entry.methodFromBody === true) {
+        // The verb comes from the body: nothing provable means no call
+        // fact — never an invented default.
+        if (client.method === null) {
+          failed = true;
+          return;
+        }
+      } else if (client.method !== null && client.method !== entry.method) {
+        // The declaration governs, but a body that PROVES another verb
+        // contradicts it; an unproven body (options spread of unknown
+        // provenance) does not.
         failed = true;
         return;
       }
@@ -3119,7 +3238,10 @@ function wrapperBodyTargets(
         failed = true;
         return;
       }
-      const method = entry.methodFromBody === true ? client.method : entry.method;
+      // Surviving the checks above, a proven body verb equals the
+      // declaration (or governs via methodFromBody); only an unproven
+      // body under a declared method reaches here as null.
+      const method: HttpMethod = client.method ?? entry.method;
       for (const raw of targets) found.push({ method, raw });
       return;
     }
@@ -4046,11 +4168,28 @@ function clientCallOf(
   config: ClientScanConfig,
   file: string,
   table: ValueTable,
-): { url: ts.Expression; method: HttpMethod } | undefined {
+  bindings?: ExprBinding,
+): { url: ts.Expression; method: HttpMethod | null } | undefined {
   const expression = call.expression;
   if (ts.isIdentifier(expression) && expression.text === 'fetch' && !table.shadowsGlobalFetch(expression)) {
     const url = call.arguments[0];
-    return url === undefined ? undefined : { url, method: 'GET' };
+    if (url === undefined) return undefined;
+    const optionsNode = call.arguments[1];
+    if (optionsNode === undefined) return { url, method: 'GET' };
+    if (
+      ts.isObjectLiteralExpression(optionsNode) &&
+      !optionsNode.properties.some(ts.isSpreadAssignment)
+    ) {
+      // A plain literal: the direct-call scan decides its verb — the
+      // wrapper-body model keeps today's GET default here.
+      return { url, method: 'GET' };
+    }
+    // A spread-carrying literal or options built elsewhere: the verb is
+    // whatever the CALL SITE's argument proves through the bounded
+    // options model — `null` when nothing is proven (never a GET).
+    const resolved = table.optionsMethod(optionsNode, file, bindings);
+    if (resolved.kind === 'unproven') return { url, method: null };
+    return { url, method: resolved.kind === 'proven' ? resolved.method : 'GET' };
   }
   if (!ts.isPropertyAccessExpression(expression) || !ts.isIdentifier(expression.expression)) return undefined;
   const objectName = table.configuredClientName(expression.expression, file);
