@@ -528,6 +528,11 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
         cwd,
         gitIgnored,
       ),
+      // The detector input set (the discovery scope `paths` above):
+      // requested paths outside it are non-code files no code detector
+      // could parse (README, docs, package manifests), so the
+      // exposure-coverage proof must not demand their coverage.
+      eligiblePaths: paths,
       scannedPaths,
       coverage,
       configuredDetectors: config.plugins.length,

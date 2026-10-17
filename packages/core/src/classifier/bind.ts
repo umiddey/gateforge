@@ -47,6 +47,12 @@ export interface RunClassificationInput {
   deriveLifecycleDefaults?: boolean;
   scan?: {
     requestedPaths: string[];
+    /**
+     * The discovery scope handed to the detectors (`project.paths.include`
+     * minus excludes): requested paths outside it are non-code files no
+     * detector could parse. Omitted = unknown, fail closed.
+     */
+    eligiblePaths?: string[];
     scannedPaths: string[];
     /** Per-detector coverage reports (judged against policy.coverage). */
     coverage?: Array<{ detector: string; scannedPaths: string[] }>;
@@ -171,6 +177,7 @@ export function runClassification(input: RunClassificationInput): GraphClassific
     deriveLifecycleDefaults: input.deriveLifecycleDefaults,
     scan: {
       requestedPaths: input.scan?.requestedPaths ?? [],
+      eligiblePaths: input.scan?.eligiblePaths,
       scannedPaths: input.scan?.scannedPaths ?? [],
       coverage: input.scan?.coverage,
       configuredDetectors: input.scan?.configuredDetectors ?? 1,
