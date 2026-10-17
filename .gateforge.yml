@@ -46,6 +46,8 @@ project:
       # product surface on a repository with no discovered app endpoints.
       - 'packages/**'
       - 'CHANGELOG.md'
+      # Maintainer rules for agents working on this repo (owner 2026-10-17).
+      - 'AGENTS.md'
 # Detector plugins. This repository IS the gate: its product code is the
 # CLI itself and declares no HTTP endpoints, models or pages of its own.
 # The scan's fastapi/sqlalchemy/express signals come from this repo's own

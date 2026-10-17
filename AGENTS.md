@@ -22,3 +22,5 @@ what it claims to be:
    without saying what kind of tests produced them.
 3. Any change to what Gateforge accepts as proof: ask the maintainer first.
 4. Simplest fix first. Never add mechanisms nobody asked for.
+5. Every change to Gateforge itself (bug fix or feature) is pushed and published automatically once it passes validation: `gateforge` updated to the new version on Contractor Portal and Property Management with a few witnessed tests green on each, plus a completely new `init` and a few tests on a NEW fresh clone of Langflow (https://github.com/langflow-ai/langflow, cloned under /home/ukd/Work/lf-<version>/; never reuse an existing clone such as /home/ukd/Work/lf-015 or /home/ukd/Work/gf15-gate/langflow). Validation fails = no push, no publish.
+6. A Gateforge bug counts only if it is a genuine, generic Gateforge issue that would hit every project, not one consumer. Never bend Gateforge to one project's needs (e.g. Property Management's archive business rule looked like a Gateforge limit but was PM's own rule). A genuine one: write it down in a plan, then fix it.
