@@ -296,10 +296,11 @@ export const CoverageRuleSchema = z
     /**
      * The capability this rule grants over its files, e.g.
      * `exposure.http`. Negative proofs are capability-scoped: a
-     * closed-world EXPOSURE proof requires every requested file to be
-     * covered by an `exposure.*` rule. A rule without an exposure
-     * capability (model discovery, task linkage, …) can never serve an
-     * exposure negative proof, whatever it scanned.
+     * closed-world EXPOSURE proof requires every decision-relevant file
+     * (the resource's own source paths) to be covered by an `exposure.*`
+     * rule. A rule without an exposure capability (model discovery,
+     * task linkage, …) can never serve an exposure negative proof,
+     * whatever it scanned.
      */
     capability: z.string().min(1),
     /** Plugin id of the detector whose coverage is required. */

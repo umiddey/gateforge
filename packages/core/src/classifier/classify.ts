@@ -445,23 +445,36 @@ function completeScanHolds(
 }
 
 /**
- * Whether EXPOSURE-negative coverage holds (red-team round 6): every
- * requested file must be covered by an EXHAUSTIVE `exposure.*` capability
- * rule whose detector reported the file. Reading a file with a
- * non-exhaustive (regex) detector proves nothing about the ABSENCE of
- * exposure — so without an explicitly declared exhaustive exposure
- * authority, the internality certificate is unavailable for the scope.
+ * Whether EXPOSURE-negative coverage holds (red-team round 6) for the
+ * paths the decision rests on: every relevant file must be covered by an
+ * EXHAUSTIVE `exposure.*` capability rule whose detector reported the
+ * file. Reading a file with a non-exhaustive (regex) detector proves
+ * nothing about the ABSENCE of exposure — so without an explicitly
+ * declared exhaustive exposure authority, the internality certificate is
+ * unavailable for the scope. The scope is the resource's own source
+ * paths (the same decision-relevant scoping the per-resource lifecycle
+ * proof uses), never every requested path: with broad scan roots the
+ * requested set includes README/docs/package files no code detector
+ * parses, and demanding their coverage made the certificate unreachable
+ * for any repo with wide scanRoots. Fail-closed is untouched: a relevant
+ * path that was never requested, that no exhaustive rule claims, or that
+ * the granting rule's detector did not report scanning is still a hole.
  */
 function exposureCoverageHolds(
   policy: ClassifierPolicy,
   scan: ClassifierScanInput,
+  relevantPaths: readonly string[],
 ): boolean {
   const rules = (policy.coverage ?? []).filter(
     (rule) => rule.capability.startsWith('exposure.') && rule.exhaustive === true,
   );
   if (rules.length === 0) return false;
-  const requested = scan.requestedPaths ?? [];
-  for (const path of requested) {
+  if (relevantPaths.length === 0) return false;
+  if (scan.requestedPaths !== undefined) {
+    const requestedSet = new Set(scan.requestedPaths);
+    if (relevantPaths.some((path) => !requestedSet.has(path))) return false;
+  }
+  for (const path of relevantPaths) {
     const granting = rules.filter((rule) => rule.appliesTo.some((pattern) => globMatch(path, pattern)));
     if (granting.length === 0) return false;
     const covered = granting.some((rule) =>
@@ -846,7 +859,6 @@ export function classifyResources(input: ClassifyResourcesInput): Classification
     route(signal, 'authority', matched.length > 0, matched);
   }
 
-  const exposureComplete = exposureCoverageHolds(input.policy, input.scan);
   const trustedCategories = new Set(
     input.policy.trustedInternalEntryPoints.map((entry) => entry.category),
   );
@@ -855,7 +867,6 @@ export function classifyResources(input: ClassifyResourcesInput): Classification
     scan: input.scan,
     adapters: input.adapters,
     scanComplete,
-    exposureComplete,
     trustedCategories,
     trustedEntries,
   };
@@ -1020,8 +1031,6 @@ interface ClassifyContext {
   scan: ClassifierScanInput;
   adapters: readonly string[];
   scanComplete: boolean;
-  /** Exhaustive exposure-capability coverage holds (round 6). */
-  exposureComplete: boolean;
   trustedCategories: ReadonlySet<string>;
   trustedEntries: ClassifierPolicy['trustedInternalEntryPoints'];
 }
@@ -1280,7 +1289,7 @@ function classifyOne(
           'decision: user-facing (conservative) until the scan scope is complete',
         locations: [resource.location],
       });
-    } else if (!ctx.exposureComplete) {
+    } else if (!exposureCoverageHolds(ctx.policy, ctx.scan, [resource.source])) {
       exposure = 'user-facing';
       rules.push(RULES.exposureDefault);
       defaultsApplied.push(RULES.exposureDefault);
@@ -1290,8 +1299,8 @@ function classifyOne(
         name: resource.name,
         detail:
           'internal intent cannot be certified: no EXHAUSTIVE exposure.* coverage rule covers ' +
-          'every requested file with a detector-reported scan; reading a file with a ' +
-          'non-exhaustive (e.g. regex) detector proves nothing about the absence of exposure, ' +
+          `this resource's source '${resource.source}' with a detector-reported scan; reading a ` +
+          'file with a non-exhaustive (e.g. regex) detector proves nothing about the absence of exposure, ' +
           'so internality stays unavailable for this scope until an exhaustive exposure ' +
           'parser is declared and covers it; decision: user-facing (conservative)',
         locations: [resource.location],
