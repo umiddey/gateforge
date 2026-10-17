@@ -67,6 +67,16 @@ export interface DetectorCoverage {
 /** Scan knowledge used to validate closed-world proofs. */
 export interface ClassifierScanInput {
   requestedPaths?: string[];
+  /**
+   * The discovery scope the pipeline handed the detectors
+   * (`project.paths.include` minus excludes): every path a code detector
+   * COULD parse. Requested paths outside it are non-code files no
+   * detector consumes (README, docs, package manifests, images).
+   * Optional: a host that cannot report its input set fails closed —
+   * the exposure-coverage proof then keeps every requested path in
+   * scope.
+   */
+  eligiblePaths?: string[];
   /** Paths successfully covered by the detector run (union floor). */
   scannedPaths?: string[];
   /** Per-detector coverage reports; policy coverage rules are judged
@@ -446,35 +456,41 @@ function completeScanHolds(
 
 /**
  * Whether EXPOSURE-negative coverage holds (red-team round 6) for the
- * paths the decision rests on: every relevant file must be covered by an
- * EXHAUSTIVE `exposure.*` capability rule whose detector reported the
- * file. Reading a file with a non-exhaustive (regex) detector proves
+ * RUN: every requested file a code detector COULD parse must be covered
+ * by an EXHAUSTIVE `exposure.*` capability rule whose detector reported
+ * the file. Reading a file with a non-exhaustive (regex) detector proves
  * nothing about the ABSENCE of exposure — so without an explicitly
  * declared exhaustive exposure authority, the internality certificate is
- * unavailable for the scope. The scope is the resource's own source
- * paths (the same decision-relevant scoping the per-resource lifecycle
- * proof uses), never every requested path: with broad scan roots the
- * requested set includes README/docs/package files no code detector
- * parses, and demanding their coverage made the certificate unreachable
- * for any repo with wide scanRoots. Fail-closed is untouched: a relevant
- * path that was never requested, that no exhaustive rule claims, or that
- * the granting rule's detector did not report scanning is still a hole.
+ * unavailable for the scope. The check is run-wide, never per resource:
+ * a table is exposed (if at all) from OTHER files — route handlers, API
+ * modules — so scoping the negative proof to the model's own source
+ * would certify 'internal' while exactly the files that could refute it
+ * went unchecked. The scope is derived generically from the scan input:
+ * requested paths inside the pipeline-reported detector input set
+ * (`eligiblePaths`), excluding only non-code files no detector consumes
+ * (README, docs, package manifests, images) — never a hard-coded
+ * extension list. Fail-closed is untouched: with no reported input set
+ * every requested path stays in scope, and an eligible path that no
+ * exhaustive rule claims, or that the granting rule's detector did not
+ * report scanning, is still a hole.
  */
-function exposureCoverageHolds(
-  policy: ClassifierPolicy,
-  scan: ClassifierScanInput,
-  relevantPaths: readonly string[],
-): boolean {
+function exposureCoverageHolds(policy: ClassifierPolicy, scan: ClassifierScanInput): boolean {
   const rules = (policy.coverage ?? []).filter(
     (rule) => rule.capability.startsWith('exposure.') && rule.exhaustive === true,
   );
   if (rules.length === 0) return false;
-  if (relevantPaths.length === 0) return false;
-  if (scan.requestedPaths !== undefined) {
-    const requestedSet = new Set(scan.requestedPaths);
-    if (relevantPaths.some((path) => !requestedSet.has(path))) return false;
+  const requested = scan.requestedPaths ?? [];
+  if (requested.length === 0) return false;
+  let eligible: readonly string[];
+  if (scan.eligiblePaths === undefined) {
+    // No reported detector input set: nothing is known to be non-code,
+    // so every requested path stays in scope (fail closed).
+    eligible = requested;
+  } else {
+    eligible = requested.filter((path) => scan.eligiblePaths?.includes(path) === true);
   }
-  for (const path of relevantPaths) {
+  if (eligible.length === 0) return false;
+  for (const path of eligible) {
     const granting = rules.filter((rule) => rule.appliesTo.some((pattern) => globMatch(path, pattern)));
     if (granting.length === 0) return false;
     const covered = granting.some((rule) =>
@@ -859,6 +875,7 @@ export function classifyResources(input: ClassifyResourcesInput): Classification
     route(signal, 'authority', matched.length > 0, matched);
   }
 
+  const exposureComplete = exposureCoverageHolds(input.policy, input.scan);
   const trustedCategories = new Set(
     input.policy.trustedInternalEntryPoints.map((entry) => entry.category),
   );
@@ -867,6 +884,7 @@ export function classifyResources(input: ClassifyResourcesInput): Classification
     scan: input.scan,
     adapters: input.adapters,
     scanComplete,
+    exposureComplete,
     trustedCategories,
     trustedEntries,
   };
@@ -1031,6 +1049,8 @@ interface ClassifyContext {
   scan: ClassifierScanInput;
   adapters: readonly string[];
   scanComplete: boolean;
+  /** Exhaustive exposure-capability coverage holds (round 6). */
+  exposureComplete: boolean;
   trustedCategories: ReadonlySet<string>;
   trustedEntries: ClassifierPolicy['trustedInternalEntryPoints'];
 }
@@ -1289,7 +1309,7 @@ function classifyOne(
           'decision: user-facing (conservative) until the scan scope is complete',
         locations: [resource.location],
       });
-    } else if (!exposureCoverageHolds(ctx.policy, ctx.scan, [resource.source])) {
+    } else if (!ctx.exposureComplete) {
       exposure = 'user-facing';
       rules.push(RULES.exposureDefault);
       defaultsApplied.push(RULES.exposureDefault);
@@ -1299,8 +1319,9 @@ function classifyOne(
         name: resource.name,
         detail:
           'internal intent cannot be certified: no EXHAUSTIVE exposure.* coverage rule covers ' +
-          `this resource's source '${resource.source}' with a detector-reported scan; reading a ` +
-          'file with a non-exhaustive (e.g. regex) detector proves nothing about the absence of exposure, ' +
+          'every detector-eligible requested file with a detector-reported scan; exposure of a ' +
+          'resource happens in other files (route handlers, API modules), and reading a file ' +
+          'with a non-exhaustive (e.g. regex) detector proves nothing about the absence of exposure, ' +
           'so internality stays unavailable for this scope until an exhaustive exposure ' +
           'parser is declared and covers it; decision: user-facing (conservative)',
         locations: [resource.location],

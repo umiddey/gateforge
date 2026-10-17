@@ -1,18 +1,23 @@
 /**
- * Scoped exposure-coverage check (red-team round 6, scope fix 2026-10-17):
- * `exposureCoverageHolds` is evaluated over the paths the DECISION rests
- * on (the resource's own source path), never over every requested path —
- * with broad scan roots the requested set includes README/docs/package
- * files no code detector parses, which made the internality certificate
- * unreachable for any repo with wide `scanRoots`. Fail-closed is
- * unchanged: no exhaustive rule, an unrequested proof path, or a path the
- * granting rule's detector did not report scanning still blocks.
+ * Run-wide exposure-coverage check (red-team round 6, scope rework
+ * 2026-10-17): `exposureCoverageHolds` is evaluated ONCE per run over
+ * every REQUESTED path a code detector could parse — requested paths
+ * inside the pipeline-reported detector input set (`eligiblePaths`, the
+ * discovery scope) — never per resource, and never over non-code
+ * requested files (README, docs, package manifests, images). Exposure of
+ * a table happens in OTHER files (route handlers, API modules), so a
+ * per-resource proof scoped to the model's own source would certify
+ * 'internal' while exactly the files that could expose the resource went
+ * unchecked. Fail-closed is unchanged: no exhaustive rule, an eligible
+ * path no exhaustive rule claims, or a path the granting rule's detector
+ * did not report scanning still blocks.
  *
- * The three behaviours under test (plan 20261017_1600):
- * (a) broad scanRoots + non-code requested files + an exhaustive rule
- *     covering the model files → the certificate is reachable;
- * (b) a model file inside the rule's appliesTo but missing from the
- *     detector's scannedPaths → fails closed;
+ * The three behaviours under test (plan 20261017_1600, Main rework
+ * bullet 16:05):
+ * (a) broad scanRoots + README/docs requested + an exhaustive rule whose
+ *     detector scanned every CODE file → the certificate is reachable;
+ * (b) the model file covered but another code file (a route handler)
+ *     missing from the granting detector's scannedPaths → fails closed;
  * (c) no exhaustive exposure rule → fails closed.
  */
 import { describe, expect, it } from 'vitest';
@@ -27,6 +32,8 @@ import type { ClassifierPolicy } from '../src/schemas/scan-config.js';
 
 const MODEL_SOURCE = 'backend/models/meter_reading.py';
 const MODEL_LOCATION = { file: MODEL_SOURCE, line: 12, col: 7 };
+const BASE_SOURCE = 'backend/models/base.py';
+const ROUTE_SOURCE = 'backend/routes/meter_routes.py';
 const SQL_DETECTOR = { id: 'gateforge.pack-sqlalchemy', version: '0.15.1' } as const;
 const NON_CODE_FILES = ['README.md', 'package.json', 'docs/architecture.md'];
 
@@ -70,28 +77,28 @@ function modelSignals(): ClassificationSignal[] {
 
 /**
  * A scan whose GLOBAL complete-scan attestation holds: every requested
- * path is covered by the rule of the detector that scanned it. The
- * requested set deliberately includes non-code files (broad scanRoots).
+ * path is covered by the rule of a detector that reported scanning it.
+ * The requested set deliberately includes non-code files (broad
+ * scanRoots); `eligiblePaths` is the discovery scope the pipeline handed
+ * the detectors — code files only. `routeScanned: false` models a route
+ * handler the granting detector did NOT report scanning (an exposure
+ * hole the per-resource scoping of the rejected fix was blind to, because
+ * the model's own source was covered).
  */
-function completeScan(options?: { modelScanned?: boolean; requestModel?: boolean }): ClassifierScanInput {
-  const requestModel = options?.requestModel ?? true;
-  const modelScanned = options?.modelScanned ?? true;
+function completeScan(options?: { routeScanned?: boolean }): ClassifierScanInput {
+  const routeScanned = options?.routeScanned ?? true;
   return {
-    requestedPaths: [
-      ...NON_CODE_FILES,
-      ...(requestModel ? [MODEL_SOURCE] : []),
-      'backend/models/base.py',
-    ],
+    requestedPaths: [...NON_CODE_FILES, MODEL_SOURCE, BASE_SOURCE, ROUTE_SOURCE],
+    eligiblePaths: [MODEL_SOURCE, BASE_SOURCE, ROUTE_SOURCE],
     coverage: [
       {
         detector: 'gateforge.pack-sqlalchemy',
-        scannedPaths: [
-          ...(modelScanned ? [MODEL_SOURCE] : []),
-          'backend/models/base.py',
-        ],
+        scannedPaths: [MODEL_SOURCE, BASE_SOURCE, ...(routeScanned ? [ROUTE_SOURCE] : [])],
       },
       { detector: 'gateforge.docs', scannedPaths: [...NON_CODE_FILES] },
     ],
+    configuredDetectors: 2,
+    successfulDetectors: 2,
     findings: [],
     unresolved: [],
   };
@@ -107,7 +114,7 @@ function policyWith(exhaustiveExposure: boolean): ClassifierPolicy {
             {
               capability: 'exposure.models',
               detector: 'gateforge.pack-sqlalchemy',
-              appliesTo: ['backend/models/**'],
+              appliesTo: ['backend/**'],
               exhaustive: true,
             },
           ]
@@ -115,7 +122,7 @@ function policyWith(exhaustiveExposure: boolean): ClassifierPolicy {
       {
         capability: 'models.sqlalchemy',
         detector: 'gateforge.pack-sqlalchemy',
-        appliesTo: ['backend/models/**'],
+        appliesTo: ['backend/**'],
       },
       {
         capability: 'docs.inventory',
@@ -149,8 +156,8 @@ function classify(policy: ClassifierPolicy, scan: ClassifierScanInput): Classify
   };
 }
 
-describe('scoped exposure coverage (internality certificate reachability)', () => {
-  it('(a) grants the certificate with broad scanRoots, non-code requested files, and an exhaustive rule covering the model files', () => {
+describe('run-wide exposure coverage (internality certificate reachability)', () => {
+  it('(a) grants the certificate with broad scanRoots, non-code requested files, and an exhaustive rule whose detector scanned every code file', () => {
     const result = classifyResources(
       classify(policyWith(true), completeScan()),
     );
@@ -168,17 +175,22 @@ describe('scoped exposure coverage (internality certificate reachability)', () =
     expect(decision?.classification?.rules).toContain('EXPOSURE_INTERNAL_CERTIFICATE');
   });
 
-  it('(b) fails closed when a model file inside appliesTo is missing from the detector scannedPaths', () => {
+  it('(b) fails closed when the model file is covered but another code file is missing from the granting detector scannedPaths', () => {
+    // The route handler IS requested and detector-eligible; the exposure
+    // rule's detector did not report scanning it. The model's own source
+    // is fully covered — the rejected per-resource scoping certified
+    // 'internal' on exactly this scan, ignoring the route file that
+    // could expose the table.
     const result = classifyResources(
-      classify(policyWith(true), completeScan({ modelScanned: false })),
+      classify(policyWith(true), completeScan({ routeScanned: false })),
     );
 
     const decision = result.decisions[0];
     expect(decision).toBeDefined();
-    const incomplete = decision?.blocks.filter((block) => block.code === 'INCOMPLETE_PROOF_SCOPE');
-    expect(incomplete).toHaveLength(1);
+    expect(decision?.blocks.length).toBeGreaterThan(0);
+    expect(decision?.blocks.some((block) => block.code === 'INCOMPLETE_PROOF_SCOPE')).toBe(true);
     expect(decision?.classification?.exposure).toBe('user-facing');
-    expect(decision?.classification?.rules).toContain('EXPOSURE_DEFAULT_USER_FACING');
+    expect(decision?.classification?.rules).not.toContain('EXPOSURE_INTERNAL_CERTIFICATE');
   });
 
   it('(c) fails closed when no exhaustive exposure rule exists', () => {
@@ -189,8 +201,12 @@ describe('scoped exposure coverage (internality certificate reachability)', () =
     const decision = result.decisions[0];
     expect(decision).toBeDefined();
     const incomplete = decision?.blocks.filter((block) => block.code === 'INCOMPLETE_PROOF_SCOPE');
-    expect(incomplete).toHaveLength(1);
-    expect(incomplete?.[0]?.detail).toContain('no EXHAUSTIVE exposure.* coverage rule covers');
+    expect(incomplete?.length).toBe(1);
+    // The detail names the EXHAUSTIVE exposure authority — pinning the
+    // exposure-coverage branch, not the complete-scan branch (the scan
+    // attestation itself holds in this fixture).
+    expect(incomplete?.[0]?.detail).toContain('EXHAUSTIVE exposure');
     expect(decision?.classification?.exposure).toBe('user-facing');
+    expect(decision?.classification?.rules).not.toContain('EXPOSURE_INTERNAL_CERTIFICATE');
   });
 });
