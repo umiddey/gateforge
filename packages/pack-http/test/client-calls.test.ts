@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { FRONTEND_CALL_TARGET_UNRESOLVED } from '@gate-forge/http-contract';
+import { FRONTEND_CALL_TARGET_UNRESOLVED, HTTP_METHOD_DYNAMIC } from '@gate-forge/http-contract';
 import {
   parseClientScanConfigDocument,
   scanClientCalls,
@@ -14,6 +14,11 @@ const spreadConfig = parseClientScanConfigDocument(
     ],
   },
   'test:client-spread',
+);
+
+const verbConfig = parseClientScanConfigDocument(
+  { clientSymbols: ['apiClient'] },
+  'test:client-verbs',
 );
 
 function scanWith(
@@ -195,6 +200,132 @@ describe('client scan: options verb forwarded through an options spread', () => 
     );
     expect(result.calls).toHaveLength(2);
     expect(result.unresolved).toHaveLength(1);
+  });
+});
+
+describe('client scan: spread order is last-writer-wins and a verb-named second argument is a body', () => {
+  it('a literal method written AFTER an unproven spread wins', () => {
+    const result = scanWith(spreadConfig, 'src/api.js', {
+      'src/api.js': `
+        const requestOptions = buildRequestOptions();
+
+        export function save() {
+          return fetch('/api/v1/contracts', { ...requestOptions, method: 'POST' });
+        }
+      `,
+    });
+    expect(result.unresolved).toEqual([]);
+    expect(result.calls).toEqual([
+      expect.objectContaining({ method: 'POST', rawPath: '/api/v1/contracts' }),
+    ]);
+  });
+
+  it('an unproven spread written AFTER a literal method keeps the verb unproven', () => {
+    const result = scanWith(spreadConfig, 'src/api.js', {
+      'src/api.js': `
+        const requestOptions = buildRequestOptions();
+
+        export function save() {
+          return fetch('/api/v1/contracts', { method: 'POST', ...requestOptions });
+        }
+      `,
+    });
+    expect(result.calls).toEqual([]);
+    expect(result.unresolved).toEqual([
+      expect.objectContaining({ code: HTTP_METHOD_DYNAMIC }),
+    ]);
+  });
+
+  it('a verb-named call treats its spread second argument as the request body', () => {
+    const result = scanWith(verbConfig, 'src/floor-plan/FloorPlanTab.jsx', {
+      'src/floor-plan/FloorPlanTab.jsx': `
+        export function saveShape(extra) {
+          return apiClient.patch('/api/v1/floor-plan-room-shapes/1', { polygon_json: {}, ...extra });
+        }
+      `,
+    });
+    expect(result.unresolved).toEqual([]);
+    expect(result.calls).toEqual([
+      expect.objectContaining({ method: 'PATCH', rawPath: '/api/v1/floor-plan-room-shapes/1' }),
+    ]);
+  });
+
+  it('a verb-named call keeps the member verb across multiple body spreads', () => {
+    const result = scanWith(verbConfig, 'src/service/ServiceRequestCreatePage.jsx', {
+      'src/service/ServiceRequestCreatePage.jsx': `
+        export function createTag(tagPayload, selection) {
+          return apiClient.post('/api/v1/spatial-location-tags', { ...tagPayload, ...selection });
+        }
+      `,
+    });
+    expect(result.unresolved).toEqual([]);
+    expect(result.calls).toEqual([
+      expect.objectContaining({ method: 'POST', rawPath: '/api/v1/spatial-location-tags' }),
+    ]);
+  });
+});
+
+describe('client scan: a base.endsWith("/") path-join ternary is one URL', () => {
+  it('the idiom with a literal base without a trailing slash proves the single joined template', () => {
+    const result = scanWith(verbConfig, 'src/ui/dropdown.js', {
+      'src/ui/dropdown.js': `
+        const base = '/api/v1/contracts';
+
+        export function loadDetail(value) {
+          const directPath = base.endsWith('/')
+            ? \`\${base}\${value}/\`
+            : \`\${base}/\${value}/\`;
+          return apiClient.get(directPath);
+        }
+      `,
+    });
+    expect(result.unresolved).toEqual([]);
+    expect(result.calls).toEqual([
+      expect.objectContaining({ method: 'GET', rawPath: '/api/v1/contracts/${}/' }),
+    ]);
+  });
+
+  it('the idiom with a base that already ends in a slash still proves the one joined template', () => {
+    const result = scanWith(verbConfig, 'src/ui/dropdown.js', {
+      'src/ui/dropdown.js': `
+        const base = '/api/v1/contracts/';
+
+        export function loadDetail(value) {
+          const directPath = base.endsWith('/')
+            ? \`\${base}\${value}/\`
+            : \`\${base}/\${value}/\`;
+          return apiClient.get(directPath);
+        }
+      `,
+    });
+    expect(result.unresolved).toEqual([]);
+    expect(result.calls).toEqual([
+      expect.objectContaining({
+        method: 'GET',
+        rawPath: '/api/v1/contracts//${}/',
+        canonicalPath: '/api/v1/contracts/{}',
+      }),
+    ]);
+  });
+
+  it('a conditional with unrelated arms is not the idiom and stays two templates', () => {
+    const result = scanWith(verbConfig, 'src/ui/dropdown.js', {
+      'src/ui/dropdown.js': `
+        const base = '/api/v1/contracts';
+
+        export function loadDetail(value) {
+          const directPath = base.endsWith('/')
+            ? \`\${base}\${value}/\`
+            : \`\${base}/archive/\${value}/\`;
+          return apiClient.get(directPath);
+        }
+      `,
+    });
+    expect(result.unresolved).toEqual([]);
+    expect(result.calls).toEqual([
+      expect.objectContaining({ method: 'GET', rawPath: '/api/v1/contracts/archive/${}/' }),
+      expect.objectContaining({ method: 'GET', rawPath: '/api/v1/contracts${}/' }),
+    ]);
   });
 });
 

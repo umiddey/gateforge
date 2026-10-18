@@ -25,12 +25,14 @@ import {
   HTTP_REQUEST_OBSERVED,
   TRANSPORT_ONLY_CONTRACTS,
   type BehaviorCase,
+  type BehaviorDisposition,
   type BehaviorHttpMethod,
   type BehaviorPolicy,
   type EffectScope,
   type EndpointBehavior,
   type ResourceBehavior,
 } from '../schemas/behavior-policy.js';
+import { dispositionExpiry } from '../schemas/disposition.js';
 import { ObligationSchema, type Obligation } from '../schemas/obligation.js';
 import { CAUSE_NEXT_ACTIONS } from '../schemas/verdict.js';
 import {
@@ -57,6 +59,10 @@ export interface CompileBehaviorPolicyInput {
   graph: ResourceGraph;
   /** Already-parsed behavior document. */
   policy: BehaviorPolicy;
+  /** Injected clock instant (Date or ISO-8601) disposition expiry is judged against. */
+  now: Date | string;
+  /** Maximum allowed disposition time-until-expiry; defaults to the documented 30 days. */
+  maxDurationMs?: number;
 }
 
 /** Deterministic compiler output. */
@@ -92,7 +98,8 @@ export function parseBehaviorPolicy(input: unknown): BehaviorPolicy {
  * Compiles a validated behavior policy against the current graph.
  *
  * Args:
- *   input (CompileBehaviorPolicyInput): graph plus validated policy.
+ *   input (CompileBehaviorPolicyInput): graph, validated policy, the
+ *     injected clock instant, and the optional disposition max duration.
  *
  * Returns:
  *   CompileBehaviorPolicyResult: catalog, obligations, blocking entries.
@@ -139,8 +146,39 @@ export function compileBehaviorPolicy(input: CompileBehaviorPolicyInput): Compil
       );
       continue;
     }
+    // Owner-disposition timer (plan 2026-10-17): an expired disposition
+    // is VOID — the endpoint grades as if it had no disposition — and
+    // the expiry itself blocks with `DISPOSITION_EXPIRED`. An over-long
+    // expiry is a configuration error (mirror of the waiver/quarantine
+    // max-duration fail-closed rule).
+    let disposition: BehaviorDisposition | undefined = declared.disposition;
+    if (disposition !== undefined) {
+      const expiry = dispositionExpiry(disposition, {
+        now: input.now,
+        maxDurationMs: input.maxDurationMs,
+      });
+      if (expiry.state === 'over-max') {
+        throw new PolicyEvaluationError(
+          `behavior policy: endpoint '${resourceId}' disposition ${expiry.detail}`,
+        );
+      }
+      if (expiry.state === 'expired') {
+        disposition = undefined;
+        blocking.push(
+          block(
+            'finding',
+            resourceId,
+            resource.name,
+            `behavior policy: endpoint '${resourceId}' disposition expired at '${expiry.expiresAt}' — ` +
+              'the exemption is void; extend it (`gateforge disposition extend`) or declare its behavior',
+            resource.location,
+            'DISPOSITION_EXPIRED',
+          ),
+        );
+      }
+    }
     const operational = isHealthOperations(resource);
-    if (declared.disposition?.kind === 'operational-only' && !operational) {
+    if (disposition?.kind === 'operational-only' && !operational) {
       throw new PolicyEvaluationError(
         `operational-only disposition on '${resourceId}' is illegal: the route is not positively classified health-operations`,
       );
@@ -173,11 +211,11 @@ export function compileBehaviorPolicy(input: CompileBehaviorPolicyInput): Compil
         return target === undefined ? [] : [target.source];
       }),
     ]);
-    if (declared.disposition?.kind === 'out-of-scope') {
+    if (disposition?.kind === 'out-of-scope') {
       continue;
     }
     const effects = sortEffects(declared.effects);
-    if (declared.disposition?.kind === 'operational-only') {
+    if (disposition?.kind === 'operational-only') {
       const hasTransport = declared.cases.some((item) => TRANSPORT_ONLY_CONTRACTS.has(item.contract));
       collectSubject({
         resourceId,
@@ -491,7 +529,7 @@ function block(
   name: string,
   detail: string,
   location: GraphResource['location'] | null,
-  cause: 'ENDPOINT_BEHAVIOR_MISSING' | 'BEHAVIOR_REFERENCE_STALE' | 'BEHAVIOR_BINDING_MISMATCH',
+  cause: 'ENDPOINT_BEHAVIOR_MISSING' | 'BEHAVIOR_REFERENCE_STALE' | 'BEHAVIOR_BINDING_MISMATCH' | 'DISPOSITION_EXPIRED',
 ): BlockingEntry {
   return BlockingEntrySchema.parse({
     kind,

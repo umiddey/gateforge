@@ -681,6 +681,20 @@ export const GateforgeConfigSchema = z
      */
     coveragePolicy: CoveragePolicySchema.optional(),
     /**
+     * Owner-disposition timer bounds: `maxDays` caps how far out a
+     * disposition `expiresAt` may reach (default 30, the owner decision
+     * of 2026-10-17). The key lives in `.gateforge.yml`, so it is inside
+     * the trusted policy digest — an agent cannot widen the ceiling
+     * without the owner repinning the policy revision.
+     */
+    disposition: z
+      .object({
+        /** Maximum disposition lifetime in whole days (default 30). */
+        maxDays: z.number().int().min(1).optional(),
+      })
+      .strict()
+      .optional(),
+    /**
      * Path to the complete-behavior document (plan 2026-09-19 §4.1).
      * ABSENT preserves basic table/transport behavior. Presence enables
      * the approved case catalog; there is no warnOnly or silent fallback.

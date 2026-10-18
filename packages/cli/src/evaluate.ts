@@ -22,6 +22,7 @@ import {
   CAUSE_NEXT_ACTIONS,
   ClaimSchema,
   classificationBlockedIdentity,
+  DISPOSITION_MAX_DAYS,
   HTTP_ENDPOINT_RESOURCE_KIND,
   evaluateCoveragePolicy,
   type MappedCoverage,
@@ -509,22 +510,30 @@ export function coverageInventory(graph: ResourceGraph): Array<{
  *   mappedCoverage: coverage facts derived from resolved test mappings
  *     (empty when the sidecar is absent or no binding declares
  *     browser-e2e).
+ *   now: the injected run instant — disposition expiry is judged
+ *     against it, never the wall clock.
  *
  * Returns:
  *   BlockingEntry[]: coverage findings (empty when the feature is off).
  *
  * Throws:
- *   UsageError: when a policy table name is absent from the inventory
- *     (configuration error — fail closed, never silently uncheckable).
+ *   UsageError: when a policy table name is absent from the inventory or
+ *     a disposition expiry exceeds the configured maximum (configuration
+ *     error — fail closed, never silently uncheckable).
  */
 export function coveragePolicyBlocking(
   config: GateforgeConfig,
   graph: ResourceGraph,
-  mappedCoverage: readonly MappedCoverage[] = [],
+  mappedCoverage: readonly MappedCoverage[],
+  now: Date | string,
 ): BlockingEntry[] {
   const policy = config.coveragePolicy;
   if (policy === undefined || policy.tables.length === 0) return [];
-  const result = evaluateCoveragePolicy(policy.tables, coverageInventory(graph), mappedCoverage);
+  const maxDurationMs = (config.disposition?.maxDays ?? DISPOSITION_MAX_DAYS) * 86_400_000;
+  const result = evaluateCoveragePolicy(policy.tables, coverageInventory(graph), mappedCoverage, {
+    now,
+    maxDurationMs,
+  });
   if (result.configErrors.length > 0) {
     const first = result.configErrors[0];
     throw new UsageError(
@@ -756,7 +765,7 @@ export function evaluateRun(input: EvaluateInput): EvaluateResult {
     // selection. It stays in the report's repository debt and blocks
     // only the runs that claim the repository.
     ...(namedObligationIds === null
-      ? coveragePolicyBlocking(config, graph, input.mappedCoverage ?? [])
+      ? coveragePolicyBlocking(config, graph, input.mappedCoverage ?? [], now)
       : []),
     ...strictBlocking,
   ];

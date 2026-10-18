@@ -81,6 +81,10 @@ export const CauseCodeSchema = z.enum([
   'RUNTIME_PREPARATION_FAILED',
   'RUNTIME_READINESS_FAILED',
   'QUARANTINE_EXPIRED',
+  // Expiring owner dispositions (plan 2026-10-17): an `expiresAt`-stamped
+  // disposition judged at/after its instant is void — the endpoint/table
+  // grades as if undispositioned — and the expiry itself blocks.
+  'DISPOSITION_EXPIRED',
   'MIGRATION_MISSING',
   'MIGRATION_LINEAGE_BROKEN',
   'MIGRATION_DOWNGRADE_NOOP',
@@ -172,6 +176,8 @@ export const CAUSE_NEXT_ACTIONS: Readonly<Record<CauseCode, string>> = Object.fr
     'the candidate runtime must build or install before the gate can execute',
   QUARANTINE_EXPIRED:
     'Owner: renew or delete the expired quarantine (`gateforge quarantine <testKey> --owner --approver --reason --expires`); an expired quarantine blocks',
+  DISPOSITION_EXPIRED:
+    'Owner: extend or remove the expired disposition (`gateforge disposition extend <endpoint-id|table> --expires <ISO-date> --owner <name> --reason "…"`); an expired disposition voids the exemption and blocks',
   RUNTIME_READINESS_FAILED:
     'Repair the tracked `runtime.services` command or readiness probe — the candidate ' +
     'runtime must become ready before evidence is trusted',

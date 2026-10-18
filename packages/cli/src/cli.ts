@@ -25,6 +25,7 @@ import { preCommitCommand } from './commands/pre-commit.js';
 import { baselineCommand } from './commands/baseline.js';
 import { waiveCommand } from './commands/waive.js';
 import { quarantineCommand } from './commands/quarantine.js';
+import { dispositionCommand } from './commands/disposition.js';
 import { classifyCommand } from './commands/classify.js';
 import { explainCommand } from './commands/explain.js';
 import { testsCommand } from './commands/tests.js';
@@ -101,6 +102,9 @@ commands:
   quarantine <testKey>                  write an expiring, owner-approved flaky-test quarantine
         --owner N --approver N           (never proof, never blocking; at most 14 days; no --force;
         --reason "T" --expires D         an expired quarantine BLOCKS until renewed or deleted)
+  disposition extend <endpoint-id|table>  rewrite one owner disposition's expiresAt and record the
+        --owner N --reason "T"           extension in its extensions audit list (never pins; the
+        --expires D                      digest/pin flow applies to the edited policy)
   run [--] [test-gates flags]    the whole local proof in order: doctor preflight (strict), the optional
                                          .gateforge/runtime.yml recipe (reset/seed/up/health), the supervised
                                          test-gates, check --require-e2e, and the recipe's teardown — one line
@@ -190,6 +194,8 @@ export async function main(
       return runWithExitCodes(io, () => Promise.resolve(migrateCommand(io, rest)));
     case 'quarantine':
       return runWithExitCodes(io, () => quarantineCommand(io, rest));
+    case 'disposition':
+      return runWithExitCodes(io, () => dispositionCommand(io, rest));
     default:
       return runWithExitCodes(io, async () => {
         // parseArgs validates flag syntax; unknown commands are usage errors.
