@@ -1,7 +1,25 @@
 # Changelog
 
-## Unreleased
+## 0.16.0
 
+- **Added: expiring owner dispositions and `gateforge disposition
+  extend`.** Both owner dispositions — the `coveragePolicy` table
+  dispositions and the `behaviorPolicy` endpoint dispositions
+  (`out-of-scope`, `operational-only`) — accept an optional `expiresAt`
+  (ISO-8601), judged against the run's injected clock: before the instant
+  the disposition works exactly as an untimed one; at and after it the
+  disposition is void — the endpoint/table grades as undispositioned AND
+  a blocking `DISPOSITION_EXPIRED` finding names the target, the expiry
+  and the extend command. An expiry further out than the configured
+  maximum (default 30 days, `disposition.maxDays`) is a config error
+  (`DISPOSITION_MAX_DURATION`). `gateforge disposition extend
+  <endpoint-id|table> --expires <ISO-date> --owner <name> --reason "<why>"`
+  rewrites `expiresAt` in the owning document (comment- and
+  format-preserving), refuses a date in the past or beyond the maximum,
+  and appends `{at, by, reason, previousExpiresAt}` to the disposition's
+  `extensions` audit list. The command only EDITS trusted policy — it
+  never pins and never approves a digest; the existing digest/pin flow
+  applies to the edited revision.
 - **Fixed: client scan resolves wrapper verbs forwarded through an
   options spread.** A declared wrapper whose request-options parameter
   is spread into the fetch options it issues —
@@ -23,6 +41,24 @@
   (`` `${BACKEND_URL}/api/v1/x/${token}` `` becomes `/api/v1/x/${}`).
   A hole the scan cannot trace to a config read, and a host with no
   static path after it, keep the call unresolved.
+- **Fixed: client-scan spread order and verb-named call bodies.**
+  Options-spread verbs now follow JavaScript's last-writer-wins fully:
+  a literal `method` written after an unproven spread wins
+  (`fetch(url, { ...opts, method: 'POST' })` proves POST), while an
+  unproven spread written after the literal still keeps the verb
+  unproven. A verb-named call (`apiClient.post(url, body)`,
+  `axios.patch(url, body)`) takes its verb from the member name and
+  never reads `arguments[1]` as request options — a spread in the
+  request body (`apiClient.patch(url, { polygon_json, ...extra })`) no
+  longer un-proves the member's verb.
+- **Fixed: a base-`endsWith('/')` path-join ternary resolves to one
+  URL.** A conditional whose test is `base.endsWith('/')` and whose
+  arms are `` `${base}${value}/` `` and `` `${base}/${value}/` `` now
+  renders the single joined template `` `${base}/${value}/` `` — both
+  arms are the same URL — instead of also emitting the ghost target
+  `` `${base}${value}/` `` for callers whose base already ends in a
+  slash. A conditional on any other test keeps today's both-arms
+  union.
 - **Fixed: the exhaustive exposure-coverage check now scopes to the
   requested paths a code detector could parse, not every requested
   path.** The internality certificate's exposure-negative proof demanded

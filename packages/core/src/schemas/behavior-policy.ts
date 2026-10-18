@@ -9,6 +9,7 @@
  */
 import { z } from 'zod';
 import { ContractNameSchema, SchemaVersionField } from './common.js';
+import { DispositionExtensionSchema } from './disposition.js';
 import { parseBehaviorSignatureProfile } from './signature-profile.js';
 import { FingerprintHexSchema } from './baseline.js';
 
@@ -883,6 +884,15 @@ export const BehaviorDispositionSchema = z
   .object({
     kind: z.enum(['operational-only', 'out-of-scope']),
     reason: z.string().min(1),
+    /**
+     * Optional expiry instant (ISO-8601): when present the disposition
+     * is judged against the injected run clock and is VOID at/after the
+     * instant — the endpoint grades as if undispositioned and a blocking
+     * `DISPOSITION_EXPIRED` finding names it.
+     */
+    expiresAt: z.iso.datetime().optional(),
+    /** Audit trail: one entry per `gateforge disposition extend`. */
+    extensions: z.array(DispositionExtensionSchema).optional(),
   })
   .strict();
 

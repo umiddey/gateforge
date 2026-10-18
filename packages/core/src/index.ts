@@ -256,6 +256,21 @@ export { QuarantineSchema } from './schemas/quarantine.js';
 export type { Quarantine } from './schemas/quarantine.js';
 
 /**
+ * Owner-disposition time bounds (plan 2026-10-17): the shared
+ * `extensions` audit-entry schema both disposition shapes carry, the
+ * default 30-day maximum, and the injected-clock expiry judgment the
+ * behavior and coverage evaluators share.
+ */
+export {
+  DispositionExtensionSchema,
+  DISPOSITION_MAX_DAYS,
+  DISPOSITION_MAX_DURATION_MS,
+  dispositionExpiry,
+} from './schemas/disposition.js';
+/** Inferred disposition-extension type. */
+export type { DispositionExtension } from './schemas/disposition.js';
+
+/**
  * Owner-chosen gate strictness: the optional
  * `mode` key (`strict` default = today's behavior, `changed`, `warn`) and
  * the pure gate decision derived from it.
@@ -402,6 +417,7 @@ export type { RuntimeConfig, RuntimeService, RuntimeReadiness, RecipeStep } from
  */
 export {
   BehaviorPolicySchema,
+  BehaviorDispositionSchema,
   BehaviorCaseSchema,
   EffectScopeSchema,
   EndpointBehaviorSchema,
@@ -428,6 +444,7 @@ export {
 } from './schemas/index.js';
 export type {
   BehaviorPolicy,
+  BehaviorDisposition,
   BehaviorCase,
   EffectScope,
   EndpointBehavior,

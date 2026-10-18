@@ -1381,6 +1381,24 @@ Enforcement-relevant sections:
   `CRUD_COVERAGE_MISSING`. Recording or approving a disposition is a
   trusted-policy act — the policy participates in the trusted policy
   revision, so an agent edit never self-approves.
+- `disposition.maxDays:` — how far out an owner disposition's `expiresAt`
+  may reach, in whole days (default 30; minimum 1). An owner disposition —
+  a `coveragePolicy` table disposition or a `behaviorPolicy` endpoint
+  disposition (`out-of-scope`, `operational-only`) — may carry an optional
+  `expiresAt` (ISO-8601) timer, judged against the run's clock and never
+  the wall clock: before the instant it works exactly as an untimed
+  disposition; at and after it the disposition is VOID — the
+  endpoint/table grades as undispositioned AND a blocking
+  `DISPOSITION_EXPIRED` finding names the endpoint/table, the expiry and
+  the extend command. An expiry further out than the maximum is a config
+  error (`DISPOSITION_MAX_DURATION`). The owner renews a timer with
+  `gateforge disposition extend <endpoint-id|table> --expires <ISO-date>
+  --owner <name> --reason "<why>"`: it rewrites `expiresAt` in the owning
+  document (comment- and format-preserving), refuses a date in the past or
+  beyond the maximum, and appends `{at, by, reason, previousExpiresAt}` to
+  the disposition's `extensions` audit list. The command only EDITS
+  trusted policy — it never pins and never approves a digest; the
+  existing digest/pin flow applies to the edited revision.
 - `diagnostics.suites:` — the advisory pytest suites (see above).
 - `runner:` — the test runner the supervised gate drives:
   `playwright` (the default when the key is absent), `pytest`, `vitest` or

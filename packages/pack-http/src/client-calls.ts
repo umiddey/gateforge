@@ -1202,7 +1202,7 @@ function extractCall(
   // fetch(url[, {method}])
   if (ts.isIdentifier(expression) && expression.text === 'fetch') {
     if (!table.shadowsGlobalFetch(expression)) {
-      extractClientCall(call, 'fetch', 'GET', file, config, table, calls, unresolved, location, undefined, reads);
+      extractClientCall(call, 'fetch', 'GET', false, file, config, table, calls, unresolved, location, undefined, reads);
     }
     return;
   }
@@ -1212,7 +1212,7 @@ function extractCall(
     const verb = expression.name.text.toLowerCase();
     const isFetchObject = objectName === 'window' && expression.name.text === 'fetch';
     if (isFetchObject) {
-      extractClientCall(call, 'fetch', 'GET', file, config, table, calls, unresolved, location, undefined, reads);
+      extractClientCall(call, 'fetch', 'GET', false, file, config, table, calls, unresolved, location, undefined, reads);
       return;
     }
     // Per-symbol scoping (phase 3): the symbol counts only where its
@@ -1224,7 +1224,7 @@ function extractCall(
       // proven literal baseURL joins into the emitted path (fetch has no
       // instance and never joins).
       const baseURL = table.instanceBaseURL(objectName, file);
-      extractClientCall(call, objectName, method, file, config, table, calls, unresolved, location, baseURL, reads);
+      extractClientCall(call, objectName, method, true, file, config, table, calls, unresolved, location, baseURL, reads);
       return;
     }
   }
@@ -1475,6 +1475,14 @@ function extractClientCall(
   call: ts.CallExpression,
   framework: string,
   defaultMethod: HttpMethod | 'GET',
+  /**
+   * True when the call's verb comes from a verb-named member
+   * (`.get/.post/.put/.patch/.delete/...` on axios or a configured
+   * client symbol): the member name IS the method and `arguments[1]` is
+   * the request BODY — a spread there says nothing about the verb and is
+   * never read as request options.
+   */
+  methodFromVerb: boolean,
   file: string,
   config: ClientScanConfig,
   table: Evaluator,
@@ -1493,10 +1501,16 @@ function extractClientCall(
     });
     return;
   }
-  // Method: explicit option first, else the verb default.
+  // Method: explicit option first, else the verb default — except for a
+  // verb-named call, where the member name decides and arguments[1] is
+  // the request body, never request options.
   let method: HttpMethod | null = defaultMethod === 'GET' ? 'GET' : defaultMethod;
   const optionsNode = call.arguments[1];
-  if (optionsNode !== undefined && ts.isObjectLiteralExpression(optionsNode)) {
+  if (methodFromVerb) {
+    // `apiClient.patch(url, { polygon_json, ...extra })`: the spread is
+    // the body's shape, not an options override — the verb stays the
+    // member's verb and is never un-proven by what the body spreads.
+  } else if (optionsNode !== undefined && ts.isObjectLiteralExpression(optionsNode)) {
     if (optionsNode.properties.some(ts.isSpreadAssignment)) {
       // `{...base, method: ...}`: the verb participates in JavaScript's
       // last-writer-wins order across the spread, so a wrapper's options
@@ -1549,6 +1563,7 @@ function extractClientCall(
     }
   }
   if (
+    !methodFromVerb &&
     framework === 'fetch' &&
     optionsNode !== undefined &&
     !ts.isObjectLiteralExpression(optionsNode)
@@ -2286,11 +2301,12 @@ class ValueTable {
     for (const property of object.properties) {
       if (ts.isSpreadAssignment(property)) {
         const spread = this.optionsMethod(property.expression, file, bindings, depth + 1);
-        if (spread.kind === 'unproven') return UNPROVEN_OPTIONS;
-        // JavaScript overwrite order: a spread that provably carries a
-        // method wins; a spread provably free of `method` adds nothing,
-        // so an earlier explicit method survives it.
-        if (spread.kind === 'proven') result = spread;
+        // JavaScript overwrite order: the LAST writer of `method` wins.
+        // An unproven spread may overwrite the verb with an unknown value
+        // (stays unproven unless re-proven), a proven spread writes its
+        // verb, and a spread provably free of `method` adds nothing, so
+        // any earlier or later explicit method survives it.
+        if (spread.kind !== 'absent') result = spread;
       } else if (
         (ts.isPropertyAssignment(property) || ts.isShorthandPropertyAssignment(property)) &&
         ts.isIdentifier(property.name) &&
@@ -2298,10 +2314,7 @@ class ValueTable {
       ) {
         const initializer = ts.isPropertyAssignment(property) ? property.initializer : property.name;
         result = this.verbOfLiteral(initializer, file, bindings);
-      } else {
-        continue;
       }
-      if (result.kind === 'unproven') return UNPROVEN_OPTIONS;
     }
     return result;
   }
@@ -2490,11 +2503,86 @@ class ValueTable {
       ?? this.proveStartsWith(node.condition, file, bindings, seen);
     if (proven === true) return this.callTargets(node.whenTrue, file, bindings, seen);
     if (proven === false) return this.callTargets(node.whenFalse, file, bindings, seen);
+    const joined = this.pathJoinTargets(node, file, bindings, seen);
+    if (joined !== undefined) return joined;
     const whenTrue = this.callTargets(node.whenTrue, file, bindings, seen);
     const whenFalse = this.callTargets(node.whenFalse, file, bindings, seen);
     if (whenTrue === undefined || whenFalse === undefined) return undefined;
     const combined = [...whenTrue, ...whenFalse];
     return combined.length > MAX_CALL_TARGETS ? undefined : combined;
+  }
+
+  /**
+   * The path-join idiom: ``x.endsWith('/') ? `${x}<rest>` : `${x}/<rest>` `` —
+   * the test and both arms name the SAME `x`, and the arms differ only by
+   * the one joining slash. Both arms build the same URL, so the
+   * conditional proves exactly ONE target: the joined template
+   * `${x}/<rest>` (the false arm; the true arm is its slash-less twin,
+   * and rendering both emitted the ghost shape with the hole glued onto
+   * the base). Every other conditional returns undefined here and keeps
+   * the both-arms union.
+   */
+  private pathJoinTargets(
+    node: ts.ConditionalExpression,
+    file: string,
+    bindings: ExprBinding | undefined,
+    seen: Set<string>,
+  ): readonly string[] | undefined {
+    const condition = unwrapOwnExpression(node.condition);
+    if (
+      !ts.isCallExpression(condition) ||
+      !ts.isPropertyAccessExpression(condition.expression) ||
+      condition.expression.name.text !== 'endsWith' ||
+      condition.arguments.length !== 1
+    ) {
+      return undefined;
+    }
+    const probe = condition.arguments[0];
+    if (
+      probe === undefined ||
+      !(ts.isStringLiteral(probe) || ts.isNoSubstitutionTemplateLiteral(probe)) ||
+      probe.text !== '/'
+    ) {
+      return undefined;
+    }
+    const receiver = unwrapOwnExpression(condition.expression.expression);
+    if (!this.singleSlashJoinArms(node.whenTrue, node.whenFalse, receiver)) return undefined;
+    return this.callTargets(node.whenFalse, file, bindings, seen);
+  }
+
+  /** True when the two arms are `${x}<rest>` and `${x}/<rest>` for the same `x`. */
+  private singleSlashJoinArms(
+    whenTrue: ts.Expression,
+    whenFalse: ts.Expression,
+    receiver: ts.Expression,
+  ): boolean {
+    const trueArm = unwrapOwnExpression(whenTrue);
+    const falseArm = unwrapOwnExpression(whenFalse);
+    if (!ts.isTemplateExpression(trueArm) || !ts.isTemplateExpression(falseArm)) return false;
+    if (trueArm.head.text !== '' || falseArm.head.text !== '') return false;
+    const trueSpans = trueArm.templateSpans;
+    const falseSpans = falseArm.templateSpans;
+    if (trueSpans.length === 0 || trueSpans.length !== falseSpans.length) return false;
+    const trueHead = trueSpans[0];
+    const falseHead = falseSpans[0];
+    if (trueHead === undefined || falseHead === undefined) return false;
+    if (
+      unwrapOwnExpression(trueHead.expression).getText() !== receiver.getText() ||
+      unwrapOwnExpression(falseHead.expression).getText() !== receiver.getText()
+    ) {
+      return false;
+    }
+    if (falseHead.literal.text !== `/${trueHead.literal.text}`) return false;
+    for (let index = 1; index < trueSpans.length; index += 1) {
+      const trueSpan = trueSpans[index];
+      const falseSpan = falseSpans[index];
+      if (trueSpan === undefined || falseSpan === undefined) return false;
+      if (trueSpan.literal.text !== falseSpan.literal.text) return false;
+      if (unwrapOwnExpression(trueSpan.expression).getText() !== unwrapOwnExpression(falseSpan.expression).getText()) {
+        return false;
+      }
+    }
+    return true;
   }
 
   /** `expr.startsWith('literal')` when `expr` is exactly one literal. Otherwise unproven. */

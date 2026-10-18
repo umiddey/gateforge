@@ -19,6 +19,7 @@ import { performance } from 'node:perf_hooks';
 import {
   ClaimSchema,
   ClassificationSignalSchema,
+  DISPOSITION_MAX_DAYS,
   PolicyFileSchema,
   PolicyEvaluationError,
   RunManifestSchema,
@@ -564,6 +565,8 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
       compiled = compileBehaviorPolicy({
         graph,
         policy: parseBehaviorPolicy(loadYaml(behaviorPath, 'behavior policy')),
+        now: clock.now(),
+        maxDurationMs: (config.disposition?.maxDays ?? DISPOSITION_MAX_DAYS) * 86_400_000,
       });
     } catch (error) {
       if (error instanceof PolicyEvaluationError) throw new UsageError(error.message);

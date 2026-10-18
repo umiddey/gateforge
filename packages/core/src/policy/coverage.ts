@@ -20,6 +20,10 @@
  *   tables block until mappings or dispositions exist.
  */
 import { compareStrings } from '../graph/util.js';
+import {
+  dispositionExpiry,
+  type DispositionExpiryOptions,
+} from '../schemas/disposition.js';
 import { CAUSE_NEXT_ACTIONS, type CauseCode } from '../schemas/verdict.js';
 import type { CoverageOperation, CoverageTable } from '../schemas/coverage-policy.js';
 
@@ -45,22 +49,22 @@ export interface MappedCoverage {
   testKind: string;
 }
 
-/** Configuration-error finding: the policy names a table the inventory cannot see. */
+/** Configuration-error finding: the policy is not checkable as written. */
 export interface CoverageConfigError {
-  /** Always `COVERAGE_TABLE_UNKNOWN`. */
-  code: 'COVERAGE_TABLE_UNKNOWN';
-  /** The unknown policy table name. */
+  /** `COVERAGE_TABLE_UNKNOWN`, or `DISPOSITION_MAX_DURATION` for an over-long disposition expiry. */
+  code: 'COVERAGE_TABLE_UNKNOWN' | 'DISPOSITION_MAX_DURATION';
+  /** The unknown policy table name (or the table owning the over-long disposition). */
   table: string;
   /** Single-cause explanation; callers turn this into exit 2. */
   detail: string;
 }
 
-/** Blocking finding: required real-UI coverage is missing and undispositioned. */
+/** Blocking finding: required real-UI coverage is missing, or a disposition expired. */
 export interface CoverageBlockingFinding {
-  /** Always `CRUD_COVERAGE_MISSING` (plan §3.6/§5.4). */
-  code: 'CRUD_COVERAGE_MISSING';
+  /** `CRUD_COVERAGE_MISSING` (plan §3.6/§5.4), or `DISPOSITION_EXPIRED` for a voided disposition. */
+  code: 'CRUD_COVERAGE_MISSING' | 'DISPOSITION_EXPIRED';
   /** Stable cause code carried into the shared report model. */
-  cause: Extract<CauseCode, 'CRUD_COVERAGE_MISSING'>;
+  cause: Extract<CauseCode, 'CRUD_COVERAGE_MISSING' | 'DISPOSITION_EXPIRED'>;
   /** The table lacking coverage. */
   table: string;
   /** The uncovered operation; null for a whole-table dropped violation. */
@@ -93,7 +97,12 @@ const CRUD_COVERAGE_MISSING_CAUSE = CAUSE_NEXT_ACTIONS['CRUD_COVERAGE_MISSING'];
  * - inventory table absent from the policy → blocking (closed-world: a
  *   silently dropped table is a violation);
  * - dispositioned table → excused (the disposition is a trusted owner
- *   act recorded in config, never an agent self-approval);
+ *   act recorded in config, never an agent self-approval) — unless its
+ *   optional `expiresAt` has passed the injected `now`: then the
+ *   disposition is VOID and the table grades as if undispositioned, plus
+ *   a blocking `DISPOSITION_EXPIRED` finding names the table, the expiry
+ *   and the extend command; an `expiresAt` further out than the
+ *   configured maximum is a CONFIG-ERROR (`DISPOSITION_MAX_DURATION`);
  * - otherwise each required operation without a real-UI
  *   (`browser-e2e`/`observed-e2e`) mapping → blocking
  *   `CRUD_COVERAGE_MISSING`.
@@ -103,6 +112,8 @@ const CRUD_COVERAGE_MISSING_CAUSE = CAUSE_NEXT_ACTIONS['CRUD_COVERAGE_MISSING'];
  *   inventory: the current run's user-facing table inventory (REQUIRED).
  *   mappedCoverage: resolved test mappings; may be empty while the
  *     mapping subsystem is unbuilt (Phase 2-3).
+ *   options: injected clock + maximum disposition duration (REQUIRED —
+ *     expiry is never judged against the wall clock).
  *
  * Returns:
  *   CoveragePolicyResult: sorted config errors and blocking findings.
@@ -110,7 +121,8 @@ const CRUD_COVERAGE_MISSING_CAUSE = CAUSE_NEXT_ACTIONS['CRUD_COVERAGE_MISSING'];
 export function evaluateCoveragePolicy(
   tables: readonly CoverageTable[],
   inventory: readonly CoverageInventoryTable[],
-  mappedCoverage: readonly MappedCoverage[] = [],
+  mappedCoverage: readonly MappedCoverage[],
+  options: DispositionExpiryOptions,
 ): CoveragePolicyResult {
   const inventoryByName = new Map<string, CoverageInventoryTable[]>();
   for (const entry of inventory) {
@@ -138,8 +150,37 @@ export function evaluateCoveragePolicy(
       continue;
     }
     // A recorded owner disposition excuses the table's required
-    // operations (trusted-policy act, ADR 0005 D5).
-    if (table.disposition !== undefined) continue;
+    // operations (trusted-policy act, ADR 0005 D5) — unless its optional
+    // expiry has passed the injected clock: then the disposition is VOID
+    // (the table grades as if undispositioned) and the expiry itself
+    // blocks with `DISPOSITION_EXPIRED`. An over-long expiry fails the
+    // run closed as a configuration error.
+    let excused = table.disposition !== undefined;
+    if (table.disposition !== undefined) {
+      const expiry = dispositionExpiry(table.disposition, options);
+      if (expiry.state === 'over-max') {
+        configErrors.push({
+          code: 'DISPOSITION_MAX_DURATION',
+          table: table.name,
+          detail: `coverage policy: table '${table.name}' disposition ${expiry.detail}`,
+        });
+        continue;
+      }
+      if (expiry.state === 'expired') {
+        excused = false;
+        blocking.push({
+          code: 'DISPOSITION_EXPIRED',
+          cause: 'DISPOSITION_EXPIRED',
+          table: table.name,
+          operation: null,
+          detail:
+            `coverage policy: table '${table.name}' disposition expired at '${expiry.expiresAt}' — ` +
+            'the exemption is void; extend it (`gateforge disposition extend`) or remove it and cover the table',
+          nextAction: CAUSE_NEXT_ACTIONS['DISPOSITION_EXPIRED'],
+        });
+      }
+    }
+    if (excused) continue;
     for (const operation of table.requiredOperations) {
       // Real-UI coverage (plan §3.2 + Observe channel): `browser-e2e`
       // (engine-driven) and `observed-e2e` (suite-driven over the session

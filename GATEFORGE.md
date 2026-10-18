@@ -37,6 +37,10 @@ You are gated by Gateforge. Work one blocking item at a time.
   baselines, or plugin lists to make the gate pass. Those are
   owner-controlled; an agent edit never authorizes weaker checks.
 - Coverage dispositions are owner acts. Strict-E2E waivers are not proof.
+- Dispositions may carry an `expiresAt` timer: once it passes the
+  disposition is void and the gate blocks with `DISPOSITION_EXPIRED`
+  until the owner renews it with `gateforge disposition extend`.
+  Extending is an owner act, like every other policy edit.
 
 ## Capability gaps
 

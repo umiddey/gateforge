@@ -8,6 +8,7 @@
  * revision identity.
  */
 import { z } from 'zod';
+import { DispositionExtensionSchema } from './disposition.js';
 
 /** The four real-UI operations a table may require coverage for. */
 export const COVERAGE_OPERATIONS = ['create', 'read', 'update', 'delete'] as const;
@@ -29,6 +30,15 @@ export const CoverageDispositionSchema = z
     kind: z.enum(['read-only-surface', 'admin-plane-unreachable', 'not-user-facing', 'other']),
     /** Why the disposition applies; REQUIRED for `other` (auditability). */
     note: z.string().min(1).optional(),
+    /**
+     * Optional expiry instant (ISO-8601): when present the disposition
+     * is judged against the injected run clock and is VOID at/after the
+     * instant — the table grades as if undispositioned and a blocking
+     * `DISPOSITION_EXPIRED` finding names it.
+     */
+    expiresAt: z.iso.datetime().optional(),
+    /** Audit trail: one entry per `gateforge disposition extend`. */
+    extensions: z.array(DispositionExtensionSchema).optional(),
   })
   .strict()
   .superRefine((disposition, ctx) => {
