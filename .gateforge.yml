@@ -48,6 +48,10 @@ project:
       - 'CHANGELOG.md'
       # Maintainer rules for agents working on this repo (owner 2026-10-17).
       - 'AGENTS.md'
+      # Maintainer release history and the example app's guide: prose only,
+      # updated with every feature like CHANGELOG.md (Main 2026-10-18).
+      - 'HISTORY.md'
+      - 'example/GATEFORGE.md'
 # Detector plugins. This repository IS the gate: its product code is the
 # CLI itself and declares no HTTP endpoints, models or pages of its own.
 # The scan's fastapi/sqlalchemy/express signals come from this repo's own

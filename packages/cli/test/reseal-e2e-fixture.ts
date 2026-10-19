@@ -474,8 +474,11 @@ export function evidenceAdapter(baseUrl: string): string {
   ].join('\n');
 }
 
-/** The sidecar mapping the named evidence tests, declared `server-e2e`. */
-export function evidenceTestMap(names: readonly string[] = DEFAULT_EVIDENCE_NAMES): string {
+/** The sidecar mapping the named evidence tests; `contract` selects the claimed obligation. */
+export function evidenceTestMap(
+  names: readonly string[] = DEFAULT_EVIDENCE_NAMES,
+  contract = 'persistence:read',
+): string {
   return [
     'schemaVersion: 1',
     'tests:',
@@ -486,9 +489,13 @@ export function evidenceTestMap(names: readonly string[] = DEFAULT_EVIDENCE_NAME
       `      file: ${evidenceSpecFile(row.name)}`,
       '      titlePath:',
       `        - ${row.title}`,
-      '    kind: server-e2e',
+      // `server-e2e` unlocks the server-witnessed persistence channel, and
+      // the witness accepts server intents for `persistence:*` claimIds
+      // ONLY — a non-persistence contract is declared kindless so the
+      // mapping stays an honest plain claim.
+      ...(contract.startsWith('persistence:') ? ['    kind: server-e2e'] : []),
       '    claims:',
-      `      - tenant.${row.name}:persistence:read`,
+      `      - tenant.${row.name}:${contract}`,
       `    reason: the witness probes the ${row.row} row server-side while this test runs`,
     ]),
     '',
@@ -501,9 +508,16 @@ export const EVIDENCE_TEST_MAP: string = evidenceTestMap();
  * The evidence stub runner: the wire-registration pattern plus the two
  * suite-side channels a real reporter drives — the persistence-intent
  * spool (the witness observes; the suite only declares) and the
- * witness-issued ledger copy the evaluator reads.
+ * witness-issued ledger copy the evaluator reads. `contract` names the
+ * claimed obligation's contract; only `persistence:*` claims write
+ * server intents (the witness validates server-intent claimIds against
+ * `<resourceId>:persistence:<op>` and refuses anything else).
  */
-export function evidenceStubCli(names: readonly string[] = DEFAULT_EVIDENCE_NAMES): string {
+export function evidenceStubCli(
+  names: readonly string[] = DEFAULT_EVIDENCE_NAMES,
+  contract = 'persistence:read',
+): string {
+  const persistenceIntents = contract.startsWith('persistence:');
   return [
   "const { readFileSync, writeFileSync, mkdirSync } = require('node:fs');",
   'const argv = process.argv.slice(2);',
@@ -538,18 +552,22 @@ export function evidenceStubCli(names: readonly string[] = DEFAULT_EVIDENCE_NAME
   '  const intents = [];',
   '  const events = selected.flatMap((file) => {',
   '    const declared = /__EVIDENCE__ (tenant\\.[a-z]+)/.exec(readFileSync(file, "utf8"));',
-  '    if (declared !== null) {',
-  '      intents.push({',
-  '        entity: declared[1],',
-  '        operation: "read",',
-  '        phase: "post",',
-  '        intent: "expect-present",',
-  '        key: "acc-1",',
-  '        claimId: declared[1] + ":persistence:read",',
-  '        testId: keys[file],',
-  '        sequence: 1,',
-  '      });',
-  '    }',
+  ...(persistenceIntents
+    ? [
+        '    if (declared !== null) {',
+        '      intents.push({',
+        '        entity: declared[1],',
+        '        operation: "read",',
+        '        phase: "post",',
+        '        intent: "expect-present",',
+        '        key: "acc-1",',
+        `        claimId: declared[1] + ":${contract}",`,
+        '        testId: keys[file],',
+        '        sequence: 1,',
+        '      });',
+        '    }',
+      ]
+    : []),
   "    return [",
   "      { kind: 'testBegin', testId: file, workerIndex: 0, file, titlePath: [titles[file]], project: 'chromium' },",
   "      { kind: 'testEnd', testId: file, workerIndex: 0, file, titlePath: [titles[file]], project: 'chromium', outcome: fails(file) ? 'failed' : 'passed', attempt: 1 },",

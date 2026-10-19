@@ -36,6 +36,19 @@ You are gated by Gateforge. Work one blocking item at a time.
 - Never edit `.gateforge/policies.yml`, `coveragePolicy`, waivers,
   baselines, or plugin lists to make the gate pass. Those are
   owner-controlled; an agent edit never authorizes weaker checks.
+- `gateforge coverage draft` only PRINTS the owner draft — it never
+  writes. Under `strictE2E` an absent or empty `coveragePolicy` blocks
+  with `COVERAGE_POLICY_ABSENT` until the OWNER reviews the draft, pastes
+  it into `.gateforge.yml`, and repins. Pasting it is the owner act, like
+  every other policy edit.
+- `gateforge behavior draft` only PRINTS the owner draft — it never
+  writes. An undeclared endpoint stays `ENDPOINT_BEHAVIOR_MISSING`
+  until the OWNER reviews the draft, fills real cases or a disposition,
+  pastes it into `.gateforge/behavior.yml`, and repins.
+- `gateforge disposition list` only PRINTS dispositions. It never writes.
+- `operational-only` is legal only on a positively classified health/ops
+  route with no business-resource link. A business link, or any unmarked
+  route, stays illegal.
 - Coverage dispositions are owner acts. Strict-E2E waivers are not proof.
 - Dispositions may carry an `expiresAt` timer: once it passes the
   disposition is void and the gate blocks with `DISPOSITION_EXPIRED`

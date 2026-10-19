@@ -13,17 +13,22 @@ export {
   PERSISTENCE_CONTRACT_PREFIX,
   BlockingEntrySchema,
   ClaimAssessmentSchema,
+  ExcusedObligationSchema,
   PolicyEvaluationError,
   PolicyEvaluationResultSchema,
+  activeRuleExcuses,
   classificationBlockedIdentity,
   evaluatePolicies,
   lifecycleAllowsContract,
 } from './evaluate.js';
 export type {
+  ActiveRuleExcuses,
   BlockingEntry,
   ClaimAssessment,
+  ExcusedObligation,
   PolicyEvaluationInput,
   PolicyEvaluationResult,
+  RuleExcuse,
 } from './evaluate.js';
 export {
   evaluateCoveragePolicy,

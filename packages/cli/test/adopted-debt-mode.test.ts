@@ -36,6 +36,7 @@ import {
   CLASSIFICATION_POLICY_YML,
   PLUGIN_SOURCE,
   POLICIES_YML,
+  POLICY_ID,
   configYml,
   runCli,
 } from './helpers.js';
@@ -55,8 +56,19 @@ const HOOK_PATH = '.gateforge/hooks/gateforge-check.mjs';
 /** The generated CI wiring `init --blocking` installs. */
 const CI_WIRING = "include:\n  - local: '.gateforge/ci/gitlab-gateforge.yml'\n";
 
+/**
+ * The contract the fixture's claims and policies speak (plan 2026-10-19
+ * P5): the fixture tables stay dispositioned (strict E2E needs the owner
+ * policy), and an ACTIVE table disposition withholds `persistence:*` rule
+ * obligations — so the debt these scenarios adopt and re-grade must be a
+ * contract a disposition does not excuse. `crud:read` is exactly that,
+ * and the sidecar/stub-runner claims below must name the ids that
+ * compile, or `--scope changed` maps zero obligations.
+ */
+const EVIDENCE_CONTRACT = 'crud:read';
+
 /** The pre-existing obligation no test claims and adoption never touches. */
-const UNTOUCHED_DEBT = 'tenant.refunds:persistence:read';
+const UNTOUCHED_DEBT = `tenant.refunds:${EVIDENCE_CONTRACT}`;
 
 /** The resources whose specs and mapping the adoption commit adds. */
 const ADOPTED_NAMES = ['accounts', 'orders'] as const;
@@ -70,10 +82,48 @@ function enforcementBlock(adoptedDebt: 'absent' | 'lenient' | 'strict'): string 
   return `mode: changed\nenforcement:\n  strictE2E: true\n${key}`;
 }
 
+/**
+ * The owner coverage policy the adoption commit declares (plan
+ * 2026-10-18): a strict-E2E setup blocks without one, so the gate lands
+ * WITH the owner's policy — every fixture table dispositioned, which
+ * keeps these scenarios about adopted-debt semantics, not coverage.
+ */
+const ADOPTED_COVERAGE_POLICY = `coveragePolicy:
+  tables:
+    - name: accounts
+      requiredOperations: [read]
+      disposition:
+        kind: not-user-facing
+    - name: orders
+      requiredOperations: [read]
+      disposition:
+        kind: not-user-facing
+    - name: refunds
+      requiredOperations: [read]
+      disposition:
+        kind: not-user-facing
+`;
+
 /** The fixture config for one adopted-debt value. */
 function fixtureConfig(adoptedDebt: 'absent' | 'lenient' | 'strict'): string {
-  return `${enforcementBlock(adoptedDebt)}${configYml()}`;
+  return `${enforcementBlock(adoptedDebt)}${ADOPTED_COVERAGE_POLICY}${configYml()}`;
 }
+
+/**
+ * The fixture policies (plan 2026-10-19 P5): the tables stay dispositioned
+ * (strict E2E needs the owner policy), so the debt these scenarios adopt
+ * and re-grade is EVIDENCE_CONTRACT (`crud:read`), which a table
+ * disposition does not excuse — see the constant above.
+ */
+const FIXTURE_POLICIES_YML = `\
+schemaVersion: 1
+policies:
+  - id: ${POLICY_ID}
+    when:
+      exposure: user-facing
+    require:
+      - ${EVIDENCE_CONTRACT}
+`;
 
 /** The install manifest the adoption commit writes (a gate-defining input). */
 function manifest(version: string): string {
@@ -123,23 +173,27 @@ async function installUngated(repo: TempRepo, appUrl: string): Promise<void> {
     // NO `enforcement` block at all: that is what "no gate at HEAD" means
     // to the computed adoption verdict, and the whole point of the fixture.
     '.gateforge.yml': configYml(),
-    '.gateforge/policies.yml': POLICIES_YML,
+    '.gateforge/policies.yml': FIXTURE_POLICIES_YML,
     '.gateforge/classification-policy.yml': CLASSIFICATION_POLICY_YML,
     'plugin.mjs': PLUGIN_SOURCE,
     'src/refunds.txt': 'refunds fixture.table\n',
     '.gateforge/adapters/refunds.mjs': evidenceAdapter(appUrl),
     ...Object.fromEntries(ADOPTED_NAMES.map((name) => [`src/${name}.txt`, `${name} fixture.table\n`])),
     ...Object.fromEntries(ADOPTED_NAMES.map((name) => [`.gateforge/adapters/${name}.mjs`, evidenceAdapter(appUrl)])),
-    ...stubPlaywrightFiles(evidenceStubCli(ADOPTED_NAMES)),
+    ...stubPlaywrightFiles(evidenceStubCli(ADOPTED_NAMES, EVIDENCE_CONTRACT)),
   });
   repo.commitFiles({}, 'existing product code, no gate yet');
 }
 
 /**
  * The ADOPTION COMMIT: the gate wiring plus the specs, the sidecar, the
- * runner configuration and the manifest that give the two pre-existing
- * resources their proof. `adopt` records the untouched third obligation as
- * debt. Returns the owner pin for the staged bytes (taken LAST, after
+ * runner configuration and the manifest that claim the two pre-existing
+ * resources' obligations (`crud:read` — under P5 the dispositioned tables
+ * carry no `persistence:*` obligations, and a stub runner cannot produce
+ * the browser-session evidence `crud:` grades on, so these claims grade
+ * `missing` and `adopt` baselines them as debt beside the untouched
+ * third). `adopt` records every then-unproven obligation as debt.
+ * Returns the owner pin for the staged bytes (taken LAST, after
  * `git add`, because `check --staged` digests the index while `test-gates`
  * digests the worktree).
  */
@@ -152,9 +206,10 @@ async function stageAdoptionCommit(
     '.gateforge/ci/gitlab-gateforge.yml': '# generated by gateforge\n',
     '.gitlab-ci.yml': CI_WIRING,
     '.gateforge.yml': fixtureConfig(adoptedDebt),
+    '.gateforge/policies.yml': FIXTURE_POLICIES_YML,
     'package.json': manifest('1.0.0'),
     ...evidenceSpecs(ADOPTED_NAMES, true),
-    '.gateforge/test-map.yml': evidenceTestMap(ADOPTED_NAMES),
+    '.gateforge/test-map.yml': evidenceTestMap(ADOPTED_NAMES, EVIDENCE_CONTRACT),
     'playwright.config.mjs': "export default { testDir: 'e2e', projects: [{ name: 'chromium' }] };\n",
   });
   const adopted = await runCli(repo, ['adopt']);
@@ -173,7 +228,7 @@ async function stageAdoptionCommit(
 function writeNeutralLaterCommit(repo: TempRepo, extra: Record<string, string> = {}): void {
   repo.writeFiles({
     'package.json': manifest('1.0.1'),
-    '.gateforge/test-map.yml': `${evidenceTestMap(ADOPTED_NAMES)}# reviewed with the runner config\n`,
+    '.gateforge/test-map.yml': `${evidenceTestMap(ADOPTED_NAMES, EVIDENCE_CONTRACT)}# reviewed with the runner config\n`,
     'playwright.config.mjs':
       "export default { testDir: 'e2e', projects: [{ name: 'chromium' }] };\n// the headed wrapper\n",
     ...extra,
@@ -300,10 +355,18 @@ describe('0.10.4 the leniency is exactly as narrow as the neutrality', () => {
         writeNeutralLaterCommit(repo, {
           [ADOPTED_SOURCE]: `${ADOPTED_NAMES[0]} fixture.table\n# touched by a later commit\n`,
         });
-        const env = gateEnv(pinFor(repo));
-        await sealScopedReceipt(repo, env);
-
-        const run = await runStagedCheck(repo, env);
+        // Graded directly (no receipt demanded), like the baseline-scope
+        // test below: under P5 the dispositioned tables carry only
+        // `crud:` obligations, and a stub runner produces no browser-
+        // session evidence for them, so a NON-neutral change set's
+        // scoped run can never seal (strict E2E refuses a baselined
+        // waiver as authorization) — the VERDICT is what this test
+        // isolates.
+        const run = await runCli(
+          repo,
+          ['check', '--staged', '--format', 'json'],
+          gateEnv(pinFor(repo)),
+        );
         const output = `${run.stdout}\n${run.stderr}`;
         const report = JSON.parse(run.stdout) as Report;
 
@@ -353,14 +416,15 @@ describe('0.10.4 the forgiveness covers adopted-baseline entries only', () => {
         await landAdoptionCommit(repo, app.url, 'absent');
 
         // A NEUTRAL change set that makes a policy claim the fixtures do
-        // not carry: a second policy adds `persistence:delete` to every
-        // user-facing resource. Those obligations arise AFTER adoption,
-        // so no baseline entry forgives them and nothing proves them. The
-        // run is graded directly (no receipt demanded), which isolates the
-        // VERDICT the forgiveness must not touch.
+        // not carry: a second policy adds `auth:role-denied` to every
+        // user-facing resource (a contract no table disposition excuses).
+        // Those obligations arise AFTER adoption, so no baseline entry
+        // forgives them and nothing proves them. The run is graded
+        // directly (no receipt demanded), which isolates the VERDICT the
+        // forgiveness must not touch.
         repo.writeFiles({
           '.gateforge/policies.yml':
-            `${POLICIES_YML}  - id: fixture.delete\n    when:\n      exposure: user-facing\n    require:\n      - persistence:delete\n`,
+            `${FIXTURE_POLICIES_YML}  - id: fixture.auth\n    when:\n      exposure: user-facing\n    require:\n      - auth:role-denied\n`,
         });
         repo.stage();
 
@@ -372,7 +436,7 @@ describe('0.10.4 the forgiveness covers adopted-baseline entries only', () => {
         // and the obligation that arose after adoption still blocks: the
         // forgiveness covers adopted-baseline entries only.
         expect(verdictOf(report, UNTOUCHED_DEBT), output).toBe('waived');
-        expect(verdictOf(report, `${UNTOUCHED_DEBT.split(':')[0]}:persistence:delete`), output).toBe('missing');
+        expect(verdictOf(report, `${UNTOUCHED_DEBT.split(':')[0]}:auth:role-denied`), output).toBe('missing');
         expect(run.code, output).not.toBe(0);
       });
     } finally {

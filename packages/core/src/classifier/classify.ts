@@ -340,29 +340,72 @@ function isPositiveExposure(signal: ClassificationSignal): boolean {
 }
 
 /**
- * The precise operational-endpoint class (plan §6 "Health/operations",
- * ADR 0004 D5): an `http.endpoint` whose compiled capabilities are
- * EXACTLY `health-operations` and that has NO linked business resource —
- * the same class the operational plane rule resolves to `global`
- * (`resolveEndpointPlanes`). The capability set comes from the
- * deterministic compiler rule `HEALTH_PATH_NO_SCHEMA` (GET/HEAD, no
- * request schema, no business link, and a root-hung infrastructure-probe
- * path shape — segment-exact probe words at depth <= 2 or the bare root).
- * Positive detector facts, never absence-as-internal. Any additional
- * capability (a health-path route whose response model also corroborated
- * crud-read, a command suffix, …) or any business link keeps the endpoint
- * in the full user-facing lattice: fail closed.
+ * Probe segments the endpoint compiler treats as infrastructure at
+ * depth <= 2. Kept in lockstep with `OPERATIONAL_PROBE_SEGMENTS` in
+ * the CLI compiler — core cannot import it. `ops` is deliberately
+ * absent there (business vocabulary at any depth); the rooted `/ops`
+ * prefix below is the plan 2026-10-19 exception, not a segment match.
  */
-function isOperationalEndpoint(resource: ClassifierResourceRef): boolean {
+const OPERATIONAL_PROBE_SEGMENTS: Record<string, true> = {
+  health: true,
+  healthz: true,
+  ready: true,
+  readyz: true,
+  live: true,
+  livez: true,
+  drain: true,
+  metrics: true,
+  ping: true,
+  version: true,
+  info: true,
+};
+
+/**
+ * Positive health/ops path mark (plan 2026-10-19 P3).
+ *
+ * Rooted prefixes the owner named (`/health`, `/ops`, `/metrics`)
+ * and the same roots under a single `/api` prefix qualify at any
+ * depth. The compiler's depth-capped probe segments and the bare
+ * root also qualify, so a route the compiler already treats as a
+ * probe stays in the class. A later segment spelled `health`
+ * (`/admin/clients/{}/health`, `/api/v1/payment-dashboard/health`)
+ * does not.
+ */
+function isHealthOpsPath(canonicalPath: string): boolean {
+  if (canonicalPath === '/') return true;
+  const roots = ['/health', '/ops', '/metrics', '/api/health', '/api/ops', '/api/metrics'];
+  for (const root of roots) {
+    if (canonicalPath === root || canonicalPath.startsWith(`${root}/`)) return true;
+  }
+  const segments = canonicalPath.split('/').filter((segment) => segment.length > 0);
+  if (segments.length === 0 || segments.length > 2) return false;
+  return segments.some((segment) => OPERATIONAL_PROBE_SEGMENTS[segment.toLowerCase()] === true);
+}
+
+/**
+ * The operational-endpoint class (plan §6 "Health/operations", ADR 0004
+ * D5, widened by plan 2026-10-19 P3).
+ *
+ * An `http.endpoint` with NO linked business resource qualifies when
+ * the classifier positively marks it health/ops: capabilities include
+ * `health-operations`, or `canonicalPath` is a health/ops probe
+ * (`/health/*`, `/ops/*`, `/metrics`, the same roots under `/api`, the compiler's depth-capped
+ * probe segments, or `/`). Extra transport capabilities (crud-create,
+ * file-transfer, workflow-command, and any other composed capability)
+ * do not disqualify. A business link, or any unmarked route, fails
+ * closed. Positive marks only — never absence-as-internal.
+ */
+export function isPositivelyClassifiedHealthOperations(resource: {
+  kind: string;
+  attributes: Record<string, unknown>;
+}): boolean {
   if (resource.kind !== HTTP_ENDPOINT_RESOURCE_KIND) return false;
   const linked = resource.attributes['linkedResourceName'];
   if (typeof linked === 'string' && linked.length > 0) return false;
   const capabilities = resource.attributes['capabilities'];
-  return (
-    Array.isArray(capabilities) &&
-    capabilities.length === 1 &&
-    capabilities[0] === 'health-operations'
-  );
+  if (Array.isArray(capabilities) && capabilities.includes('health-operations')) return true;
+  const path = resource.attributes['canonicalPath'];
+  return typeof path === 'string' && isHealthOpsPath(path);
 }
 
 /**
@@ -1231,11 +1274,12 @@ function classifyOne(
   if (resource.kind === UI_PAGE_RESOURCE_KIND) {
     exposure = 'user-facing';
     rules.push(RULES.exposurePageAudience);
-  } else if (isOperationalEndpoint(resource)) {
+  } else if (isPositivelyClassifiedHealthOperations(resource)) {
     // Operational probes (plan §6 "Health/operations") resolve through an
     // engine-issued exposure lane, NOT the user-facing default and NOT an
-    // internality certificate: the class itself is positive compiler
-    // evidence (HEALTH_PATH_NO_SCHEMA, no business resource link). The
+    // internality certificate: the class itself is a positive health/ops
+    // mark (path/name or a health-operations capability, no business
+    // link), even when a transport capability is also present. The
     // architecture assigns these endpoints dependency-ready/degraded
     // behavior evidence and explicitly "no artificial browser UI
     // obligation" — so they must never demand a reviewed UI evidence

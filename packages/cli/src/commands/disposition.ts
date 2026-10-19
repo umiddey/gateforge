@@ -20,10 +20,12 @@ import {
   CoverageDispositionSchema,
   DISPOSITION_MAX_DAYS,
   GateforgeConfigSchema,
+  canonicalJson,
   dispositionExpiry,
   type BehaviorDisposition,
   type CoverageDisposition,
   type GateforgeConfig,
+  type JsonValue,
 } from '@gate-forge/core';
 import {
   isMap,
@@ -52,7 +54,13 @@ export const DISPOSITION_USAGE =
   `       maximum (${String(DISPOSITION_MAX_DAYS)} days by default, \`disposition.maxDays\`) out. A disposition\n` +
   '       without an `expiresAt` has no timer to extend (record one by editing the policy).\n' +
   '       This command only EDITS trusted policy — it never pins and never approves a\n' +
-  '       digest; the existing digest/pin flow applies to the edited revision.';
+  '       digest; the existing digest/pin flow applies to the edited revision.\n' +
+  'usage: gateforge disposition list [--json]\n' +
+  '       Every disposition the two policy documents declare (behaviorPolicy endpoints\n' +
+  "       and coveragePolicy tables) with surface, id, kind, reason, expiresAt and the\n" +
+  '       judged state (active/expired/no-expiry) and what an active disposition excuses\n' +
+  '       (`rule-obligations`, `persistence`, or none). Read-only: reads the documents, runs\n' +
+  '       nothing, writes nothing.';
 
 /** Flags the command accepts (plus the implicit `help`). */
 const DISPOSITION_FLAGS = ['owner', 'reason', 'expires', 'help'] as const;
@@ -262,15 +270,142 @@ function closeMatches(known: readonly string[], target: string): string[] {
     .slice(0, 5);
 }
 
+/** One listed disposition: the shared facts both surfaces carry. */
+interface DispositionListEntry {
+  /** Which policy document owns it (`endpoint` = behavior.yml, `table` = coveragePolicy). */
+  surface: 'endpoint' | 'table';
+  /** The behaviorPolicy endpoint id or the coveragePolicy table name. */
+  id: string;
+  /** The disposition kind. */
+  kind: string;
+  /** The recorded owner reason. */
+  reason: string;
+  /** The expiry instant, or null when the disposition has no timer. */
+  expiresAt: string | null;
+  /** The judged state against the injected run clock. */
+  state: 'active' | 'expired' | 'no-expiry' | 'over-max';
+  /**
+   * What an active disposition excuses from policies.yml. `null` when
+   * expired, over-max, or `operational-only` (transport case only).
+   */
+  excuses: 'rule-obligations' | 'persistence' | null;
+}
+
 /**
- * Runs the `disposition` subcommand (today: `extend`).
+ * Reads every disposition the two policy documents declare and lists
+ * them with the judged expiry state. Strictly READ-ONLY: the documents
+ * are parsed and validated, nothing is written and no pipeline runs.
+ *
+ * Args:
+ *   io: process context.
+ *   asJson: print canonical JSON instead of text lines.
+ *
+ * Returns:
+ *   number: exit code (0 on success).
+ * @throws UsageError (exit 2) when a declared document cannot be read
+ *   or is invalid — a disposition list of unvalidated policy would lie.
+ */
+async function dispositionList(io: Io, asJson: boolean): Promise<number> {
+  const config = loadConfigAt(io.cwd);
+  // `clockFromConfig` is the same injected run clock every evaluator
+  // uses — `clock.mode: fixed` repos get deterministic state output.
+  const now = clockFromConfig(config).now();
+  const maxDurationMs = (config.disposition?.maxDays ?? DISPOSITION_MAX_DAYS) * 86_400_000;
+  const entries: DispositionListEntry[] = [];
+
+  if (config.behaviorPolicy !== undefined) {
+    const documentPath = resolveRepoPath(io.cwd, config.behaviorPolicy);
+    let raw: string;
+    try {
+      raw = readFileSync(documentPath, 'utf8');
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code ?? 'UNKNOWN';
+      throw new UsageError(`disposition list: cannot read behavior policy file '${documentPath}' (${code})`);
+    }
+    const parsed = BehaviorPolicySchema.safeParse(parseYaml(raw));
+    if (!parsed.success) {
+      throw new UsageError(
+        `disposition list: behavior policy '${config.behaviorPolicy}' is invalid: ${firstIssue(parsed.error)}`,
+      );
+    }
+    for (const endpoint of parsed.data.endpoints) {
+      const disposition = endpoint.disposition;
+      if (disposition === undefined) continue;
+      entries.push({
+        surface: 'endpoint',
+        id: endpoint.resourceId,
+        kind: disposition.kind,
+        reason: disposition.reason,
+        expiresAt: disposition.expiresAt ?? null,
+        state: dispositionExpiry(disposition, { now, maxDurationMs }).state,
+        excuses: dispositionExcuse('endpoint', disposition.kind, dispositionExpiry(disposition, { now, maxDurationMs }).state),
+      });
+    }
+  }
+  if (config.coveragePolicy !== undefined) {
+    for (const table of config.coveragePolicy.tables) {
+      const disposition = table.disposition;
+      if (disposition === undefined) continue;
+      entries.push({
+        surface: 'table',
+        id: table.name,
+        kind: disposition.kind,
+        reason: disposition.reason ?? '',
+        expiresAt: disposition.expiresAt ?? null,
+        state: dispositionExpiry(disposition, { now, maxDurationMs }).state,
+        excuses: dispositionExcuse('table', disposition.kind, dispositionExpiry(disposition, { now, maxDurationMs }).state),
+      });
+    }
+  }
+  entries.sort(
+    (a, b) =>
+      compareListSurface(a.surface, b.surface) ||
+      (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+  );
+
+  if (asJson) {
+    writeLine(io.stdout, canonicalJson(entries as unknown as JsonValue));
+    return 0;
+  }
+  writeLine(io.stdout, `dispositions (${String(entries.length)}):`);
+  for (const entry of entries) {
+    writeLine(
+      io.stdout,
+      `  ${entry.surface} ${entry.id}  kind=${entry.kind}  state=${entry.state}` +
+        `  expires=${entry.expiresAt ?? 'none'}  excused=${entry.excuses ?? 'none'}`,
+    );
+    writeLine(io.stdout, `    reason: ${entry.reason}`);
+  }
+  return 0;
+}
+
+/** Stable surface order: endpoints before tables. */
+function compareListSurface(a: 'endpoint' | 'table', b: 'endpoint' | 'table'): number {
+  if (a === b) return 0;
+  return a === 'endpoint' ? -1 : 1;
+}
+
+/** What an active disposition excuses. Expired and operational-only excuse nothing. */
+function dispositionExcuse(
+  surface: 'endpoint' | 'table',
+  kind: string,
+  state: DispositionListEntry['state'],
+): 'rule-obligations' | 'persistence' | null {
+  if (state !== 'active' && state !== 'no-expiry') return null;
+  if (surface === 'endpoint' && kind === 'out-of-scope') return 'rule-obligations';
+  if (surface === 'table') return 'persistence';
+  return null;
+}
+
+/**
+ * Runs the `disposition` subcommand (`extend`, `list`).
  *
  * Args:
  *   io: process context.
  *   argv: flags after the subcommand.
  *
  * Returns:
- *   number: exit code — 0 disposition extended, 2 usage/validation.
+ *   number: exit code — 0 disposition extended/listed, 2 usage/validation.
  * @throws UsageError (exit 2) on any usage or fail-closed problem.
  */
 export async function dispositionCommand(io: Io, argv: readonly string[]): Promise<number> {
@@ -280,9 +415,16 @@ export async function dispositionCommand(io: Io, argv: readonly string[]): Promi
     return 0;
   }
   const subcommand = positionals[0];
+  if (subcommand === 'list') {
+    if (positionals.length !== 1) {
+      throw new UsageError(`disposition list takes no target (${DISPOSITION_USAGE})`);
+    }
+    rejectUnknownFlags(options, ['json', 'help'], DISPOSITION_USAGE);
+    return dispositionList(io, options['json'] === true);
+  }
   if (subcommand !== 'extend') {
     throw new UsageError(
-      `disposition requires the subcommand 'extend' as its first argument (${DISPOSITION_USAGE})`,
+      `disposition requires the subcommand 'extend' or 'list' as its first argument (${DISPOSITION_USAGE})`,
     );
   }
   const target = positionals[1];

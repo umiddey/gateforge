@@ -50,6 +50,9 @@ first commands; the guides cover the walks:
 
 
 
+| `gateforge coverage draft [--json]` | Print a paste-ready `coveragePolicy:` block derived from the CURRENT resource inventory — one entry per user-facing table, `requiredOperations` = that table's lifecycle-enabled operations, sorted by name, under a header that names the act: owner review required; pasting it is the owner act; repin afterwards. Strictly READ-ONLY: the command never writes any file, because declaring the policy is the owner's guarded act, never an agent's (`Never self-approve`). `--json` prints the same policy object as canonical JSON; the emitted block always parses through the production `CoveragePolicySchema`. | 0 clean; 2 config/usage error |
+| `gateforge behavior draft [--json]` | Print a paste-ready `behavior.yml` body derived from the CURRENT endpoint inventory — one entry per discovered `http.endpoint` with a plane-resolved id, sorted, each with `cases` commented out and a TODO. Header: owner review required; pasting it is the owner act; repin afterwards. Strictly READ-ONLY: the command never writes any file. An undeclared endpoint stays blocking `ENDPOINT_BEHAVIOR_MISSING`. `--json` prints the unfinished skeleton as canonical JSON; empty `cases` are not schema-valid by design, so the draft is not pretended to validate. | 0 clean; 2 config/usage error |
+| `gateforge disposition list [--json]` | Read-only inventory of every disposition the `behaviorPolicy` and `coveragePolicy` documents declare: surface, id, kind, reason, expiresAt, and state (`active`/`expired`/`no-expiry`), judged against the run clock. Never writes. | 0 clean; 2 config/usage error |
 | `gateforge next [--changed] [--json]` | Print the ONE blocking next action (`next`/`cause`/`why`/`do`; `--json` adds `remainingBlocking` and route-specific `guidance` when relevant). For an endpoint with no plane, ask which boundary owns its data and show the owner-reviewed choices; internality remains owner-only. Navigation, not the gate: never requires an E2E receipt. Exit 0 clean, 1 next action, 2 config/usage. | 0/1/2 |
 | `gateforge discover [--json]` | Run every configured detector over the expanded `project.paths` and dump the resource graph (default: human listing; `--json`: GF-canonical JSON). | 0 |
 | `gateforge classify [--json] [--write-snapshot <path>]` | Recompute effective classifications from detector signals and print decisions, traces, and typed blocks. `classify plane` previews or explicitly appends an owner-reviewed endpoint plane rule to the existing `planes:` section of the owner-answers document; snapshots are derived review artifacts and never pipeline input. | 0/1/2 |
@@ -787,6 +790,18 @@ check:
   sidecar cannot authorize weaker checks: gates evaluate under the trusted
   policy digest, so a weakened candidate fails closed until a separate
   trusted update is accepted.
+- `--strict-e2e` also refuses a setup whose owner `coveragePolicy` is absent
+  or empty with ONE setup-wide blocking `COVERAGE_POLICY_ABSENT` entry (never
+  diff-narrowed) that names how many user-facing tables the inventory would
+  have to declare. An inventory with zero user-facing tables needs no policy:
+  nothing can become undeclared, so the rule stays silent there. The
+  owner-written policy is the one gate input derived
+  from the owner's list instead of the code, so it is the only guard against
+  "delete the feature to pass" — removing the guarded code would otherwise
+  remove its own obligations and turn the gate green. Generate the draft
+  with `gateforge coverage draft`, review it, paste it into `.gateforge.yml`
+  as the owner, and re-pin. With strict E2E off the section stays opt-in and
+  its absence stays silent (byte-identical behaviour).
 
 **A change that is only `docs/**.md` is the engine's own.** No obligation
 can arise from a Markdown file, so a commit whose WHOLE changed set is
@@ -1371,15 +1386,25 @@ Enforcement-relevant sections:
 - `enforcement.adoptedDebt:` — `lenient | strict` (default `lenient`): how
   ADOPTED debt is treated under `strictE2E` after the adoption commit. See
   "Adopted debt after adoption" below.
-- `coveragePolicy:` (opt-in, fail closed) — the closed-world CRUD coverage
-  policy: enumerated user-facing tables (validated against the run's
+- `coveragePolicy:` (owner-owned, fail closed; opt-in while
+  `enforcement.strictE2E` is off, REQUIRED under it) — the closed-world CRUD
+  coverage policy: enumerated user-facing tables (validated against the run's
   resource inventory on EVERY run — an unknown table name is a config error,
   a silently dropped inventory table is a violation), required operations,
   and owner dispositions (`read-only-surface`, `admin-plane-unreachable`,
-  `not-user-facing`, `other`, with a note). With the policy enabled, an
+  `not-user-facing`, `other`). The shared disposition shape is
+  `{ kind, reason, expiresAt? }`. `reason` is the canonical field.
+  A pre-shape `note` still loads for one release (mapped onto `reason`,
+  with a check deprecation warning). A non-`other` disposition that
+  recorded no reason still loads and warns on that same channel that
+  `reason` will be required; `kind: other` without a recorded reason
+  is refused. With the policy enabled, an
   uncovered, undispositioned required operation blocks with
-  `CRUD_COVERAGE_MISSING`. Recording or approving a disposition is a
-  trusted-policy act — the policy participates in the trusted policy
+  `CRUD_COVERAGE_MISSING`. Under strict E2E an absent or empty section is
+  itself a blocking `COVERAGE_POLICY_ABSENT` setup error — generate the
+  owner draft with `gateforge coverage draft` (read-only; it never writes),
+  review it, and paste it as the owner. Recording or approving a disposition
+  is a trusted-policy act — the policy participates in the trusted policy
   revision, so an agent edit never self-approves.
 - `disposition.maxDays:` — how far out an owner disposition's `expiresAt`
   may reach, in whole days (default 30; minimum 1). An owner disposition —
@@ -1390,8 +1415,23 @@ Enforcement-relevant sections:
   disposition; at and after it the disposition is VOID — the
   endpoint/table grades as undispositioned AND a blocking
   `DISPOSITION_EXPIRED` finding names the endpoint/table, the expiry and
-  the extend command. An expiry further out than the maximum is a config
-  error (`DISPOSITION_MAX_DURATION`). The owner renews a timer with
+  `operational-only` is legal only when the route is
+  positively classified health/ops and has no business-resource link: a
+  `health-operations` capability, or a path the classifier marks
+  (`/health/*`, `/ops/*`, `/metrics`, the same roots under `/api`, a
+  depth-capped probe path, or `/`).
+  Extra transport capabilities do not disqualify; a business link, or any
+  unmarked route, stays illegal. `gateforge disposition list [--json]`
+  prints every disposition from both documents (read-only). An expiry
+  further out than the maximum is a config error (`DISPOSITION_MAX_DURATION`).
+  An active `out-of-scope` endpoint disposition also withholds every
+  policies.yml rule obligation for that endpoint. An active table
+  disposition withholds `persistence:*` rule obligations for that table.
+  Expired dispositions excuse neither. `operational-only` still excuses
+  no rule obligation (transport case only). The check report lists each
+  withheld obligation as `excused` with the reason. `disposition list`
+  names the excuse (`rule-obligations`, `persistence`, or none).
+  The owner renews a timer with
   `gateforge disposition extend <endpoint-id|table> --expires <ISO-date>
   --owner <name> --reason "<why>"`: it rewrites `expiresAt` in the owning
   document (comment- and format-preserving), refuses a date in the past or

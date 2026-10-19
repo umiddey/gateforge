@@ -6,5 +6,8 @@
     "noEmit": false,
     "outDir": "dist"
   },
-  "include": ["src"]
+  "include": ["src"],
+  // Colocated src unit tests run under vitest (see vitest.config.ts
+  // include) and import test/ helpers — never shipped in dist.
+  "exclude": ["src/**/*.test.ts"]
 }
