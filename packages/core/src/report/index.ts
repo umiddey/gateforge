@@ -285,6 +285,19 @@ export interface RenderRunOptions {
   blocking?: readonly BlockingEntry[];
   /** Non-blocking notices; visible in every report format without changing the exit code. */
   advisories?: readonly BlockingEntry[];
+  /**
+   * Policies.yml obligations an active disposition withheld. Present
+   * only when the caller has some, so a run with none keeps its keys.
+   */
+  excused?: readonly {
+    obligationId: string;
+    resourceId: string;
+    contract: string;
+    policyId: string;
+    reason: string;
+    kind: string;
+    surface: 'endpoint' | 'table';
+  }[];
   /** Waiver-population counts; included in json/text when provided. */
   waiverCounts?: WaiverCounts;
   /** Run manifest; included in the json report when provided. */
@@ -609,6 +622,16 @@ function jsonReport(
   if (options.advisories !== undefined && options.advisories.length > 0) {
     report['advisories'] = options.advisories;
   }
+  if (options.excused !== undefined && options.excused.length > 0) {
+    const summary = report['summary'];
+    if (typeof summary === 'object' && summary !== null) {
+      (summary as Record<string, unknown>)['excused'] = options.excused.length;
+    }
+    report['excused'] = options.excused.map((entry) => ({
+      ...entry,
+      verdict: 'excused',
+    }));
+  }
   if (options.run !== undefined) {
     report['run'] = options.run;
   }
@@ -785,6 +808,12 @@ function textReport(
     `gateforge run: ${entries.length} obligation(s) — ` +
       `${counts.satisfied} satisfied, ${counts.waived} waived, ${blockingCount} blocking`,
   );
+  if (options.excused !== undefined && options.excused.length > 0) {
+    lines.push(`excused (${String(options.excused.length)}):`);
+    for (const entry of options.excused) {
+      lines.push(`  ${entry.obligationId}  excused  reason: ${entry.reason}`);
+    }
+  }
   if (options.engineLine !== undefined) {
     lines.push(options.engineLine);
   } else if (options.engine !== undefined) {

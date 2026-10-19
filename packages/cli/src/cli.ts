@@ -17,6 +17,8 @@ import { enforceCommand } from './commands/enforce.js';
 import { adoptCommand } from './commands/adopt.js';
 import { discoverCommand } from './commands/discover.js';
 import { obligationsCommand } from './commands/obligations.js';
+import { coverageCommand } from './commands/coverage.js';
+import { behaviorCommand } from './commands/behavior.js';
 import { checkCommand } from './commands/check.js';
 import { nextCommand } from './commands/next.js';
 import { configCommand } from './commands/config.js';
@@ -73,6 +75,11 @@ commands:
         [--probe --base-url URL]         with the app running: one read-only GET per adapter
         [--probe-id ID]
   obligations [--json]                   evaluate policies and dump obligations
+  coverage draft [--json]                print the owner coveragePolicy draft from the current inventory
+                                         (never writes; the owner reviews, pastes, repins)
+  behavior draft [--json]                print the owner behavior.yml draft from the discovered endpoints,
+                                         each entry's cases commented out with a TODO (never writes;
+                                         the owner reviews, fills the real cases in, pastes, repins)
   history [--test TEXT] [--failed] [--since ISO]  query retained supervised run history
   check [--changed] [--staged] [--candidate-commit SHA] run the gate against all files, the exact frozen
         index, or the selected immutable commit tree; --changed narrows the selected candidate's diff;
@@ -105,6 +112,9 @@ commands:
   disposition extend <endpoint-id|table>  rewrite one owner disposition's expiresAt and record the
         --owner N --reason "T"           extension in its extensions audit list (never pins; the
         --expires D                      digest/pin flow applies to the edited policy)
+  disposition list [--json]              every disposition the behaviorPolicy and coveragePolicy
+                                         documents declare, with surface, id, kind, reason,
+                                         expiresAt and the judged state — read-only
   run [--] [test-gates flags]    the whole local proof in order: doctor preflight (strict), the optional
                                          .gateforge/runtime.yml recipe (reset/seed/up/health), the supervised
                                          test-gates, check --require-e2e, and the recipe's teardown — one line
@@ -166,6 +176,10 @@ export async function main(
       return runWithExitCodes(io, () => adaptersCommand(io, rest));
     case 'obligations':
       return runWithExitCodes(io, () => obligationsCommand(io, rest));
+    case 'coverage':
+      return runWithExitCodes(io, () => coverageCommand(io, rest));
+    case 'behavior':
+      return runWithExitCodes(io, () => behaviorCommand(io, rest));
     case 'check':
       return runWithExitCodes(io, () => checkCommand(io, rest));
     case 'next':

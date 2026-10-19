@@ -10,6 +10,7 @@
  */
 import { sha256Canonical, type JsonValue } from '../canonical-json.js';
 import { HTTP_ENDPOINT_RESOURCE_KIND, type GraphResource, type ResourceGraph } from '../graph/schema.js';
+import { isPositivelyClassifiedHealthOperations } from '../classifier/classify.js';
 import { compareStrings } from '../graph/util.js';
 import {
   BEHAVIOR_CATALOG_DOMAIN,
@@ -177,7 +178,7 @@ export function compileBehaviorPolicy(input: CompileBehaviorPolicyInput): Compil
         );
       }
     }
-    const operational = isHealthOperations(resource);
+    const operational = isPositivelyClassifiedHealthOperations(resource);
     if (disposition?.kind === 'operational-only' && !operational) {
       throw new PolicyEvaluationError(
         `operational-only disposition on '${resourceId}' is illegal: the route is not positively classified health-operations`,
@@ -454,22 +455,6 @@ function operationalTransportCase(resource: GraphResource): BehaviorCase {
       state: [],
     },
   };
-}
-
-/**
- * True when detector attributes positively classify health-operations only.
- *
- * Args:
- *   resource (GraphResource): discovered endpoint.
- *
- * Returns:
- *   boolean: true only for a single health-operations capability and no business link.
- */
-function isHealthOperations(resource: GraphResource): boolean {
-  const linked = resource.attributes['linkedResourceName'];
-  if (typeof linked === 'string' && linked.length > 0) return false;
-  const capabilities = resource.attributes['capabilities'];
-  return Array.isArray(capabilities) && capabilities.length === 1 && capabilities[0] === 'health-operations';
 }
 
 /**

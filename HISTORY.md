@@ -13,6 +13,8 @@ Development history and status notes, moved verbatim from the repository README.
 | 5 | ClientZero dogfood migration | blocked on human decisions (out of scope) |
 | 6–8 | Five additional contract packs (auth, workflow, webhook, task, validation) | shipped (commit 44b25da) — detectors + example-server integration tests; engine-level grading pending per-pack semantic verifiers |
 | 2026-09-25 | Owner-chosen strictness (`mode: strict|changed|warn`, absent = strict) + owner-only, expiring flaky-test quarantine that never proves and never blocks | shipped on branch `plan/strictness-modes` |
+| 2026-10-18 | Strict E2E refuses an absent/empty owner `coveragePolicy` (setup-wide `COVERAGE_POLICY_ABSENT`) + read-only `gateforge coverage draft [--json]` printing the paste-ready owner draft | on branch `feat/coverage-policy-required` |
+| 2026-10-19 | Read-only `gateforge behavior draft` and `disposition list`; one disposition shape (`reason` required going forward, coverage `note` alias warns); `operational-only` legal on positively marked health/ops routes with no business link | on branch `feat/behavior-draft-dispositions` |
 | 2026-09-13 | Existing-test reuse + E2E enforcement (`tests` workflow, supervised runs + gate receipts, staged-candidate gate, active hook install, broker mechanism, GitLab strict-gate template) | in-repo work complete — see below; consumer-worktree authoring and server-side GitLab rollout remain owner actions |
 
 **2026-08-31 audit remediation (five rounds).** Evidence trust now rests

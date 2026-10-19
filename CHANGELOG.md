@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.17.0
+
+- **Changed: an active disposition excuses matching rule obligations.**
+  An active `behavior.yml` `out-of-scope` disposition withholds every
+  policies.yml obligation for that endpoint. An active `coveragePolicy`
+  disposition withholds `persistence:*` obligations for that table.
+  Expired dispositions excuse nothing (`DISPOSITION_EXPIRED` still
+  blocks). `operational-only` is unchanged (transport case only).
+  Excused obligations are listed in the check report and by
+  `disposition list` with the owner reason; they are not silently
+  dropped. `policies.yml` and its schema are unchanged.
+- **Added: `gateforge behavior draft [--json]`.** Read-only paste-ready
+  `behavior.yml` body: one entry per discovered `http.endpoint`, sorted,
+  each with `cases` commented out and a TODO. Header: owner review
+  required; pasting it is the owner act; repin afterwards. Never writes.
+  An undeclared endpoint stays `ENDPOINT_BEHAVIOR_MISSING`.
+- **Added: one disposition shape and `gateforge disposition list [--json]`.**
+  Behavior and coverage dispositions share `{ kind, reason, expiresAt? }`
+  with per-surface kind subsets. Coverage `note` still loads for one
+  release (mapped onto `reason`) and `gateforge check` warns. A non-`other`
+  coverage disposition that recorded no reason still loads and warns on
+  that same channel that `reason` will be required. `disposition list` is
+  read-only: surface, id, kind, reason, expiresAt, state.
+- **Changed: `operational-only` is legal on real health/ops routes.** A
+  route positively marked health/ops (a `health-operations` capability, or
+  a path `/health/*`, `/ops/*`, `/metrics`, the same roots under `/api`,
+  a depth-capped probe path, or `/`) may carry `operational-only` even with
+  a transport capability
+  (`crud-create`, `file-transfer`, `workflow-command`), as long as it has
+  no business-resource link. A business link, or any unmarked route, stays
+  illegal.
+
+- **Added: strict E2E refuses a missing coverage policy, and `gateforge
+  coverage draft` prints the owner's starting point.** With
+  `enforcement.strictE2E: true`, an absent or empty owner
+  `coveragePolicy` section adds exactly ONE setup-wide blocking
+  `COVERAGE_POLICY_ABSENT` entry (never diff-narrowed, like the strict
+  preflight) naming how many user-facing tables the current inventory
+  would have to declare, with the next action `gateforge coverage draft`.
+  The owner-written policy is the one gate input derived from the owner's
+  list instead of the code, so a strict setup without it could previously
+  go green by deleting the guarded code ("delete the feature to pass").
+  The new read-only command `gateforge coverage draft [--json]` prints a
+  paste-ready `coveragePolicy:` block — one entry per user-facing table,
+  `requiredOperations` = that table's lifecycle-enabled operations,
+  sorted by name — that always parses through `CoveragePolicySchema`; it
+  never writes any file, because pasting the policy is the owner's act.
+  With strict E2E off the section stays opt-in and its absence stays
+  silent (byte-identical behaviour). `init`'s scan output now says the
+  section is required under strictE2E and names the draft command.
+
 ## 0.16.0
 
 - **Added: expiring owner dispositions and `gateforge disposition

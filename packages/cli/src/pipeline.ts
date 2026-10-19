@@ -27,6 +27,8 @@ import {
   compareStrings,
   compileBehaviorPolicy,
   evaluatePolicies,
+  activeRuleExcuses,
+  type BehaviorPolicy,
   loadWaivers,
   normalizeChangedFiles,
   parseBehaviorPolicy,
@@ -540,6 +542,19 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
       successfulDetectors: contributions.length,
     },
   });
+  const dispositionNow = clock.now();
+  const dispositionMaxMs = (config.disposition?.maxDays ?? DISPOSITION_MAX_DAYS) * 86_400_000;
+  let parsedBehavior: BehaviorPolicy | undefined;
+  if (config.behaviorPolicy !== undefined) {
+    try {
+      parsedBehavior = parseBehaviorPolicy(
+        loadYaml(resolveRepoPath(cwd, config.behaviorPolicy), 'behavior policy'),
+      );
+    } catch (error) {
+      if (error instanceof PolicyEvaluationError) throw new UsageError(error.message);
+      throw error;
+    }
+  }
   let policy = evaluatePolicies({
     graph,
     policies: policiesParsed.data,
@@ -549,6 +564,12 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
       ...blocking,
       ...adapterProjectionBlockers(cwd, config.adapters, adapters, classification.decisions),
     ],
+    excuses: activeRuleExcuses({
+      endpoints: parsedBehavior?.endpoints,
+      tables: config.coveragePolicy?.tables,
+      now: dispositionNow,
+      maxDurationMs: dispositionMaxMs,
+    }),
   });
   const pageObligations = pageObligationsFromGraph(graph);
   if (pageObligations.length > 0) {
@@ -558,15 +579,14 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
     };
   }
   let behaviorCatalog: BehaviorCatalog | null = null;
-  if (config.behaviorPolicy !== undefined) {
-    const behaviorPath = resolveRepoPath(cwd, config.behaviorPolicy);
+  if (parsedBehavior !== undefined) {
     let compiled;
     try {
       compiled = compileBehaviorPolicy({
         graph,
-        policy: parseBehaviorPolicy(loadYaml(behaviorPath, 'behavior policy')),
-        now: clock.now(),
-        maxDurationMs: (config.disposition?.maxDays ?? DISPOSITION_MAX_DAYS) * 86_400_000,
+        policy: parsedBehavior,
+        now: dispositionNow,
+        maxDurationMs: dispositionMaxMs,
       });
     } catch (error) {
       if (error instanceof PolicyEvaluationError) throw new UsageError(error.message);

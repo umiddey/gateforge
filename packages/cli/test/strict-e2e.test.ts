@@ -99,11 +99,18 @@ describe('strict E2E mode via check (plan §3.3, ADR 0005 D4)', () => {
         '.gateforge/waivers/accounts.json': waiverJson('tenant.accounts'),
         '.gateforge/waivers/orders.json': waiverJson('tenant.orders'),
       });
-      withConfigSection(repo, 'enforcement:\n  mode: standard\n  strictE2E: true\n');
+      // The owner act the strict setup now demands (plan 2026-10-18):
+      // both fixture tables dispositioned, so this scenario stays about
+      // strict waiver re-grading, not the absent-policy block.
+      withConfigSection(
+        repo,
+        `enforcement:\n  mode: standard\n  strictE2E: true\ncoveragePolicy:\n  tables:\n    - name: accounts\n      requiredOperations: [create, read, update, delete]\n      disposition:\n        kind: not-user-facing\n    - name: orders\n      requiredOperations: [read]\n      disposition:\n        kind: read-only-surface\n        note: orders are read-only in the UI\n`,
+      );
       const { code, stdout } = await runCli(repo, ['check', '--format', 'json']);
       expect(code).toBe(1);
       const report = JSON.parse(stdout) as {
         summary: { blocking: number; waived: number };
+        excused?: Array<{ obligationId: string; reason: string }>;
         blocking: Array<{ cause?: string | null }>;
         verdicts: Array<{
           obligationId: string;
@@ -114,14 +121,21 @@ describe('strict E2E mode via check (plan §3.3, ADR 0005 D4)', () => {
         }>;
       };
       expect(report.summary.waived).toBe(0);
-      expect(report.summary.blocking).toBe(4);
+      // Active table dispositions withhold the persistence obligations
+      // (plan 2026-10-19 P5): they leave the verdicts entirely and are
+      // named as excused rows with the owner reason instead.
+      expect(report.summary.blocking).toBe(2);
       expect(report.blocking.some((entry) => entry.cause === 'VERIFIER_UNSUPPORTED')).toBe(false);
-      const persistence = report.verdicts.filter((v) => v.obligationId.endsWith(':persistence:read'));
-      expect(persistence).toHaveLength(2);
-      expect(persistence.every((v) => v.verdict === 'missing' && v.cause === 'ENFORCEMENT_UNTRUSTED')).toBe(true);
-      expect(persistence.every((v) => v.nextAction === 'Repair enforcement setup')).toBe(true);
-      expect(persistence.every((v) => (v.reason ?? '').includes("waived by 'team-"))).toBe(true);
-      expect(persistence.every((v) => (v.reason ?? '').includes('not proof'))).toBe(true);
+      const excused = report.excused ?? [];
+      expect(excused.map((entry) => entry.obligationId).sort()).toEqual([
+        'tenant.accounts:persistence:read',
+        'tenant.orders:persistence:read',
+      ]);
+      const excusedById = new Map(excused.map((entry) => [entry.obligationId, entry]));
+      expect(excusedById.get('tenant.orders:persistence:read')?.reason).toBe('orders are read-only in the UI');
+      expect(excusedById.get('tenant.accounts:persistence:read')?.reason).toBe(
+        "coverage disposition 'not-user-facing' (no reason recorded)",
+      );
       const auth = report.verdicts.filter((v) => v.obligationId.endsWith(':auth:role-denied'));
       expect(auth).toHaveLength(2);
       expect(auth.every((v) => v.verdict === 'missing' && v.cause === 'TEST_MAPPING_MISSING')).toBe(true);

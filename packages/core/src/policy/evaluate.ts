@@ -33,6 +33,7 @@ import { ClaimSchema, type Claim } from '../schemas/claim.js';
 import { HTTP_ENDPOINT_RESOURCE_KIND, type GraphResource, type ResourceGraph } from '../graph/schema.js';
 import { compareStrings } from '../graph/util.js';
 import { HTTP_REQUEST_OBSERVED, HTTP_RESPONSE_MATCHES_MODEL, HTTP_RESPONSE_STATUS_OK } from '../schemas/behavior-policy.js';
+import { dispositionExpiry, type DispositionExpiryOptions } from '../schemas/disposition.js';
 
 /** The CRUD contract namespace gated by lifecycle flags. */
 export const CRUD_CONTRACT_PREFIX = 'crud:';
@@ -46,6 +47,104 @@ export const CRUD_CONTRACT_PREFIX = 'crud:';
  * observation channel exists.
  */
 export const PERSISTENCE_CONTRACT_PREFIX = 'persistence:';
+
+/** One owner excuse that removes compiled rule obligations for one target. */
+export interface RuleExcuse {
+  /** Recorded owner reason (or the visible stand-in when a pre-shape coverage row recorded none). */
+  reason: string;
+  /** Disposition kind that excused the obligations. */
+  kind: string;
+}
+
+/**
+ * Active dispositions that excuse policies.yml rule obligations.
+ * Endpoint ids excuse every contract for that endpoint. Table names
+ * excuse only `persistence:*` for a resource of that bare name.
+ */
+export interface ActiveRuleExcuses {
+  endpoints: Readonly<Record<string, RuleExcuse>>;
+  tables: Readonly<Record<string, RuleExcuse>>;
+}
+
+/** One policies.yml obligation withheld because an active disposition excused it. */
+export const ExcusedObligationSchema = z.strictObject({
+  obligation: ObligationSchema,
+  reason: z.string().min(1),
+  kind: z.string().min(1),
+  surface: z.enum(['endpoint', 'table']),
+});
+
+/** Inferred excused-obligation shape. */
+export type ExcusedObligation = z.infer<typeof ExcusedObligationSchema>;
+
+/**
+ * The active subset of owner dispositions that excuse rule obligations.
+ * Expired and over-max dispositions excuse nothing. `operational-only`
+ * is not an endpoint excuse: it keeps today's transport-case behavior.
+ *
+ * Args:
+ *   input: behavior endpoints, coverage tables, and the injected clock.
+ *
+ * Returns:
+ *   ActiveRuleExcuses: endpoint ids and table names whose dispositions
+ *   still apply. Duplicate ids keep the first honoured row.
+ */
+export function activeRuleExcuses(input: {
+  endpoints?: readonly {
+    resourceId: string;
+    disposition?: { kind: string; reason?: string; expiresAt?: string };
+  }[];
+  tables?: readonly {
+    name: string;
+    disposition?: { kind: string; reason?: string; expiresAt?: string };
+  }[];
+  now: DispositionExpiryOptions['now'];
+  maxDurationMs?: number;
+}): ActiveRuleExcuses {
+  const endpoints: Record<string, RuleExcuse> = {};
+  const tables: Record<string, RuleExcuse> = {};
+  const options: DispositionExpiryOptions = {
+    now: input.now,
+    ...(input.maxDurationMs === undefined ? {} : { maxDurationMs: input.maxDurationMs }),
+  };
+  for (const endpoint of input.endpoints ?? []) {
+    const disposition = endpoint.disposition;
+    if (disposition === undefined || disposition.kind !== 'out-of-scope') continue;
+    if (endpoints[endpoint.resourceId] !== undefined) continue;
+    const expiry = dispositionExpiry(disposition, options);
+    if (expiry.state !== 'active' && expiry.state !== 'no-expiry') continue;
+    if (disposition.reason === undefined || disposition.reason.length === 0) continue;
+    endpoints[endpoint.resourceId] = { reason: disposition.reason, kind: disposition.kind };
+  }
+  for (const table of input.tables ?? []) {
+    const disposition = table.disposition;
+    if (disposition === undefined || tables[table.name] !== undefined) continue;
+    const expiry = dispositionExpiry(disposition, options);
+    if (expiry.state !== 'active' && expiry.state !== 'no-expiry') continue;
+    const recorded = disposition.reason;
+    tables[table.name] = {
+      reason:
+        recorded !== undefined && recorded.length > 0
+          ? recorded
+          : `coverage disposition '${disposition.kind}' (no reason recorded)`,
+      kind: disposition.kind,
+    };
+  }
+  return { endpoints, tables };
+}
+
+function excuseFor(
+  resource: GraphResource,
+  excuses: ActiveRuleExcuses | undefined,
+): { excuse: RuleExcuse; surface: 'endpoint' | 'table'; persistenceOnly: boolean } | null {
+  if (excuses === undefined || resource.id === null) return null;
+  if (resource.kind === HTTP_ENDPOINT_RESOURCE_KIND) {
+    const excuse = excuses.endpoints[resource.id];
+    return excuse === undefined ? null : { excuse, surface: 'endpoint', persistenceOnly: false };
+  }
+  const excuse = excuses.tables[resource.name];
+  return excuse === undefined ? null : { excuse, surface: 'table', persistenceOnly: true };
+}
 
 /** The four lifecycle-gated operations, in canonical order. */
 const CRUD_OPERATIONS = ['create', 'read', 'update', 'delete'] as const;
@@ -162,6 +261,12 @@ export const PolicyEvaluationResultSchema = z
      * failed or left orphans can never yield a green run).
      */
     blocking: z.array(BlockingEntrySchema),
+    /**
+     * Policies.yml obligations an active disposition withheld. Empty
+     * when none apply. Never a silent drop: each row keeps the
+     * obligation and the owner reason.
+     */
+    excused: z.array(ExcusedObligationSchema).default([]),
     /** Claim assessments, sorted by obligation id then test id. */
     claims: z.array(ClaimAssessmentSchema),
   });
@@ -227,6 +332,12 @@ export interface PolicyEvaluationInput {
    * owe `http:response-matches-model`.
    */
   responseShapeOwed?: boolean;
+  /**
+   * Active owner dispositions. Absent = compile exactly as before.
+   * An endpoint out-of-scope excuse withholds every rule obligation
+   * for that endpoint. A table excuse withholds only `persistence:*`.
+   */
+  excuses?: ActiveRuleExcuses;
 }
 
 /**
@@ -247,7 +358,8 @@ export interface PolicyEvaluationInput {
 export function evaluatePolicies(input: PolicyEvaluationInput): PolicyEvaluationResult {
   const policyFile = PolicyFileSchema.parse(input.policies);
   const obligations: Obligation[] = [];
-  const obligationIds = new Set<string>();
+  const excused: ExcusedObligation[] = [];
+  const knownIds = new Set<string>();
   const blocking: BlockingEntry[] = [];
 
   for (const resource of input.graph.resources) {
@@ -268,9 +380,11 @@ export function evaluatePolicies(input: PolicyEvaluationInput): PolicyEvaluation
       resource,
       policyFile.policies,
       obligations,
-      obligationIds,
+      excused,
+      knownIds,
       policyFile.options?.['http.endpoint.requireObservation'] === 'all',
       input.responseShapeOwed === true,
+      excuseFor(resource, input.excuses),
     );
   }
 
@@ -309,11 +423,12 @@ export function evaluatePolicies(input: PolicyEvaluationInput): PolicyEvaluation
   }
   blocking.push(...(input.extraBlocking ?? []));
 
-  const claims = assessClaims(input.claims ?? [], obligationIds, input.graph.resources);
+  const claims = assessClaims(input.claims ?? [], knownIds, input.graph.resources);
 
   return {
     schemaVersion: 1,
     obligations: sortObligations(obligations),
+    excused: [...excused].sort((a, b) => compareStrings(a.obligation.id, b.obligation.id)),
     blocking: sortBlocking(blocking),
     claims: sortClaims(claims),
   };
@@ -328,9 +443,11 @@ function generateObligations(
   resource: GraphResource,
   policies: Policy[],
   obligations: Obligation[],
-  obligationIds: Set<string>,
+  excused: ExcusedObligation[],
+  knownIds: Set<string>,
   observationScopeAll: boolean,
   responseShapeOwed: boolean,
+  excuse: { excuse: RuleExcuse; surface: 'endpoint' | 'table'; persistenceOnly: boolean } | null,
 ): void {
   const classification = resource.classification;
   if (classification === null || resource.id === null) return;
@@ -351,16 +468,26 @@ function generateObligations(
         if (!lifecycleAllowsContract(contract, classification.lifecycle)) continue;
       }
       const id = `${resource.id}:${contract}`;
-      if (obligationIds.has(id)) continue;
-      obligationIds.add(id);
-      obligations.push({
+      if (knownIds.has(id)) continue;
+      knownIds.add(id);
+      const obligation: Obligation = {
         schemaVersion: 1,
         id,
         resourceId: resource.id,
         contract,
         policyId: policy.id,
         lifecycle: classification.lifecycle,
-      });
+      };
+      if (excuse !== null && (!excuse.persistenceOnly || contract.startsWith(PERSISTENCE_CONTRACT_PREFIX))) {
+        excused.push({
+          obligation,
+          reason: excuse.excuse.reason,
+          kind: excuse.excuse.kind,
+          surface: excuse.surface,
+        });
+        continue;
+      }
+      obligations.push(obligation);
     }
     // 0.14 WP4: an endpoint whose policy owes the transport contracts also
     // owes the witness's body-vs-model check, but only under `block` (the
@@ -370,16 +497,26 @@ function generateObligations(
       responseShapeOwed &&
       resource.kind === HTTP_ENDPOINT_RESOURCE_KIND &&
       policy.require.some((contract) => contract === HTTP_REQUEST_OBSERVED || contract === HTTP_RESPONSE_STATUS_OK);
-    if (owesBody && !obligationIds.has(bodyId)) {
-      obligationIds.add(bodyId);
-      obligations.push({
+    if (owesBody && !knownIds.has(bodyId)) {
+      knownIds.add(bodyId);
+      const obligation: Obligation = {
         schemaVersion: 1,
         id: bodyId,
         resourceId: resource.id,
         contract: HTTP_RESPONSE_MATCHES_MODEL,
         policyId: policy.id,
         lifecycle: classification.lifecycle,
-      });
+      };
+      if (excuse !== null && !excuse.persistenceOnly) {
+        excused.push({
+          obligation,
+          reason: excuse.excuse.reason,
+          kind: excuse.excuse.kind,
+          surface: excuse.surface,
+        });
+      } else {
+        obligations.push(obligation);
+      }
     }
   }
 }
@@ -442,7 +579,7 @@ function policyMatches(
  */
 function assessClaims(
   claims: Claim[],
-  obligationIds: Set<string>,
+  knownIds: Set<string>,
   resources: GraphResource[],
 ): ClaimAssessment[] {
   const internalIds = new Set<string>();
@@ -460,7 +597,7 @@ function assessClaims(
         reason: `resource '${resourceId}' is internal: internal resources carry no CRUD obligations and their claims are invalid (ADR 0001)`,
       };
     }
-    if (!obligationIds.has(claim.obligationId)) {
+    if (!knownIds.has(claim.obligationId)) {
       return {
         claim,
         status: 'invalid' as const,

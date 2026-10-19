@@ -66,6 +66,11 @@ export const CauseCodeSchema = z.enum([
   'EVIDENCE_VALUE_MISMATCH',
   'SERVER_PROBE_UNAVAILABLE',
   'CRUD_COVERAGE_MISSING',
+  // Strict E2E demands a declared coverage policy (plan 2026-10-18): the
+  // owner-written `coveragePolicy` is the one gate input the code cannot
+  // shrink, so a strict setup without it blocks setup-wide instead of
+  // silently grading an empty policy.
+  'COVERAGE_POLICY_ABSENT',
   'DIAGNOSTIC_TEST_FAILURE',
   'DIAGNOSTIC_RUN_INCOMPLETE',
   'DIAGNOSTIC_RESULT_STALE',
@@ -158,11 +163,15 @@ export const CAUSE_NEXT_ACTIONS: Readonly<Record<CauseCode, string>> = Object.fr
   CRUD_COVERAGE_MISSING:
     'Owner: add an overlay test, or record a disposition in trusted `coveragePolicy` ' +
     '(agents must not edit coveragePolicy).',
+  COVERAGE_POLICY_ABSENT:
+    'Owner: review `gateforge coverage draft` output and paste the coveragePolicy into ' +
+    '`.gateforge.yml` (agents must not edit coveragePolicy); repin afterwards.',
   DIAGNOSTIC_TEST_FAILURE: 'Inspect the named test, assertion, and relevant application code',
   DIAGNOSTIC_RUN_INCOMPLETE:
     'Repair the run; an incomplete diagnostic run never displays as passing',
   DIAGNOSTIC_RESULT_STALE: 'Rerun the diagnostic suite for the exact candidate',
-  ENDPOINT_BEHAVIOR_MISSING: 'Owner defines endpoint behavior; agent cannot exclude it',
+  ENDPOINT_BEHAVIOR_MISSING:
+    'Owner defines endpoint behavior (`gateforge behavior draft` prints the read-only skeleton); agent cannot exclude it',
   BEHAVIOR_REFERENCE_STALE: 'Repair reviewed references and rerun',
   BEHAVIOR_CASE_UNMAPPED: 'Reuse/map a suitable test, or add thin overlay proof',
   BEHAVIOR_CASE_MISSING: 'Execute the case through its required channel',

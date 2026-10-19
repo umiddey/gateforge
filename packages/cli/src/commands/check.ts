@@ -149,6 +149,7 @@ import {
   executionBoundaryDigestOf,
   GateforgeConfigError,
   GateReceiptSchema,
+  coverageDispositionDeprecations,
   humanMessage,
   LOCAL_UNISOLATED_BOUNDARY,
   renderRun,
@@ -1675,6 +1676,13 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
     excludeFile: engineGeneratedStateFileFilter(io.cwd, stateDir),
   });
   const tsScanMs = performance.now() - annotationScanStartedAtMs;
+  // The coveragePolicy `note` alias (plan 2026-10-19): accepted this one
+  // release, mapped onto `reason`; the stderr advisory is the only notice
+  // the owner gets before support is removed. Warning-only — it never
+  // alters the gate result.
+  for (const deprecation of coverageDispositionDeprecations(config.coveragePolicy?.tables ?? [])) {
+    writeLine(io.stderr, `check: deprecation warning: ${deprecation}`);
+  }
   for (const warning of annotationScan.registrationWarnings) {
     writeLine(
       io.stderr,
@@ -2264,6 +2272,15 @@ export async function runCheckGate(io: Io, options: CheckGateOptions): Promise<n
   let report = renderRun(reportVerdicts, {
     format,
     blocking: evaluatedBlocking,
+    excused: pipeline.policy.excused.map((entry) => ({
+      obligationId: entry.obligation.id,
+      resourceId: entry.obligation.resourceId,
+      contract: entry.obligation.contract,
+      policyId: entry.obligation.policyId,
+      reason: entry.reason,
+      kind: entry.kind,
+      surface: entry.surface,
+    })),
     advisories: [
       // HTTP call findings in report mode (0.14 WP3, `http.callFindings:
       // report`): the run's unmatched / ambiguous / unresolved calls,

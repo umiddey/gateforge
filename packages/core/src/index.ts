@@ -263,8 +263,12 @@ export type { Quarantine } from './schemas/quarantine.js';
  */
 export {
   DispositionExtensionSchema,
+  DISPOSITION_KINDS,
   DISPOSITION_MAX_DAYS,
   DISPOSITION_MAX_DURATION_MS,
+  ENDPOINT_DISPOSITION_KINDS,
+  EndpointDispositionSchema,
+  TABLE_DISPOSITION_KINDS,
   dispositionExpiry,
 } from './schemas/disposition.js';
 /** Inferred disposition-extension type. */
@@ -341,6 +345,7 @@ export {
   CoveragePolicySchema,
   CoverageTableSchema,
   CoverageDispositionSchema,
+  coverageDispositionDeprecations,
 } from './schemas/coverage-policy.js';
 /** Inferred coverage-policy types. */
 export type {
@@ -909,7 +914,8 @@ export { PolicyEvaluationError } from './policy/index.js';
  * (ADR 0001), blocking entries for unclassified/unresolved resources,
  * and claim assessment. Pure; deterministic.
  */
-export { evaluatePolicies, lifecycleAllowsContract } from './policy/index.js';
+export { activeRuleExcuses, evaluatePolicies, lifecycleAllowsContract } from './policy/index.js';
+export type { ActiveRuleExcuses, ExcusedObligation, RuleExcuse } from './policy/index.js';
 
 /**
  * Closed-world CRUD coverage evaluator (plan 2026-09-13 §3.6, ADR 0005

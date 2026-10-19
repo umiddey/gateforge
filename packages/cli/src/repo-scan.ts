@@ -521,7 +521,7 @@ export function renderScanBlock(
     'skipped:',
     '  gateforge.pack-task — no semantic verifier (VERIFIER_UNSUPPORTED)',
     '  http:frontend-request-observed — not provable yet: no independent browser channel',
-    '  coveragePolicy / strictE2E — owner opt-in',
+    '  coveragePolicy / strictE2E — required under strictE2E: generate the owner draft with `gateforge coverage draft`',
   ].join('\n');
 }
 

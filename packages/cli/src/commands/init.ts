@@ -136,6 +136,7 @@ resources: []
 export const BEHAVIOR_CHECKLIST = [
   'behavior setup is NOT complete: this scaffold only enables the profile',
   'next: run `gateforge check` — every discovered endpoint is listed as ENDPOINT_BEHAVIOR_MISSING',
+  'next: run `gateforge behavior draft` — it prints the paste-ready endpoint skeleton (read-only; it never writes)',
   'next: for each endpoint, declare cases (or an owner disposition) in .gateforge/behavior.yml',
   'next: map each case to a test with `tests mark --case`, then prove it through the witness',
   'note: strong HTTP contracts stay blocking until witness-produced case evidence exists',

@@ -9,7 +9,7 @@
  */
 import { z } from 'zod';
 import { ContractNameSchema, SchemaVersionField } from './common.js';
-import { DispositionExtensionSchema } from './disposition.js';
+import { EndpointDispositionSchema } from './disposition.js';
 import { parseBehaviorSignatureProfile } from './signature-profile.js';
 import { FingerprintHexSchema } from './baseline.js';
 
@@ -879,22 +879,15 @@ export const BehaviorCaseSchema = z
 /** Inferred behavior-case shape. */
 export type BehaviorCase = z.infer<typeof BehaviorCaseSchema>;
 
-/** Owner disposition for an endpoint that is not strongly tested. */
-export const BehaviorDispositionSchema = z
-  .object({
-    kind: z.enum(['operational-only', 'out-of-scope']),
-    reason: z.string().min(1),
-    /**
-     * Optional expiry instant (ISO-8601): when present the disposition
-     * is judged against the injected run clock and is VOID at/after the
-     * instant — the endpoint grades as if undispositioned and a blocking
-     * `DISPOSITION_EXPIRED` finding names it.
-     */
-    expiresAt: z.iso.datetime().optional(),
-    /** Audit trail: one entry per `gateforge disposition extend`. */
-    extensions: z.array(DispositionExtensionSchema).optional(),
-  })
-  .strict();
+/**
+ * Owner disposition for an endpoint that is not strongly tested: the
+ * ONE shared disposition shape (plan 2026-10-19) over the endpoint kind
+ * subset — `{ kind, reason, expiresAt?, extensions? }`, `reason`
+ * required. Expiry semantics (`expiresAt` judged against the injected
+ * run clock, VOID at/after the instant, blocking `DISPOSITION_EXPIRED`)
+ * are documented on `dispositionExpiry`.
+ */
+export const BehaviorDispositionSchema = EndpointDispositionSchema;
 
 /** Inferred disposition. */
 export type BehaviorDisposition = z.infer<typeof BehaviorDispositionSchema>;

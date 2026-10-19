@@ -110,3 +110,81 @@ export function dispositionExpiry(
   if (nowMs >= expiresAtMs) return { state: 'expired', expiresAt: disposition.expiresAt };
   return { state: 'active', expiresAt: disposition.expiresAt };
 }
+
+/**
+ * The ONE disposition kind vocabulary (plan 2026-10-19 "one disposition
+ * shape"): both surfaces draw their kinds from this closed enum, and
+ * each surface allows only its documented subset — an endpoint
+ * disposition never carries a table kind and vice versa (fail closed
+ * per surface, so a kind can never quietly mean different things on the
+ * two surfaces).
+ */
+export const DISPOSITION_KINDS = [
+  'out-of-scope',
+  'operational-only',
+  'read-only-surface',
+  'admin-plane-unreachable',
+  'not-user-facing',
+  'other',
+] as const;
+
+/** Inferred disposition kind. */
+export type DispositionKind = (typeof DISPOSITION_KINDS)[number];
+
+/** Kinds a `behavior.yml` endpoint disposition may carry. */
+export const ENDPOINT_DISPOSITION_KINDS = ['out-of-scope', 'operational-only'] as const;
+
+/** Inferred endpoint-disposition kind. */
+export type EndpointDispositionKind = (typeof ENDPOINT_DISPOSITION_KINDS)[number];
+
+/** Kinds a `coveragePolicy` table disposition may carry. */
+export const TABLE_DISPOSITION_KINDS = [
+  'read-only-surface',
+  'admin-plane-unreachable',
+  'not-user-facing',
+  'other',
+] as const;
+
+/** Inferred table-disposition kind. */
+export type TableDispositionKind = (typeof TABLE_DISPOSITION_KINDS)[number];
+
+/**
+ * The shared disposition body over a surface's kind/reason fields
+ * (plan 2026-10-19): `{ kind, reason, expiresAt?, extensions? }`.
+ * Behavior requires `reason` outright. Coverage maps its deprecated
+ * `note` alias onto `reason`, and still loads a pre-shape entry that
+ * recorded neither field unless `kind` is `other` (that kind has always
+ * required a recorded reason). Surfaces compose this with their kind
+ * subset.
+ *
+ * Args:
+ *   shape: the surface's `kind` and `reason` zod fields (reason OPTIONAL
+ *     only where the surface still accepts a deprecated alias or a
+ *     pre-shape entry that recorded no reason, never because a newly
+ *     written reason is dispensable).
+ *
+ * Returns:
+ *   z.ZodObject: the strict shared body with `expiresAt`/`extensions`.
+ */
+export function dispositionShape<S extends z.ZodRawShape>(shape: S) {
+  return z
+    .object({
+      ...shape,
+      expiresAt: z.iso.datetime().optional(),
+      extensions: z.array(DispositionExtensionSchema).optional(),
+    })
+    .strict();
+}
+
+/**
+ * The `behavior.yml` endpoint disposition: the shared shape over the
+ * endpoint kind subset, `reason` required outright (no alias ever
+ * existed on this surface).
+ */
+export const EndpointDispositionSchema = dispositionShape({
+  kind: z.enum(ENDPOINT_DISPOSITION_KINDS),
+  reason: z.string().min(1),
+});
+
+/** Inferred endpoint-disposition shape. */
+export type EndpointDisposition = z.infer<typeof EndpointDispositionSchema>;

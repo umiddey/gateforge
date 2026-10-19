@@ -585,6 +585,60 @@ export function strictPreflightBlocking(obligations: readonly Obligation[]): Blo
 }
 
 /**
+ * Strict E2E requires a declared coverage policy (plan 2026-10-18): the
+ * owner-written `coveragePolicy` is the one gate input derived from the
+ * OWNER's list instead of the code (the evaluator iterates the policy's
+ * `requiredOperations`, never the graph), so it is the only guard against
+ * "delete the feature to pass" — removing code removes the lifecycle-gated
+ * obligations with it. A strict setup whose `coveragePolicy` is absent or
+ * empty therefore blocks setup-wide (like strictPreflightBlocking, never
+ * diff-narrowed) with ONE `COVERAGE_POLICY_ABSENT` entry naming how many
+ * user-facing tables the current inventory would have to declare. A
+ * ZERO-table inventory is not "absent": with no user-facing table nothing
+ * can become undeclared, so there is no owner list to demand and the rule
+ * stays silent there too. With strict E2E off the behaviour is unchanged:
+ * the section stays opt-in and its absence stays silent.
+ *
+ * Args:
+ *   config: the validated `.gateforge.yml`.
+ *   graph: the built resource graph (inventory source for the count).
+ *
+ * Returns:
+ *   BlockingEntry[]: the single absent-policy entry when user-facing
+ *   tables exist, or nothing.
+ */
+export function coveragePolicyPresenceBlocking(
+  config: GateforgeConfig,
+  graph: ResourceGraph,
+): BlockingEntry[] {
+  if (config.enforcement?.strictE2E !== true) return [];
+  const policy = config.coveragePolicy;
+  if (policy !== undefined && policy.tables.length > 0) return [];
+  const tableCount = coverageInventory(graph).length;
+  // Zero user-facing tables = nothing undeclared: with no inventory entry
+  // there is no code whose deletion could silently remove a gate, so no
+  // owner list is demanded (Gateforge's own repository is the case).
+  if (tableCount === 0) return [];
+  const state = policy === undefined ? 'absent' : 'empty';
+  return [
+    {
+      kind: 'finding',
+      resourceId: null,
+      name: 'coveragePolicy',
+      detail:
+        `enforcement.strictE2E is on but the owner-owned coveragePolicy section is ${state}: ` +
+        `the resource inventory has ${String(tableCount)} user-facing table(s) whose required ` +
+        'operations are undeclared, so deleting the code that serves them would silently ' +
+        'remove their gate — the policy must be declared by the owner, never derived from ' +
+        'the code it guards',
+      location: null,
+      cause: 'COVERAGE_POLICY_ABSENT',
+      nextAction: CAUSE_NEXT_ACTIONS['COVERAGE_POLICY_ABSENT'],
+    },
+  ];
+}
+
+/**
  * Strict-mode waiver treatment (plan §3.3, ADR 0005 D4): a waived
  * in-scope E2E obligation is NOT proof and cannot authorize the change.
  * Under strict E2E mode the verdict becomes blocking `missing` with cause
@@ -757,6 +811,12 @@ export function evaluateRun(input: EvaluateInput): EvaluateResult {
   // an unavailable proof channel cannot advertise an operational gate.
   const strictE2E = config.enforcement?.strictE2E === true;
   const strictBlocking = strictE2E ? strictPreflightBlocking(obligations) : [];
+  // The absent-coverage-policy preflight is setup-wide like the capability
+  // preflight above (plan 2026-10-18): a strict setup without the owner's
+  // declared policy blocks every run, never just the diff's slice.
+  const coveragePresenceBlocking = strictE2E
+    ? coveragePolicyPresenceBlocking(config, graph)
+    : [];
   const blocking = [
     ...scopedBlocking,
     ...authorized.evidenceBlocking,
@@ -768,6 +828,7 @@ export function evaluateRun(input: EvaluateInput): EvaluateResult {
       ? coveragePolicyBlocking(config, graph, input.mappedCoverage ?? [], now)
       : []),
     ...strictBlocking,
+    ...coveragePresenceBlocking,
   ];
   // Strict E2E mode (plan §3.3): waived obligations are not proof.
   // Adoption-baseline forgiveness (phase 8 C) runs after diff scoping

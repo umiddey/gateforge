@@ -11,6 +11,7 @@ import {
   CoveragePolicySchema,
   DISPOSITION_MAX_DAYS,
   DISPOSITION_MAX_DURATION_MS,
+  coverageDispositionDeprecations,
   dispositionExpiry,
   evaluateCoveragePolicy,
   type CoverageDisposition,
@@ -57,8 +58,13 @@ describe('disposition schemas', () => {
     ).toBe(true);
   });
 
-  it('still accepts the pre-feature shapes with no timer fields', () => {
-    expect(CoverageDispositionSchema.safeParse({ kind: 'not-user-facing' }).success).toBe(true);
+  it('still accepts the pre-feature shapes (timer fields absent)', () => {
+    // The coverage `note` alias keeps the legacy note-only shape loading
+    // (plan 2026-10-19); a coverage disposition with NEITHER reason nor
+    // note is rejected (reason is required — see "one disposition shape").
+    expect(CoverageDispositionSchema.safeParse({ kind: 'not-user-facing', note: 'n' }).success).toBe(
+      true,
+    );
     expect(BehaviorDispositionSchema.safeParse({ kind: 'operational-only', reason: 'r' }).success).toBe(
       true,
     );
@@ -116,7 +122,7 @@ describe('dispositionExpiry (injected clock)', () => {
 describe('evaluateCoveragePolicy disposition expiry', () => {
   it('honours a not-yet-expired disposition exactly as an untimed one', () => {
     const result = evaluateCoveragePolicy(
-      policyWithDisposition({ kind: 'not-user-facing', expiresAt: IN_DAYS(1) }),
+      policyWithDisposition({ kind: 'not-user-facing', reason: 'owner excuse', expiresAt: IN_DAYS(1) }),
       INVENTORY,
       [],
       { now: NOW },
@@ -128,7 +134,7 @@ describe('evaluateCoveragePolicy disposition expiry', () => {
   it('an expired disposition is void: the table grades as undispositioned AND DISPOSITION_EXPIRED blocks', () => {
     const expiresAt = IN_DAYS(-1);
     const result = evaluateCoveragePolicy(
-      policyWithDisposition({ kind: 'not-user-facing', expiresAt }),
+      policyWithDisposition({ kind: 'not-user-facing', reason: 'owner excuse', expiresAt }),
       INVENTORY,
       [],
       { now: NOW },
@@ -147,7 +153,7 @@ describe('evaluateCoveragePolicy disposition expiry', () => {
 
   it('an over-max expiry is a config error, never coverage', () => {
     const result = evaluateCoveragePolicy(
-      policyWithDisposition({ kind: 'not-user-facing', expiresAt: IN_DAYS(DISPOSITION_MAX_DAYS + 1) }),
+      policyWithDisposition({ kind: 'not-user-facing', reason: 'owner excuse', expiresAt: IN_DAYS(DISPOSITION_MAX_DAYS + 1) }),
       INVENTORY,
       [],
       { now: NOW },
@@ -160,7 +166,7 @@ describe('evaluateCoveragePolicy disposition expiry', () => {
 
   it('a configured maxDays overrides the 30-day default', () => {
     const result = evaluateCoveragePolicy(
-      policyWithDisposition({ kind: 'not-user-facing', expiresAt: IN_DAYS(DISPOSITION_MAX_DAYS + 1) }),
+      policyWithDisposition({ kind: 'not-user-facing', reason: 'owner excuse', expiresAt: IN_DAYS(DISPOSITION_MAX_DAYS + 1) }),
       INVENTORY,
       [],
       { now: NOW, maxDurationMs: (DISPOSITION_MAX_DAYS + 1) * 86_400_000 },
@@ -175,5 +181,116 @@ describe('evaluateCoveragePolicy disposition expiry', () => {
         tables: [{ name: 'invoices', requiredOperations: ['read'], disposition: { kind: 'other', note: 'n', expiresAt: IN_DAYS(3) } }],
       }).success,
     ).toBe(true);
+  });
+});
+
+describe('one disposition shape (plan 2026-10-19)', () => {
+  it('reason is REQUIRED on behavior, and on coverage kind other', () => {
+    const behavior = BehaviorDispositionSchema.safeParse({ kind: 'out-of-scope' });
+    expect(behavior.success).toBe(false);
+    if (!behavior.success) {
+      expect(behavior.error.issues[0]?.path.join('.')).toBe('reason');
+    }
+    // Coverage `other` still requires a recorded reason (the pre-shape
+    // rule). A non-other kind with neither reason nor note is a pre-shape
+    // config and must still load — note was optional for those kinds.
+    const other = CoverageDispositionSchema.safeParse({ kind: 'other' });
+    expect(other.success).toBe(false);
+    if (!other.success) {
+      expect(other.error.issues[0]?.path.join('.')).toBe('reason');
+    }
+    expect(CoverageDispositionSchema.safeParse({ kind: 'not-user-facing' }).success).toBe(true);
+    // A blank reason is no reason (fail closed on both surfaces).
+    expect(BehaviorDispositionSchema.safeParse({ kind: 'out-of-scope', reason: '' }).success).toBe(false);
+    expect(CoverageDispositionSchema.safeParse({ kind: 'other', reason: '' }).success).toBe(false);
+  });
+
+  it('each surface accepts only its own kind subset', () => {
+    // Endpoint dispositions never carry a table kind...
+    expect(
+      BehaviorDispositionSchema.safeParse({ kind: 'not-user-facing', reason: 'r' }).success,
+    ).toBe(false);
+    expect(
+      BehaviorDispositionSchema.safeParse({ kind: 'admin-plane-unreachable', reason: 'r' }).success,
+    ).toBe(false);
+    // ...and table dispositions never carry an endpoint kind.
+    expect(
+      CoverageDispositionSchema.safeParse({ kind: 'out-of-scope', reason: 'r' }).success,
+    ).toBe(false);
+    expect(
+      CoverageDispositionSchema.safeParse({ kind: 'operational-only', reason: 'r' }).success,
+    ).toBe(false);
+    // The documented subsets stay valid.
+    expect(BehaviorDispositionSchema.safeParse({ kind: 'operational-only', reason: 'r' }).success).toBe(true);
+    expect(
+      CoverageDispositionSchema.safeParse({ kind: 'read-only-surface', reason: 'r' }).success,
+    ).toBe(true);
+  });
+
+  it("the deprecated coverage 'note' alias still loads and maps onto 'reason'", () => {
+    const parsed = CoverageDispositionSchema.parse({ kind: 'other', note: 'legacy note' });
+    expect(parsed.reason).toBe('legacy note');
+    // The alias survives on the parsed value only so the check advisory
+    // can name the tables that still use it.
+    expect(parsed.note).toBe('legacy note');
+  });
+
+  it("a disposition carrying both 'note' and 'reason' with different values is refused", () => {
+    const mismatch = CoverageDispositionSchema.safeParse({
+      kind: 'other',
+      reason: 'one truth',
+      note: 'another',
+    });
+    expect(mismatch.success).toBe(false);
+    if (!mismatch.success) {
+      expect(mismatch.error.issues[0]?.path.join('.')).toBe('note');
+    }
+    // Agreeing values stay acceptable (redundant, not ambiguous).
+    expect(
+      CoverageDispositionSchema.safeParse({ kind: 'other', reason: 'same', note: 'same' }).success,
+    ).toBe(true);
+  });
+
+  it('the parsed coverage disposition always exposes the shared shape fields', () => {
+    const parsed = CoverageDispositionSchema.parse({ kind: 'read-only-surface', reason: 'r' });
+    expect(parsed).toEqual({ kind: 'read-only-surface', reason: 'r' });
+  });
+
+  it('a coverage disposition with no reason loads and warns that reason will be required', () => {
+    const parsed = CoveragePolicySchema.parse({
+      tables: [
+        {
+          name: 'invoices',
+          requiredOperations: ['read'],
+          disposition: { kind: 'not-user-facing' },
+        },
+      ],
+    });
+    expect(parsed.tables[0]?.disposition?.reason).toBeUndefined();
+    expect(coverageDispositionDeprecations(parsed.tables)).toEqual([
+      "coveragePolicy table 'invoices' disposition records no 'reason' — 'reason' will be required",
+    ]);
+    const withReason = CoveragePolicySchema.parse({
+      tables: [
+        {
+          name: 'invoices',
+          requiredOperations: ['read'],
+          disposition: { kind: 'not-user-facing', reason: 'kept' },
+        },
+      ],
+    });
+    expect(coverageDispositionDeprecations(withReason.tables)).toEqual([]);
+    const viaNote = CoveragePolicySchema.parse({
+      tables: [
+        {
+          name: 'invoices',
+          requiredOperations: ['read'],
+          disposition: { kind: 'not-user-facing', note: 'legacy' },
+        },
+      ],
+    });
+    const noteWarnings = coverageDispositionDeprecations(viaNote.tables);
+    expect(noteWarnings.some((line) => line.includes('will be required'))).toBe(false);
+    expect(noteWarnings.some((line) => line.includes("deprecated 'note' alias"))).toBe(true);
   });
 });
