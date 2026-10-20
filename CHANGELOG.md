@@ -19,6 +19,23 @@
   every queued chain before the report, freeze handler and leftover
   force-close read anything.
 
+- **Fixed: a supervisor session open aborted at the transport no longer
+  orphans the witness session it minted.** The drain recorded the
+  worker slot only when `client.openSession` resolved, so an open whose
+  response was lost after the witness had already bound the session
+  (the 5 s supervisor call timeout fired) left the session open with
+  no owner: the test's own ends closed nothing, and the NEXT test on
+  that worker was 409-refused (`worker N already carries an open
+  session for testId '<prev>'`) and failed with "No supervisor-issued
+  witness session". The drain now makes ONE further idempotent open
+  call when an open fails at the transport level (status 0 — the
+  outcome is unknown): the witness answers the identical (worker,
+  testId) re-open with the same session, so the original session is
+  reclaimed, never duplicated. A definite refusal (403/409/400) is
+  never retried, a recovery that also fails fails closed exactly as
+  before, and every other lifecycle rule (conflicts, release/seal
+  order, freeze audit) is unchanged.
+
 ## 0.18.0
 
 - **Fixed: the run-wide complete-scan check counts only files a detector
