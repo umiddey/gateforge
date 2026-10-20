@@ -239,6 +239,24 @@ export function startSupervisorSpoolDrain(options: {
 
   let settling: Promise<void> = Promise.resolve();
 
+  // Outcome-end chains (observe finalize → seal) that run OFF the
+  // critical path. The serial drain delayed EVERY later spool event
+  // behind a PASSED test's finalize, and a finalize that resolves
+  // adapter reads over HTTP can outlast the NEXT test's 5 s session
+  // wait ("No supervisor-issued witness session") although nothing is
+  // wrong with that test. Chains are queued in spool order and executed
+  // serially, so the witness sees the exact call sequence the
+  // fully-serial drain produced: finalize still precedes seal for the
+  // session, re-deliveries behave identically, and `stop` settles the
+  // queue before the report, audit and force-close read anything.
+  let outcomeChains: Promise<void> = Promise.resolve();
+  const enqueueOutcomeChain = (work: () => Promise<void>): void => {
+    const chained = outcomeChains.then(work).catch((error: unknown) => {
+      console.warn(`[gateforge] supervisor outcome chain failed: ${(error as Error).message}`);
+    });
+    outcomeChains = chained;
+  };
+
 /** One parked `whenIntentsForwarded` wait and the count it waits for. */
 interface ForwardWaiter {
   /** The count this caller is waiting for. */
@@ -478,10 +496,20 @@ const releaseReachedWaiters = (): void => {
           return;
         }
         released.outcome = event.outcome;
-        if (event.outcome === 'passed') {
-          await finalizeObserveQuietly({ sessionId: released.sessionId, testId: event.testId });
-        }
-        await sealQuietly({ sessionId: released.sessionId, testId: event.testId }, event.outcome);
+        // Off the critical path (module doc, "WORKER-SIDE END"): the
+        // worker slot is already released, so the next test's begin
+        // must open NOW — not after this test's observe finalize,
+        // which resolves adapter reads over HTTP and can outlast the
+        // next test's 5 s session wait. Finalize still precedes seal
+        // for this session inside the queued chain.
+        const releasedSlot: OpenSlot = { sessionId: released.sessionId, testId: event.testId };
+        const releasedOutcome = event.outcome;
+        enqueueOutcomeChain(async () => {
+          if (releasedOutcome === 'passed') {
+            await finalizeObserveQuietly(releasedSlot);
+          }
+          await sealQuietly(releasedSlot, releasedOutcome);
+        });
         return;
       }
       // The end of a test whose begin the drain saw but never opened a
@@ -719,6 +747,12 @@ const releaseReachedWaiters = (): void => {
       await loop.catch(() => undefined);
       await drainOnce();
       await settling;
+      // Every queued outcome chain must be settled before anything
+      // reads the run: the report returns `observeNotes`, the freeze
+      // handler polls for sealed prerequisite sessions, and the
+      // leftover force-close below must not overlap a chain still
+      // sealing its own session.
+      await outcomeChains;
       const rows: Array<{ testId: string; step: string }> = [];
       const truncatedTestIds: string[] = [];
       for (const [testId, ui] of [...uiByTest].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
