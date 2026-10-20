@@ -459,13 +459,28 @@ function completeScanHolds(
   // Coverage gaps (red-team round 4): every requested file must be
   // applicable to at least one rule. A resource-scoped proof checks only
   // files applicable to its selected detector; unrelated language roots do
-  // not become holes in that resource's proof.
-  const coveredScope =
-    relevantDetector === undefined
-      ? requested
-      : requested.filter((path) =>
-          rules.some((rule) => rule.appliesTo.some((pattern) => globMatch(path, pattern))),
-        );
+  // not become holes in that resource's proof. (a, 2026-10-20): the
+  // RUN-WIDE branch (no selected detector) counts only files a detector
+  // can READ — requested paths inside the pipeline-reported detector
+  // input set (`eligiblePaths`), exactly the scoping
+  // `exposureCoverageHolds` below applies — so unruled non-code files
+  // inside `scanRoots` (README, lock files, images) are not "coverage
+  // gaps" and the run can attest a complete scan. Fail-closed is
+  // untouched: with no reported input set every requested path stays in
+  // scope, and a detector-eligible file no rule claims is still a hole.
+  let coveredScope: readonly string[];
+  if (relevantDetector !== undefined) {
+    coveredScope = requested.filter((path) =>
+      rules.some((rule) => rule.appliesTo.some((pattern) => globMatch(path, pattern))),
+    );
+  } else if (scan.eligiblePaths === undefined) {
+    // No reported detector input set: nothing is known to be non-code,
+    // so every requested path stays in scope (fail closed).
+    coveredScope = requested;
+  } else {
+    const eligibleSet = new Set(scan.eligiblePaths);
+    coveredScope = requested.filter((path) => eligibleSet.has(path));
+  }
   if (
     relevantPaths !== undefined &&
     relevantPaths.some(

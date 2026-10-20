@@ -2335,7 +2335,31 @@ resource only on an exact name plus a corroborating fact (a response or
 request schema named after it, or a handler named after it), and it does
 not do that here. If one of the candidates is right, give the route the
 evidence: name the response model or the handler after the resource, or
-declare the missing mapping. If none is right, the route genuinely serves
+declare the mapping with a `resource:` rule in the `endpoints:` section
+of `.gateforge/classification-policy.yml`:
+
+```yaml
+endpoints:
+  rules:
+    - match: backend/routes/log_routes.py   # the router file that serves it
+      resource: report_logs                 # the EXACT discovered resource name
+      reason: the logs route reads report_logs rows by id
+```
+
+A declared `resource:` REPLACES the path-derived guess for every endpoint
+the rule matches. The declared name must equal a discovered business
+resource EXACTLY: an unknown name is a blocking
+`ENDPOINT_RESOURCE_DECLARATION_UNMATCHED` entry naming the rule
+(`rules[i]`) and the closest discovered names, and two matching rules
+that name DIFFERENT resources are a blocking
+`ENDPOINT_RESOURCE_DECLARATION_CONTRADICTION` that links nothing — never
+first-rule-wins. A valid declaration clears THIS entry for the declared
+route (a declared route never falls back to the candidate channel), so it
+stops failing a run-wide complete-scan proof. A rule may carry
+`capability:` as well; `capability` is optional exactly when `resource:`
+is present, and every rule carries at least one of the two plus a
+non-empty `reason`. With no `resource:` anywhere the compiled output is
+unchanged. If none of the candidates is right, the route genuinely serves
 something the resource graph does not model. A route that links, a route
 with nothing near it, and any collection route are unaffected.
 
