@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.18.0
+
+- **Fixed: the run-wide complete-scan check counts only files a detector
+  can read.** With no detector selected, the run-wide branch scoped
+  coverage to every requested file, so unruled non-code files inside the
+  scan roots (README, lock files, images) were "coverage gaps" and the
+  run could never attest a complete scan. The run-wide branch now scopes
+  to the pipeline-reported detector input set (`eligiblePaths`), exactly
+  the scoping `exposureCoverageHolds` already applied, and stays
+  fail-closed when that set is absent: every requested path stays in
+  scope, and a detector-eligible file no rule claims is still a hole.
+- **Added: declared route→resource links — a `resource:` key on the
+  `endpoints.rules` entries of `.gateforge/classification-policy.yml`.**
+  The reference documentation told owners to "declare the missing
+  mapping", but no such key parsed. A matching rule's `resource` must
+  equal a discovered business resource EXACTLY and links the endpoint
+  INSTEAD of the path-derived name guess, clearing
+  `ENDPOINT_RESOURCE_CANDIDATE_UNMATCHED` and
+  `ENDPOINT_RESOURCE_LINK_UNRESOLVED` for the declared route so it stops
+  failing the run-wide complete-scan proof. An unknown name is a blocking
+  `ENDPOINT_RESOURCE_DECLARATION_UNMATCHED` entry naming the rule and the
+  closest discovered names; matching rules naming different resources are
+  a blocking `ENDPOINT_RESOURCE_DECLARATION_CONTRADICTION` that links
+  nothing — never first-rule-wins. `capability` is optional exactly when
+  `resource` is present (every rule carries at least one of the two, plus
+  a `reason`); the unmatched entry's detail text names the new channel;
+  with no `resource` anywhere the compiled output is unchanged.
+- **Fixed: the exact-value echo check treats two timestamps naming the
+  same instant as equal.** Echo comparisons compared canonical JSON
+  strings, so a record sent as `"2026-01-01T09:33:00.000Z"` and read back
+  as `"2026-01-01T09:33:00Z"` graded `EVIDENCE_VALUE_MISMATCH`. When BOTH
+  values are full RFC 3339 date-times with an explicit offset, their
+  instants are compared; everything else (date-only strings, offset-less
+  date-times, values a real time amount apart, non-timestamp strings)
+  keeps the existing string equality. No tolerance window.
+- **Fixed: the exact-value echo compares a JSON number and a decimal
+  string as exact decimals.** A journey that entered `deduction_amount`
+  as the number `0` failed the echo because the persisted read carried
+  the string `"0.00"` — the same value in two spellings. When one side
+  is a JSON number and the other a plain decimal string, both are
+  normalised to sign + integer digits + fraction digits with trailing
+  zeros stripped and compared exactly: no float conversion of the
+  string, no tolerance window. `0.1` vs `"0.10000001"`, exponent forms
+  (`"1e2"` on the string, a number whose shortest string is `1e-7`),
+  `"NaN"`/`"Infinity"`, the empty string and a leading `+` stay
+  mismatches, and number-vs-number / string-vs-string keep the exact
+  rule.
+
 ## 0.17.0
 
 - **Changed: an active disposition excuses matching rule obligations.**

@@ -520,6 +520,84 @@ function declaredFieldsMatchFailure(
 }
 
 /**
+ * (d, 2026-10-20): a JSON number on one side and a decimal string on the
+ * other name the same value in two spellings (PM proof r8: the journey
+ * entered `deduction_amount` as the JSON number `0`, the Pydantic echo
+ * read back `"0.00"`), so they compare as EXACT decimals. Both sides are
+ * normalised to sign + integer digits + fraction digits with trailing
+ * zeros stripped and compared; there is no float conversion of the
+ * string and no tolerance window (`0.1` vs `"0.10000001"` stays a
+ * mismatch). The number side goes through its shortest round-trip
+ * decimal string (`String`); a number whose string carries an exponent
+ * (`1e-7`, `1e+21`) and a non-decimal string (`"NaN"`, `"Infinity"`,
+ * `""`, `"+1"`, `"1e2"`) fall back to the literal rule — which never
+ * equates a number with a string, so those stay mismatches. Returns
+ * null when the (d) rule does not apply (both numbers, both strings, or
+ * a non-decimal pair) so the caller keeps the canonical-JSON rule as
+ * the single authority.
+ */
+const DECIMAL_ECHO_PATTERN = /^(-)?(\d+)(?:\.(\d+))?$/;
+
+function normaliseDecimalEcho(sign: string, integer: string, fraction: string): string {
+  const intDigits = integer.replace(/^0+(?=\d)/, '');
+  const fracDigits = fraction.replace(/0+$/, '');
+  const negative = sign === '-' && (intDigits !== '0' || fracDigits !== '');
+  return `${negative ? '-' : ''}${intDigits}${fracDigits === '' ? '' : `.${fracDigits}`}`;
+}
+
+function exactDecimalEchoEqual(entered: JsonValue, persisted: JsonValue): boolean | null {
+  const numberSide =
+    typeof entered === 'number' ? entered : typeof persisted === 'number' ? persisted : null;
+  const stringSide =
+    typeof entered === 'string' ? entered : typeof persisted === 'string' ? persisted : null;
+  if (numberSide === null || stringSide === null || !Number.isFinite(numberSide)) return null;
+  const numberMatch = DECIMAL_ECHO_PATTERN.exec(String(numberSide));
+  const stringMatch = DECIMAL_ECHO_PATTERN.exec(stringSide);
+  if (numberMatch === null || stringMatch === null) return null;
+  return (
+    normaliseDecimalEcho(numberMatch[1] ?? '', numberMatch[2] ?? '', numberMatch[3] ?? '') ===
+    normaliseDecimalEcho(stringMatch[1] ?? '', stringMatch[2] ?? '', stringMatch[3] ?? '')
+  );
+}
+
+/**
+ * The ONE equality rule for EVERY exact-value echo comparison
+ * (item c, 2026-10-20): when BOTH values are strings shaped as full
+ * RFC 3339 date-times WITH an explicit offset (`Z` or `±hh:mm`), they
+ * are equal when they name the same INSTANT — a producer that stamps
+ * `…09:33:00.000Z` and a reader that returns `…09:33:00Z` echoed the
+ * same fact, and the PM real case (`responsibility_delegations.end_at`)
+ * must not block on a difference no application could observe.
+ * Everything else keeps the exact canonical-JSON string rule:
+ * date-only strings, offset-less date-times, and values differing by
+ * any real time amount (including 1 ms — there is no tolerance window)
+ * stay mismatches, and an offset-full-looking string that cannot be
+ * parsed fails closed to the exact rule too. Since item (d, 2026-10-20)
+ * one further exception: a JSON number vs a decimal string compares as
+ * exact decimals (see `exactDecimalEchoEqual`); everything else keeps
+ * the exact canonical-JSON rule.
+ */
+function echoValuesEqual(entered: JsonValue, persisted: JsonValue): boolean {
+  const stamp = /^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-]\d{2}:\d{2})$/;
+  if (
+    typeof entered === 'string' &&
+    typeof persisted === 'string' &&
+    stamp.test(entered) &&
+    stamp.test(persisted)
+  ) {
+    const enteredMs = Date.parse(entered);
+    const persistedMs = Date.parse(persisted);
+    if (Number.isFinite(enteredMs) && Number.isFinite(persistedMs)) {
+      return enteredMs === persistedMs;
+    }
+  }
+  // (d): a JSON number vs a decimal string compares as exact decimals.
+  const decimal = exactDecimalEchoEqual(entered, persisted);
+  if (decimal !== null) return decimal;
+  return canonicalJson(persisted) === canonicalJson(entered);
+}
+
+/**
  * Exact-value echo (plan §3.6, adopted from the consumer precedent):
  * for a create/update obligation whose journey collects input in the UI,
  * the witnessed `ui.action` record's DECLARED INPUT fields (what the
@@ -569,7 +647,10 @@ function exactValueEchoFailure(
     const enteredValue = entered[key];
     if (!isJsonValue(enteredValue)) continue;
     const persistedValue = persisted[key];
-    if (!isJsonValue(persistedValue) || canonicalJson(persistedValue) !== canonicalJson(enteredValue)) {
+    // (c)+(d): same-instant RFC 3339 date-times and number-vs-decimal-string
+    // exact decimals echo each other; see `echoValuesEqual` — everything
+    // else stays exact-string.
+    if (!isJsonValue(persistedValue) || !echoValuesEqual(enteredValue, persistedValue)) {
       return (
         `exact-value echo violation (EVIDENCE_VALUE_MISMATCH): the '${UI_ACTION_KIND}' declared ` +
         `input ${key}=${canonicalJson(enteredValue)} but the engine-observed persisted fields on ` +
@@ -717,7 +798,10 @@ function observedEchoFailure(
     const observedValue = observed[key];
     if (!isJsonValue(observedValue)) continue;
     const persistedValue = persisted[key];
-    if (!isJsonValue(persistedValue) || canonicalJson(persistedValue) !== canonicalJson(observedValue)) {
+    // (c)+(d): same-instant RFC 3339 date-times and number-vs-decimal-string
+    // exact decimals echo each other; see `echoValuesEqual` — everything
+    // else stays exact-string.
+    if (!isJsonValue(persistedValue) || !echoValuesEqual(observedValue, persistedValue)) {
       return (
         `exact-value echo violation (EVIDENCE_VALUE_MISMATCH): the test sent ` +
         `${key}=${canonicalJson(observedValue)} (witness-observed request) but the independently ` +

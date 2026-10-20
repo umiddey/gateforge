@@ -21,6 +21,14 @@
  *   only `crud-*` fallbacks defer); disagreement emits a typed
  *   `ENDPOINT_CAPABILITY_CONTRADICTION` blocking entry and applies
  *   nothing — never first-rule-wins.
+ * - (b, 2026-10-20) a rule may instead declare `resource:` — the EXACT
+ *   discovered business resource the route serves. Agreement links the
+ *   endpoint INSTEAD of the path-derived name guess (clearing the
+ *   `ENDPOINT_RESOURCE_CANDIDATE_UNMATCHED` channel); an unknown name is
+ *   a typed `ENDPOINT_RESOURCE_DECLARATION_UNMATCHED` blocking entry;
+ *   disagreement is a typed `ENDPOINT_RESOURCE_DECLARATION_CONTRADICTION`
+ *   and links nothing. `capability` is optional exactly when `resource`
+ *   is present; with no `resource` anywhere the output is unchanged.
  *
  * A declared `crud-delete`/`crud-archive` is the ONE delete answer that
  * needs no linked model, so it lives here and here only for that case.
@@ -68,7 +76,7 @@ export type EndpointCapability = (typeof ENDPOINT_CAPABILITIES)[number];
 const RULE_METHODS: readonly string[] = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'];
 
 /** The only keys a rule object may carry. */
-const RULE_KEYS: readonly string[] = ['match', 'handlers', 'paths', 'method', 'capability', 'reason'];
+const RULE_KEYS: readonly string[] = ['match', 'handlers', 'paths', 'method', 'capability', 'resource', 'reason'];
 
 /** One reviewed capability rule of the declarative endpoint config. */
 export interface EndpointCapabilityRule {
@@ -93,8 +101,21 @@ export interface EndpointCapabilityRule {
   readonly paths?: readonly string[];
   /** Exact HTTP method this rule is scoped to (never `ANY`). */
   readonly method?: HttpMethod;
-  /** The capability this rule asserts (strict vocabulary). */
-  readonly capability: EndpointCapability;
+  /**
+   * The capability this rule asserts (strict vocabulary). Optional since
+   * (b, 2026-10-20): a rule that declares a `resource` instead carries
+   * the route→resource link — every rule must carry at least one of the
+   * two.
+   */
+  readonly capability?: EndpointCapability;
+  /**
+   * The business resource this route serves (b, 2026-10-20): the EXACT
+   * name of a discovered business resource. A matching, agreeing
+   * declaration links the endpoint INSTEAD of the path-derived name
+   * guess; an unknown name is a typed blocking entry; disagreeing rules
+   * are a typed contradiction and link nothing.
+   */
+  readonly resource?: string;
   /** Required non-empty human rationale; rides contradiction diagnostics. */
   readonly reason: string;
 }
@@ -193,14 +214,34 @@ function parseEndpointCapabilityRule(value: unknown, index: number): EndpointCap
     method = raw as HttpMethod;
   }
   const capability = record['capability'];
-  if (
-    typeof capability !== 'string' ||
-    !ENDPOINT_CAPABILITIES.includes(capability as EndpointCapability)
-  ) {
+  const resource = record['resource'];
+  if (capability === undefined && resource === undefined) {
     throw new Error(
-      `invalid endpoints config: ${at}.capability must be one of: ` +
-        `${ENDPOINT_CAPABILITIES.map((value) => `'${value}'`).join(', ')}`,
+      `invalid endpoints config: ${at} must carry at least one of 'capability' or 'resource'`,
     );
+  }
+  let declaredCapability: EndpointCapability | undefined;
+  if (capability !== undefined) {
+    if (
+      typeof capability !== 'string' ||
+      !ENDPOINT_CAPABILITIES.includes(capability as EndpointCapability)
+    ) {
+      throw new Error(
+        `invalid endpoints config: ${at}.capability must be one of: ` +
+          `${ENDPOINT_CAPABILITIES.map((value) => `'${value}'`).join(', ')}`,
+      );
+    }
+    declaredCapability = capability as EndpointCapability;
+  }
+  let declaredResource: string | undefined;
+  if (resource !== undefined) {
+    if (typeof resource !== 'string' || resource.trim().length === 0) {
+      throw new Error(
+        `invalid endpoints config: ${at}.resource must be a non-empty string ` +
+          '(the EXACT name of a discovered business resource)',
+      );
+    }
+    declaredResource = resource;
   }
   const reason = record['reason'];
   if (typeof reason !== 'string' || reason.trim().length === 0) {
@@ -216,7 +257,8 @@ function parseEndpointCapabilityRule(value: unknown, index: number): EndpointCap
       : {}),
     ...(hasPaths ? { paths: validatePatternList(record['paths'], `${at}.paths`, 'url') } : {}),
     ...(method !== undefined ? { method } : {}),
-    capability: capability as EndpointCapability,
+    ...(declaredCapability !== undefined ? { capability: declaredCapability } : {}),
+    ...(declaredResource !== undefined ? { resource: declaredResource } : {}),
     reason,
   };
 }
@@ -231,10 +273,11 @@ function parseEndpointCapabilityRule(value: unknown, index: number): EndpointCap
  * partial trust).
  *
  * Accepted shape: `{ rules: [{ match?, handlers?, paths?, method?,
- * capability, reason }] }` — a rule carries AT LEAST ONE selector
+ * capability?, resource?, reason }] }` — a rule carries AT LEAST ONE selector
  * (`match` router-file glob, `handlers` handler-simple-name globs,
- * `paths` canonical-path globs), an optional exact `method`, always a
- * strict `capability` and a non-empty human `reason`.
+ * `paths` canonical-path globs), an optional exact `method`, at least one
+ * of a strict `capability` or a `resource` (the EXACT discovered business
+ * resource name, b), and a non-empty human `reason`.
  *
  * Args:
  *   section: the parsed section, or null/undefined when absent.
@@ -359,10 +402,56 @@ export function resolveDeclaredCapabilities(
   const hits: EndpointRuleHit[] = [];
   for (let index = 0; index < config.rules.length; index += 1) {
     const rule = config.rules[index];
-    if (rule === undefined || !endpointRuleMatches(rule, input)) continue;
+    // A rule that declares only a `resource` (b, 2026-10-20) is the
+    // resource channel's input — it asserts no capability here.
+    if (rule === undefined || rule.capability === undefined) continue;
+    if (!endpointRuleMatches(rule, input)) continue;
     hits.push({ index, capability: rule.capability, reason: rule.reason });
   }
   const first = hits[0];
   const conflict = first !== undefined && hits.some((hit) => hit.capability !== first.capability);
+  return { hits, conflict };
+}
+
+/** One rule that declared a resource for an endpoint (config order preserved). */
+export interface EndpointResourceHit {
+  /** The rule's 0-based index in the config document. */
+  readonly index: number;
+  /** The declared business resource name. */
+  readonly resource: string;
+  /** The rule's human review rationale. */
+  readonly reason: string;
+}
+
+/** The deterministic outcome of resource-declaration evaluation for one endpoint. */
+export interface EndpointResourceResolution {
+  /** Every matching resource-declaring rule, in config order (may be empty). */
+  readonly hits: readonly EndpointResourceHit[];
+  /** True when ≥2 rules matched and declare DIFFERENT resources. */
+  readonly conflict: boolean;
+}
+
+/**
+ * The resource-declaration twin of {@link resolveDeclaredCapabilities}
+ * (b, 2026-10-20): collect every matching rule that declares a
+ * `resource`, in config order; when they all name the SAME resource,
+ * that declaration links the endpoint INSTEAD of the path-derived name
+ * guess; when they disagree, `conflict` is true and NOTHING is linked
+ * (the compiler emits the typed contradiction — never first-rule-wins).
+ * Rules without `resource` never match here.
+ */
+export function resolveDeclaredResources(
+  config: EndpointsConfig,
+  input: EndpointMatchInput,
+): EndpointResourceResolution {
+  const hits: EndpointResourceHit[] = [];
+  for (let index = 0; index < config.rules.length; index += 1) {
+    const rule = config.rules[index];
+    if (rule === undefined || rule.resource === undefined) continue;
+    if (!endpointRuleMatches(rule, input)) continue;
+    hits.push({ index, resource: rule.resource, reason: rule.reason });
+  }
+  const first = hits[0];
+  const conflict = first !== undefined && hits.some((hit) => hit.resource !== first.resource);
   return { hits, conflict };
 }

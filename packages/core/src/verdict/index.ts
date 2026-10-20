@@ -31,6 +31,7 @@ export {
   type ContractCapability,
   type ContractAvailability,
   type HttpRouteCandidate,
+  type RegistryRecordLike,
 } from './registry.js';
 /**
  * The verdict-time exchange ledger (0.14 WP2): witnessed `http.exchanges`

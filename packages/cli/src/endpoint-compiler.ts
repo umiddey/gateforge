@@ -55,6 +55,8 @@
 import {
   ENDPOINT_CAPABILITY_CONTRADICTION,
   ENDPOINT_RESOURCE_CANDIDATE_UNMATCHED,
+  ENDPOINT_RESOURCE_DECLARATION_CONTRADICTION,
+  ENDPOINT_RESOURCE_DECLARATION_UNMATCHED,
   ENDPOINT_RESOURCE_LINK_UNRESOLVED,
   ENDPOINT_SEMANTICS_UNRESOLVED,
   HTTP_CONTRACT_KIND,
@@ -90,6 +92,8 @@ import {
   handlerSimpleName,
   parseEndpointsConfigDocument,
   resolveDeclaredCapabilities,
+  resolveDeclaredResources,
+  type EndpointResourceHit,
   type EndpointsConfig,
 } from './endpoint-config.js';
 import { UsageError } from './errors.js';
@@ -780,13 +784,103 @@ export function compileEndpointContribution(
     const { method, canonicalPath, routes: endpointRoutes, calls: endpointCalls } = entry;
     const resourceName = endpointResourceName(method, canonicalPath);
     const consumed = endpointCalls.length > 0;
+    const candidate = derivePathResourceName(canonicalPath);
+
+    // The rule-match input shared by both declarative endpoint channels
+    // (route→resource links and capabilities), built once per identity
+    // from the same contributing routes.
+    const endpointMatchInput = {
+      matchSources: endpointRoutes.map((route) => route.source.file),
+      matchHandlers: endpointRoutes
+        .map((route) => route.handlerSymbol)
+        .filter((symbol): symbol is string => typeof symbol === 'string')
+        .map(handlerSimpleName),
+      canonicalPath,
+      method,
+    };
+
+    // -- Declared route→resource links (b, 2026-10-20) --------------------
+    // A rule of the owner-answers `endpoints:` section may declare which
+    // resource the route serves (`resource:`). The declaration is
+    // consulted BEFORE the path-derived linkage channel and REPLACES it:
+    //   - agreeing matching rules declare the link: the endpoint links
+    //     the declared resource and the candidate channel stays silent
+    //     (a declaration is an answer, not a guess to fall back from) —
+    //     neither ENDPOINT_RESOURCE_CANDIDATE_UNMATCHED nor
+    //     ENDPOINT_RESOURCE_LINK_UNRESOLVED is minted for a declared
+    //     route, so it stops failing the run-wide complete-scan proof;
+    //   - disagreeing matching rules are a typed contradiction and link
+    //     nothing — never first-rule-wins;
+    //   - a declared name that is no discovered business resource is a
+    //     typed blocking entry naming the rule and the closest names,
+    //     and links nothing;
+    //   - no matching rule declares a resource → the path-derived
+    //     channel below decides exactly as before (byte-identical).
+    // The capability channel below keeps its own semantics byte-identical.
+    let declaredResource: EndpointResourceHit | null = null;
+    let declarationBlocked = false;
+    if (endpointsConfig !== null) {
+      const resourceResolution = resolveDeclaredResources(endpointsConfig, endpointMatchInput);
+      const declared = resourceResolution.hits[0];
+      if (resourceResolution.conflict) {
+        declarationBlocked = true;
+        const key = `resource-config:${identity}`;
+        if (!seenEndpointUnresolved.has(key)) {
+          seenEndpointUnresolved.add(key);
+          unresolved.push({
+            code: ENDPOINT_RESOURCE_DECLARATION_CONTRADICTION,
+            detail:
+              `endpoint '${identity}' matches ${resourceResolution.hits.length} endpoint-resource ` +
+              `rules asserting ${resourceResolution.hits.map((hit) => `'${hit.resource}'`).join(' vs ')}: ` +
+              resourceResolution.hits
+                .map((hit) => `rules[${String(hit.index)}] -> '${hit.resource}' (${hit.reason})`)
+                .join('; ') +
+              '; endpoint-resource rules are explicit declarations for this endpoint — ' +
+              'make the matching rules agree or remove the losing rule',
+            location: endpointRoutes[0]?.source ?? { file: '<unknown>', line: 1, col: 0 },
+          });
+        }
+      } else if (declared !== undefined && !businessNames.has(declared.resource)) {
+        declarationBlocked = true;
+        const key = `resource-config:${identity}`;
+        if (!seenEndpointUnresolved.has(key)) {
+          seenEndpointUnresolved.add(key);
+          // Closest discovered names for BOTH the declared name and the
+          // route's own path-derived candidate: the owner may have
+          // declared the wrong spelling of the resource the path names.
+          const near = [
+            ...new Set([
+              ...nearMatchResourceNames([...businessNames.keys()], declared.resource),
+              ...(candidate !== null
+                ? nearMatchResourceNames([...businessNames.keys()], candidate)
+                : []),
+            ]),
+          ]
+            .sort(compareText)
+            .slice(0, 3);
+          unresolved.push({
+            code: ENDPOINT_RESOURCE_DECLARATION_UNMATCHED,
+            detail:
+              `endpoint '${identity}' rule rules[${String(declared.index)}] declares resource ` +
+              `'${declared.resource}', which names no discovered business resource` +
+              (near.length > 0
+                ? `; closest discovered names: ${near.join(', ')} (candidates, never links)`
+                : '') +
+              '; endpoint-resource rules must name a discovered business resource EXACTLY — ' +
+              'fix the declared name or remove the rule',
+            location: endpointRoutes[0]?.source ?? { file: '<unknown>', line: 1, col: 0 },
+          });
+        }
+      } else if (declared !== undefined) {
+        declaredResource = declared;
+      }
+    }
 
     // Linkage: explicit evidence only. The path-derived name is a
     // NON-authoritative candidate; its exact or one-trailing-s singular
     // form must name EXACTLY ONE discovered business resource AND a
     // deterministic corroboration fact must hold (schema or handler word).
     // Name coincidence alone never links.
-    const candidate = derivePathResourceName(canonicalPath);
     let linkedResourceName: string | null = null;
     // A by-id route is the shape an adapter read is built from, so an
     // unmatched candidate there is the miss that mattered: the route was
@@ -795,7 +889,10 @@ export function compileEndpointContribution(
     // unmatched COLLECTION route would add an entry per route without
     // ever naming a read.
     const byIdEndpoint = canonicalPath.endsWith(HTTP_PARAM_SLOT);
-    if (candidate !== null) {
+    if (declaredResource !== null) {
+      // The owner declared the link: it REPLACES the path-derived guess.
+      linkedResourceName = declaredResource.resource;
+    } else if (!declarationBlocked && candidate !== null) {
       const singularCandidate = candidate.endsWith('s') ? candidate.slice(0, -1) : candidate;
       const matches = [...businessNames.values()].filter(
         (entry) => entry.name === candidate || entry.name === singularCandidate,
@@ -853,8 +950,9 @@ export function compileEndpointContribution(
                 ? `; closest discovered names: ${near.join(', ')} (candidates, never links)`
                 : '') +
               '; link it with evidence that names the resource (a response_model or request ' +
-              'schema named after it, or a handler named after it), or leave it unlinked — a ' +
-              'name that merely looks close never links an endpoint',
+              'schema named after it, or a handler named after it), declare the mapping with ' +
+              'a `resource:` endpoint rule in the owner-answers document, or leave it unlinked ' +
+              '— a name that merely looks close never links an endpoint',
             location: endpointRoutes[0]?.source ?? { file: '<unknown>', line: 1, col: 0 },
           });
         }
@@ -982,15 +1080,7 @@ export function compileEndpointContribution(
     // fallbacks below defer to an existing crud-* capability.
     let declaredHits: Array<{ index: number; capability: string; reason: string }> = [];
     if (endpointsConfig !== null) {
-      const resolution = resolveDeclaredCapabilities(endpointsConfig, {
-        matchSources: endpointRoutes.map((route) => route.source.file),
-        matchHandlers: endpointRoutes
-          .map((route) => route.handlerSymbol)
-          .filter((symbol): symbol is string => typeof symbol === 'string')
-          .map(handlerSimpleName),
-        canonicalPath,
-        method,
-      });
+      const resolution = resolveDeclaredCapabilities(endpointsConfig, endpointMatchInput);
       if (resolution.conflict) {
         const key = `capability-config:${identity}`;
         if (!seenEndpointUnresolved.has(key)) {

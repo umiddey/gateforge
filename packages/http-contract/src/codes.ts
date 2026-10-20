@@ -61,6 +61,27 @@ export const ENDPOINT_RESOURCE_CANDIDATE_UNMATCHED = 'ENDPOINT_RESOURCE_CANDIDAT
 export const ENDPOINT_CAPABILITY_CONTRADICTION = 'ENDPOINT_CAPABILITY_CONTRADICTION';
 
 /**
+ * An endpoint-resource rule of the owner-answers document
+ * (`endpoints.rules[].resource`, plan 20261020 item b) declares a
+ * resource name Gateforge never discovered among the business
+ * resources. Fail closed: the entry names the rule (`rules[i]`), the
+ * declared name, and the closest discovered names, and the endpoint
+ * stays UNLINKED — the path-derived candidate channel is silenced for a
+ * declared route, because a declaration is an answer, not a guess to
+ * fall back from.
+ */
+export const ENDPOINT_RESOURCE_DECLARATION_UNMATCHED = 'ENDPOINT_RESOURCE_DECLARATION_UNMATCHED';
+
+/**
+ * Two endpoint-resource rules match one endpoint identity and declare
+ * DIFFERENT resources — the declarative channel fails closed (no link)
+ * until the rules agree, exactly like `ENDPOINT_CAPABILITY_CONTRADICTION`
+ * on the capability channel. Never first-rule-wins.
+ */
+export const ENDPOINT_RESOURCE_DECLARATION_CONTRADICTION =
+  'ENDPOINT_RESOURCE_DECLARATION_CONTRADICTION';
+
+/**
  * A runtime HTTP observation that cannot be trusted (suite-submitted
  * network record, missing run binding, wrong provenance).
  */
@@ -90,6 +111,8 @@ export const HTTP_BLOCK_CODES = [
   ENDPOINT_RESOURCE_LINK_UNRESOLVED,
   ENDPOINT_RESOURCE_CANDIDATE_UNMATCHED,
   ENDPOINT_CAPABILITY_CONTRADICTION,
+  ENDPOINT_RESOURCE_DECLARATION_UNMATCHED,
+  ENDPOINT_RESOURCE_DECLARATION_CONTRADICTION,
   HTTP_OBSERVATION_UNTRUSTED,
 ] as const;
 
