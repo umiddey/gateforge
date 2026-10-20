@@ -56,6 +56,7 @@ import { CAUSE_NEXT_ACTIONS, type CauseCode } from '@gate-forge/core';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { WitnessRequestError } from '../fixture/witness-client.js';
+import type { SessionOpenResponse } from '../witness/types.js';
 import { SupervisorClient } from './client.js';
 import { readFreezeRequest } from '../discovery/prepare-barrier.js';
 import {
@@ -316,14 +317,34 @@ const releaseReachedWaiters = (): void => {
       );
       return;
     }
-    const opened = await client.openSession({
+    const openRequest = {
       testId: event.testId,
       workerIndex,
       ...(event.file !== null ? { file: event.file } : {}),
       ...(event.titlePath.length > 0 ? { titlePath: event.titlePath } : {}),
       ...(event.project !== null ? { project: event.project } : {}),
       ...(event.claims !== undefined && event.claims.length > 0 ? { claims: event.claims } : {}),
-    });
+    };
+    let opened: SessionOpenResponse;
+    try {
+      opened = await client.openSession(openRequest);
+    } catch (error) {
+      // The transport died before the witness answered, so the open's
+      // outcome is UNKNOWN: the witness may already have minted and
+      // bound the session and lost the response. An open abandoned that
+      // way is orphaned — the drain holds no slot, the test's ends
+      // close nothing, and the NEXT test on that worker is 409-refused
+      // by the still-bound session ("No supervisor-issued witness
+      // session" for an innocent test). The witness answers an
+      // identical (worker, testId) re-open idempotently with the SAME
+      // session, so ONE recovery attempt either reclaims the session
+      // the first call minted or performs the open the first call never
+      // reached. A definite refusal (403/409/400) has a KNOWN outcome
+      // and is never retried; a recovery that fails too propagates and
+      // fails closed exactly like the unrecovered open.
+      if (!(error instanceof WitnessRequestError) || error.status !== 0) throw error;
+      opened = await client.openSession(openRequest);
+    }
     openByWorker.set(workerIndex, { sessionId: opened.sessionId, testId: event.testId });
   };
 
