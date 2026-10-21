@@ -498,6 +498,27 @@ export interface TestSession {
    * the runner's reporter and is recorded by the later close.
    */
   status: 'open' | 'sealed' | 'outcome-pending';
+  /**
+   * The session's BEFORE-SNAPSHOT readiness (plan 20261021_0030_gf_
+   * infra_visibility P4): a promise that settles when the session's
+   * observe before-snapshots are stored (or finalized as error
+   * snapshots), and null once ready. The session registers under its
+   * (worker, testId) identity IMMEDIATELY — so an idempotent re-open
+   * finds it and awaits this same readiness instead of minting a second
+   * session + proxy — but /sessions/resolve refuses a not-ready session
+   * exactly like an unknown one, so no fixture can act against a
+   * half-open session whose before-state does not exist yet.
+   */
+  snapshotReady: Promise<void> | null;
+  /**
+   * Why the session died UNREGISTERED (plan 20261021_0030_gf_
+   * infra_visibility P4 finish): the proxy allocation failure message,
+   * or the abandonment reason when a different test claimed the worker
+   * while the snapshot round was still running. Null while the session
+   * lives. A re-open that waited on the readiness gate answers with
+   * exactly this failure instead of a credential that can never work.
+   */
+  openFailure: string | null;
   /** Witness-monotonic tick at open. */
   openedTick: number;
   /** Witness-monotonic tick at seal (null while open). */

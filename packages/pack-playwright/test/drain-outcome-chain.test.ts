@@ -35,10 +35,22 @@ interface ClientHarness {
   calls: string[];
   /** When armed, test A's finalizeObserve blocks until opened. */
   gateA: { promise: Promise<void>; open: () => void } | null;
+  /** When set, closeSession for this testId throws a plain Error. */
+  failCloseFor: string | null;
+  /** When set, openSession for this testId throws a plain Error. */
+  failOpenFor: string | null;
+  /** The fake client's per-path timing snapshot (plan …P3). */
+  timing: Array<{ path: string; count: number; maxMs: number; nearBudget: number; budgetMs: number }>;
 }
 
 const harness = vi.hoisted(() => {
-  const state: ClientHarness = { calls: [], gateA: null };
+  const state: ClientHarness = {
+    calls: [],
+    gateA: null,
+    failCloseFor: null,
+    failOpenFor: null,
+    timing: [],
+  };
   return state;
 });
 
@@ -55,6 +67,7 @@ vi.mock('../src/supervisor/client.js', () => {
     }
     async openSession(request: { testId: string }): Promise<{ sessionId: string }> {
       harness.calls.push(`open:${request.testId}`);
+      if (harness.failOpenFor === request.testId) throw new Error('open exploded');
       return { sessionId: `sess-${request.testId}` };
     }
     async releaseSession(request: { sessionId: string }): Promise<unknown> {
@@ -70,12 +83,19 @@ vi.mock('../src/supervisor/client.js', () => {
       return { finalized: [], notes: [`finalize ran for '${testId}'`] };
     }
     async closeSession(request: { sessionId: string }): Promise<unknown> {
-      harness.calls.push(`close:${testIdOf(request.sessionId)}`);
+      const testId = testIdOf(request.sessionId);
+      harness.calls.push(`close:${testId}`);
+      if (harness.failCloseFor === testId) throw new Error('close exploded');
       return {};
     }
     async verifyServerPersistence(): Promise<unknown> {
       harness.calls.push('verify:persist');
       return {};
+    }
+    // Plan 20261021_0030_gf_infra_visibility P3: the drain reads its
+    // client's per-path timing snapshot in `stop()`.
+    timingSnapshot(): Array<{ path: string; count: number; maxMs: number; nearBudget: number; budgetMs: number }> {
+      return [...harness.timing];
     }
   }
   return { SupervisorClient };
@@ -98,6 +118,9 @@ interface StartedDrain {
 
 const startDrain = (): StartedDrain => {
   harness.calls.length = 0;
+  harness.failCloseFor = null;
+  harness.failOpenFor = null;
+  harness.timing = [];
   let openGate: () => void = () => undefined;
   const gatePromise = new Promise<void>((resolve) => {
     openGate = resolve;
@@ -204,6 +227,68 @@ describe('supervisor drain: outcome chains off the session-open critical path', 
       expect(stopped.conflicts.length).toBeGreaterThan(0);
       expect(stopped.conflicts[0]).toContain("'lonely'");
     } finally {
+      await started.dispose();
+    }
+  });
+});
+
+describe('supervisor drain: per-path call timing exposure (plan 20261021_0030_gf_infra_visibility P3)', () => {
+  it('stop() returns the drain client per-path timing snapshot', async () => {
+    const started = startDrain();
+    harness.timing = [{ path: '/sessions/open', count: 3, maxMs: 4600, nearBudget: 3, budgetMs: 5000 }];
+    try {
+      appendSpoolEvent(started.spoolFile, event({ kind: 'testBegin', testId: 'T' }));
+      appendSpoolEvent(started.spoolFile, event({ kind: 'testEnd', testId: 'T' }));
+      appendSpoolEvent(
+        started.spoolFile,
+        event({ kind: 'testEnd', testId: 'T', outcome: 'passed', attempt: 1 }),
+      );
+      const stopped = await started.drain.stop();
+      expect(stopped.supervisorTiming).toEqual(harness.timing);
+    } finally {
+      await started.dispose();
+    }
+  });
+});
+
+describe('supervisor drain: infra event counting (plan 20261021_0030_gf_infra_visibility P2)', () => {
+  it('counts an unprocessable lifecycle event as a lifecycle-event infra event', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const started = startDrain();
+    harness.failOpenFor = 'L';
+    try {
+      appendSpoolEvent(started.spoolFile, event({ kind: 'testBegin', testId: 'L' }));
+      await vi.waitFor(() => expect(harness.calls).toContain('open:L'), { timeout: 5_000 });
+      const stopped = await started.drain.stop();
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("could not process a 'testBegin' event for 'L'"),
+      );
+      expect(stopped.infraEvents).toEqual([{ kind: 'lifecycle-event', count: 1 }]);
+      expect(stopped.conflicts).toEqual([]);
+    } finally {
+      warn.mockRestore();
+      await started.dispose();
+    }
+  });
+
+  it('counts a failed session seal as a session-close infra event', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const started = startDrain();
+    harness.failCloseFor = 'C';
+    try {
+      appendSpoolEvent(started.spoolFile, event({ kind: 'testBegin', testId: 'C' }));
+      appendSpoolEvent(started.spoolFile, event({ kind: 'testEnd', testId: 'C' }));
+      appendSpoolEvent(
+        started.spoolFile,
+        event({ kind: 'testEnd', testId: 'C', outcome: 'failed', attempt: 1 }),
+      );
+      await vi.waitFor(() => expect(harness.calls).toContain('close:C'), { timeout: 5_000 });
+      const stopped = await started.drain.stop();
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('supervisor session close failed'));
+      expect(stopped.infraEvents).toEqual([{ kind: 'session-close', count: 1 }]);
+      expect(stopped.observeNotes).toEqual([]);
+    } finally {
+      warn.mockRestore();
       await started.dispose();
     }
   });

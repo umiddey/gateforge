@@ -37,6 +37,19 @@ export type ProgressScope = 'full' | 'changed' | 'named';
 /** The outcome vocabulary every runner adapter normalizes to. */
 export type ProgressOutcome = 'passed' | 'failed' | 'skipped';
 
+/**
+ * The fixture's stable infra marker (plan 20261021_0030_gf_infra_visibility,
+ * P2 item 2). MUST equal `INFRA_FAILURE_MARKER` in
+ * `packages/pack-playwright/src/fixture/fixture.ts`: every error the
+ * fixture throws because Gateforge itself could not provide its
+ * machinery starts with it, and this stream classifies a failure as
+ * `infra` from exactly that prefix.
+ */
+const INFRA_FAILURE_MARKER = '[gateforge:infra] ';
+
+/** Which side failed: Gateforge's machinery or the test under run. */
+export type ProgressFailureKind = 'infra' | 'test';
+
 /** One finished test, as the drain observed it. */
 export interface ProgressTestOutcome {
   /** The run's own test identity (`<file>#<title path>`). */
@@ -61,6 +74,8 @@ export interface ProgressFailure {
   message: string;
   /** The short `file:line` frames, at most five. */
   stackFrames: string[];
+  /** `infra` when the message carries the fixture's infra marker, else `test`. */
+  kind: ProgressFailureKind;
 }
 
 /** How long a run may be quiet before the stream says it is alive. */
@@ -102,6 +117,23 @@ function elapsedLabel(ms: number): string {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return `${String(minutes)}m${String(seconds).padStart(2, '0')}s`;
+}
+
+/**
+ * Classifies a failure's kind from its first line (plan
+ * 20261021_0030_gf_infra_visibility, P2 item 2): `infra` when the
+ * fixture's marker is there, allowing the optional `<ErrorName>: `
+ * prefix Playwright's error serialization puts in front of every
+ * thrown error's message (`name + ": " + message`,
+ * playwright/lib/util.js) — a real fixture throw arrives as
+ * `Error: [gateforge:infra] …`.
+ */
+function failureKind(message: string | undefined): ProgressFailureKind {
+  if (message === undefined) return 'test';
+  const firstLine = message.split('\n', 1)[0] ?? '';
+  const stripped =
+    firstLine.startsWith(INFRA_FAILURE_MARKER) ? firstLine : firstLine.replace(/^[A-Za-z][A-Za-z0-9_$]*:\s/, '');
+  return stripped.startsWith(INFRA_FAILURE_MARKER) ? 'infra' : 'test';
 }
 
 /** Resolves the `--progress` flag, the `run.progress` config key, and `CI`.
@@ -176,6 +208,7 @@ export class ProgressStream {
   private done = 0;
   private passed = 0;
   private failed = 0;
+  private failedInfra = 0;
   private skipped = 0;
   private startedAt = 0;
   private lastEventAt = 0;
@@ -248,6 +281,8 @@ export class ProgressStream {
       this.line(`gateforge: – ${counter} ${displayTitle(outcome.title)} (skipped)`);
     } else {
       this.failed += 1;
+      const kind = failureKind(outcome.message);
+      if (kind === 'infra') this.failedInfra += 1;
       const detail =
         outcome.message === undefined || outcome.message.length === 0
           ? ''
@@ -258,6 +293,7 @@ export class ProgressStream {
         title: safeTitle(outcome.title),
         message: outcome.message === undefined ? '' : guardedMessage(outcome.message),
         stackFrames: dedupeFrames(outcome.stackFrames ?? []),
+        kind,
       });
     }
   }
@@ -268,7 +304,9 @@ export class ProgressStream {
     this.finished = true;
     this.disarm();
     this.line(
-      `gateforge: run finished — ${String(this.passed)} passed, ${String(this.failed)} failed, ` +
+      `gateforge: run finished — ${String(this.passed)} passed, ` +
+        `${String(this.failed)} failed (${String(this.failedInfra)} infra, ` +
+        `${String(this.failed - this.failedInfra)} test), ` +
         `${String(this.skipped)} skipped in ${elapsedLabel(this.clock() - this.startedAt)}; grading…`,
     );
   }

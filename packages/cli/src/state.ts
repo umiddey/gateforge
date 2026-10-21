@@ -43,6 +43,7 @@ import {
   type ResourceGraph,
   type RunManifest,
 } from '@gate-forge/core';
+import type { SupervisorPathTiming } from '@gate-forge/pack-playwright';
 import type { InputSnapshot } from './input-snapshot.js';
 import { UsageError } from './errors.js';
 import type { CandidateTreeEntry } from './candidate-tree.js';
@@ -577,11 +578,12 @@ export function writeRunScopeView(stateDir: string, scope: 'full' | 'changed' | 
  * A failed witnessed test used to ship nothing but an ARIA snapshot:
  * the runner's message and stack lived in the runner log, which the CI
  * job keeps private precisely because it carries secrets. This file is
- * the screened alternative — the first error line and a short
- * `file:line` stack per failure, already passed through the credential
- * guard, never a request or response body. It is written only when the
- * progress stream is on, so a local run leaves the state directory
- * exactly as it found it.
+ * the screened alternative — the first error line, a short
+ * `file:line` stack and the failure `kind` (`infra` when the fixture's
+ * stable marker was in the message, `test` otherwise) per failure,
+ * already passed through the credential guard, never a request or
+ * response body. It is written only when the progress stream is on, so
+ * a local run leaves the state directory exactly as it found it.
  *
  * Args:
  *   stateDir: absolute run-state directory.
@@ -599,17 +601,51 @@ export function writeTestFailures(
     title: string;
     message: string;
     stackFrames: string[];
+    kind: 'infra' | 'test';
   }[],
 ): void {
   writeStateFile(stateDir, 'failures.json', {
-    schemaVersion: 1,
+    schemaVersion: 2,
     runId,
     failures: failures.map((failure) => ({
       logicalKey: failure.logicalKey,
       title: failure.title,
       message: failure.message,
       stackFrames: [...failure.stackFrames],
+      kind: failure.kind,
     })),
+  } as unknown as JsonValue);
+}
+
+/**
+ * Persists the always-on per-path supervisor→witness timing aggregates
+ * (plan 20261021_0030_gf_infra_visibility, P3): count, slowest call and
+ * the near-budget calls (≥ 80 % of their timeout) per witness API path.
+ * Written unconditionally — unlike the opt-in host-load sampling —
+ * because the tally is fixed-size and secret-free by construction
+ * (paths and durations only, never a request or response body).
+ *
+ * Args:
+ *   stateDir: absolute run-state directory.
+ *   runId: the run that produced the timing.
+ *   timing: the per-path aggregates (sorted here for a stable document).
+ *
+ * Returns:
+ *   void.
+ */
+export function writeSupervisorTiming(stateDir: string, runId: string, timing: readonly SupervisorPathTiming[]): void {
+  writeStateFile(stateDir, 'supervisor-timing.json', {
+    schemaVersion: 1,
+    runId,
+    paths: [...timing]
+      .sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0))
+      .map((entry) => ({
+        path: entry.path,
+        count: entry.count,
+        maxMs: entry.maxMs,
+        nearBudget: entry.nearBudget,
+        budgetMs: entry.budgetMs,
+      })),
   } as unknown as JsonValue);
 }
 

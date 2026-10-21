@@ -28,5 +28,6 @@ export type {
   PersistenceIntentExpectation,
 } from './spool.js';
 export { SupervisorClient } from './client.js';
+export type { SupervisorPathTiming } from './client.js';
 export { startSupervisorSpoolDrain, DEFAULT_DRAIN_POLL_MS } from './drain.js';
-export type { SpoolDrainHandle } from './drain.js';
+export type { SpoolDrainHandle, DrainInfraEvent } from './drain.js';

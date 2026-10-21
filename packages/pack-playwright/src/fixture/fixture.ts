@@ -39,6 +39,16 @@ const browserDebuggingPorts = new WeakMap<Browser, number>();
 const unavailableInitiatorBrowsers = new Set<string>();
 
 /**
+ * The stable marker every fixture error carries when Gateforge itself
+ * could not provide its machinery (plan 20261021_0030_gf_infra_visibility,
+ * P2 item 1): the runner's error message starts with it, the CLI's
+ * progress stream classifies the failure `infra` from exactly that
+ * prefix, and the marker survives into failures.json. MUST equal the
+ * `INFRA_FAILURE_MARKER` copy in `packages/cli/src/progress.ts`.
+ */
+export const INFRA_FAILURE_MARKER = '[gateforge:infra] ';
+
+/**
  * Flushes this test's page observations to the witness. A flush failure
  * must never fail the app's own passing test: the failure is surfaced as
  * one diagnostic line and page proof stays fail closed (a missing record
@@ -455,7 +465,7 @@ const extended = browserRunner.extend<EvidenceFixtures>({
     const witness = new WitnessClient();
     const session = await resolveSessionBounded(witness, testInfo.testId, testInfo.workerIndex, 5_000);
     if (session === null) {
-      throw new Error(`No supervisor-issued witness session for ${testInfo.testId}.`);
+      throw new Error(`${INFRA_FAILURE_MARKER}No supervisor-issued witness session for ${testInfo.testId}.`);
     }
     // The auto fixture also runs for tests that never create a context or
     // page. Require app routing configuration only at those browser edges.
@@ -673,9 +683,11 @@ const extended = browserRunner.extend<EvidenceFixtures>({
     const witness = new WitnessClient();
     const session = await resolveSessionBounded(witness, testInfo.testId, testInfo.workerIndex, 5_000);
     if (session === null) {
-      throw new Error(`No supervisor-issued witness session for ${testInfo.testId}.`);
+      throw new Error(`${INFRA_FAILURE_MARKER}No supervisor-issued witness session for ${testInfo.testId}.`);
     }
-    if (session.proxyUrl === null) throw new Error(`No session proxy for ${testInfo.testId}.`);
+    if (session.proxyUrl === null) {
+      throw new Error(`${INFRA_FAILURE_MARKER}No session proxy for ${testInfo.testId}.`);
+    }
     await use(wrapRequestContext(request, {
       ...(projectBaseURL(testInfo) === undefined ? {} : { baseURL: projectBaseURL(testInfo) }),
       ...(appBaseURL === undefined ? {} : { appBaseURL }),
@@ -789,7 +801,7 @@ export const request = {
     let owner = testInfo;
     let session = await resolveSessionBounded(witness, owner.testId, owner.workerIndex, 5_000);
     if (session === null || session.proxyUrl === null) {
-      throw new Error(`No supervisor-issued witness session proxy for ${owner.testId}.`);
+      throw new Error(`${INFRA_FAILURE_MARKER}No supervisor-issued witness session proxy for ${owner.testId}.`);
     }
     const context = await playwrightRequest.newContext(contextOptions);
     return wrapRequestContext(context, {
@@ -809,7 +821,7 @@ export const request = {
           session = await resolveSessionBounded(witness, owner.testId, owner.workerIndex, 5_000);
         }
         if (session === null || session.proxyUrl === null) {
-          throw new Error(`No supervisor-issued witness session proxy for ${owner.testId}.`);
+          throw new Error(`${INFRA_FAILURE_MARKER}No supervisor-issued witness session proxy for ${owner.testId}.`);
         }
         return session.proxyUrl;
       },

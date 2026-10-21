@@ -11,6 +11,7 @@
  */
 import http from 'node:http';
 import https from 'node:https';
+import { performance } from 'node:perf_hooks';
 import { VERIFIER_HEADER, RUN_HEADER, DEFAULT_REQUEST_TIMEOUT_MS, ENGINE_PAGE_VISIT_BUDGET_MS } from '../constants.js';
 import type {
   ExpectedSetRequest,
@@ -35,6 +36,29 @@ import type {
   PageSweepRequest,
 } from '../witness/types.js';
 import { WitnessRequestError } from '../fixture/witness-client.js';
+
+/** A call taking at least this share of its own timeout counts as near-budget (plan 20261021_0030_gf_infra_visibility P3). */
+const NEAR_BUDGET_FRACTION = 0.8;
+
+/**
+ * One witness API path's aggregated call timing (plan
+ * 20261021_0030_gf_infra_visibility, P3): a fixed-size tally per path —
+ * never a per-call log — so memory stays flat for any run length. The
+ * drain's `stop()` result carries the snapshot so the run report can
+ * warn while calls are still inside their budget.
+ */
+export interface SupervisorPathTiming {
+  /** The witness API path, e.g. `/sessions/open`. */
+  path: string;
+  /** Every call attempted on the path, answered or not. */
+  count: number;
+  /** The slowest call's wall-clock duration in milliseconds. */
+  maxMs: number;
+  /** How many calls took ≥ 80 % of their timeout (near-budget). */
+  nearBudget: number;
+  /** The timeout budget (ms) the calls ran under. */
+  budgetMs: number;
+}
 
 /**
  * The supervisor-grade witness client.
@@ -63,6 +87,9 @@ export class SupervisorClient {
     this.verifierKey = verifierKey;
     this.timeoutMs = timeoutMs;
   }
+
+  /** The per-path timing tally (plan 20261021_0030_gf_infra_visibility P3): one fixed-size entry per API path. */
+  private readonly timingByPath = new Map<string, { count: number; maxMs: number; nearBudget: number; budgetMs: number }>();
 
   /**
    * POST /runs/expected-set (fix 2a): registers the expected test set
@@ -228,6 +255,61 @@ export class SupervisorClient {
   }
 
   /**
+   * The per-path timing tally, sorted by path — a fresh array each
+   * call, so a caller can neither poison the tally nor observe later
+   * calls through a held reference (plan 20261021_0030_gf_infra_visibility
+   * P3: surfaced through the drain's `stop()` result).
+   */
+  timingSnapshot(): SupervisorPathTiming[] {
+    return [...this.timingByPath.entries()]
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+      .map(([path, timing]) => ({
+        path,
+        count: timing.count,
+        maxMs: timing.maxMs,
+        nearBudget: timing.nearBudget,
+        budgetMs: timing.budgetMs,
+      }));
+  }
+
+  /** Folds one call's duration into the path's fixed-size tally. */
+  private recordTiming(path: string, durationMs: number, timeoutMs: number): void {
+    const timing = this.timingByPath.get(path);
+    if (timing === undefined) {
+      this.timingByPath.set(path, {
+        count: 1,
+        maxMs: durationMs,
+        nearBudget: durationMs >= NEAR_BUDGET_FRACTION * timeoutMs ? 1 : 0,
+        budgetMs: timeoutMs,
+      });
+      return;
+    }
+    timing.count += 1;
+    timing.maxMs = Math.max(timing.maxMs, durationMs);
+    timing.budgetMs = Math.max(timing.budgetMs, timeoutMs);
+    if (durationMs >= NEAR_BUDGET_FRACTION * timeoutMs) timing.nearBudget += 1;
+  }
+
+  /**
+   * One timed exchange: every supervisor→witness call funnels through
+   * here (the POST helpers via `request`, the GET reads directly), so
+   * the per-path tally is recorded at this single chokepoint — and a
+   * timed-out call counts at its full budget (plan
+   * 20261021_0030_gf_infra_visibility, P3).
+   */
+  private async exchange(
+    path: string,
+    init: { method: 'GET' | 'POST'; timeoutMs: number; payload?: unknown },
+  ): Promise<{ status: number; ok: boolean; bodyText: string }> {
+    const startedAtMs = performance.now();
+    try {
+      return await this.exchangeOnce(path, init);
+    } finally {
+      this.recordTiming(path, performance.now() - startedAtMs, init.timeoutMs);
+    }
+  }
+
+  /**
    * One HTTP exchange with ONLY this client's deadline. node:http(S)
    * `request` carries no timeout of its own, so `init.timeoutMs` — the
    * computed budget — drives the AbortSignal and is the single
@@ -238,7 +320,7 @@ export class SupervisorClient {
    * 300 s with "fetch failed". Resolves with status + body text;
    * rejects on any transport failure (abort, connect, reset).
    */
-  private exchange(
+  private exchangeOnce(
     path: string,
     init: { method: 'GET' | 'POST'; timeoutMs: number; payload?: unknown },
   ): Promise<{ status: number; ok: boolean; bodyText: string }> {

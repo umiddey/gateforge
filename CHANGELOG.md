@@ -2,6 +2,57 @@
 
 ## Unreleased
 
+## 0.18.2
+
+- **Session open runs the observe-declared resource snapshots
+  concurrently.** Session open used to pay the sum of every
+  observe-declared resource's adapter `list()` time before the runner
+  saw a session (4 × 1.5 s resources opened in ~6 s). The snapshots
+  now run via `Promise.all` over the sorted resource ids and are
+  inserted into the stored per-session map in that same sorted order,
+  so what is stored is unchanged and only the wall clock moves — open
+  takes about the slowest single snapshot (~1.6 s in the new
+  concurrency test), error snapshots still arrive exactly as before
+  (`snapshotObserveResource` never throws), and the open still waits
+  at least one resource list so the before-state exists before the
+  test acts.
+
+- **Failures are classified infra vs test.** Every error the fixture
+  throws because Gateforge itself could not provide its machinery
+  starts with the stable `[gateforge:infra] ` marker (also recognized
+  behind Playwright's `Error: ` name prefix); the finish line becomes
+  `run finished — P passed, F failed (I infra, T test), S skipped …`,
+  the drain's supervisor failures print `test-gates: infra: <count>
+  <kind>` lines next to the observe notes, and failures.json is
+  schemaVersion 2 with a per-failure `kind`. An infra failure still
+  fails its test and still blocks — this is reporting, not a pass/fail
+  change.
+
+- **Near-budget supervisor timing.** Every supervisor→witness call is
+  timed per path (count, max, calls ≥ 80 % of their timeout) at the
+  drain's `stop()`; `test-gates` prints one warning line per path with
+  a near-budget call (`test-gates: warning: /sessions/open slowest 4.6
+  s of 5 s budget (3 calls ≥ 80 %)`) next to the infra lines and
+  always writes `supervisor-timing.json` to the state dir, so a
+  timing smell is visible before the 5 s budget is actually hit.
+
+- **Stress e2e through the real CLI, and the orphaned-session fix.**
+  New `packages/cli/test/supervisor-stress-e2e.test.ts` drives
+  `test-gates` end to end with 2 workers and an environment-delayed
+  observe adapter: all-pass with a timing summary at 300 ms, and an
+  over-budget run whose failure is counted as infra with the marker in
+  failures.json. Under-budget-case review exposed a real regression:
+  a session was resolvable before its before-state existed, so the
+  session is now registered immediately with a readiness gate — an
+  identical re-open awaits the same session, `/sessions/resolve`
+  answers 404 until the before-snapshots are stored, and close/release
+  await the gate.
+
+- **Docs: "Reading a red witnessed run".** New
+  `packages/cli/README.md` section covering infra vs test failure
+  kinds, the split finish line, failures.json `kind`, the
+  `test-gates: infra:` lines and the near-budget timing warnings.
+
 ## 0.18.1
 
 - **Fixed: a slow observe finalize no longer delays the next test's

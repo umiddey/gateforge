@@ -95,6 +95,40 @@ Global flags: `--help`, `--version`. Exit codes per architecture contract 4:
 run), `2` config/usage error. `tests diagnose` has its own advisory contract
 (0/1/2 above).
 
+## Reading a red witnessed run
+
+The progress stream ends with one finish line before grading:
+
+    gateforge: run finished — 8 passed, 2 failed (1 infra, 1 test), 0 skipped in 1m32s; grading…
+
+`test` counts failures of the app under test. `infra` counts failures where
+Gateforge's own machinery could not provide what the test needed: the fixture
+throws every such error with the stable marker `[gateforge:infra] `
+(`INFRA_FAILURE_MARKER`, `packages/pack-playwright/src/fixture/fixture.ts`;
+`packages/cli/src/progress.ts` classifies the failure's first line, allowing
+the `Error: ` name prefix Playwright's error serialization adds). Both kinds
+fail the test and block the gate identically — the split only names whose
+trouble it is.
+
+When the progress stream is on, `.gateforge/test-gates/failures.json`
+(`schemaVersion: 2`) records every failed test with its credential-guarded
+`message`, short stack frames and its `kind: "infra" | "test"` — the screened
+alternative to a runner log CI keeps private.
+
+Two more stderr line groups appear beside the observe notes after the run:
+
+- `test-gates: infra: <count> <kind>` — supervisor-side trouble the drain
+  could only warn about (kinds `session-close`, `lifecycle-event`,
+  `persistence-intent`, `outcome-chain`, `test-event-observer`).
+  Diagnostics; the gate's pass/fail rules are unchanged.
+- `test-gates: warning: <path> slowest <n> s of <budget> s budget (<k> calls ≥ 80 %)`
+  — one line per witness API path with a call that took at least 80 % of its
+  timeout (5 s by default), sorted by path, so budget pressure is visible
+  before a call actually exceeds its deadline. The per-path tally (`count`,
+  `maxMs`, `nearBudget`, `budgetMs`) is always written to
+  `.gateforge/test-gates/supervisor-timing.json`; both witnessed CI templates
+  upload it beside `failures.json`.
+
 ## Proof paths
 
 - **Overlay (default).** New thin tests in `tests/e2e/gateforge/` using

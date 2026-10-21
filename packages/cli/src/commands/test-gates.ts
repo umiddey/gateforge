@@ -171,6 +171,7 @@ import {
   autoSessionNodeOptions,
   type FreezeSigningKeyPair,
   type SpoolDrainHandle,
+  type SupervisorPathTiming,
   type ExpectedSetResponse,
   type NativeInstance,
   type NativeListResult,
@@ -321,7 +322,8 @@ import {
 } from '../run-reliability.js';
 import { pruneRunHistory, recordRunHistory } from '../history.js';
 import { ProgressStream, resolveProgressTarget, type ProgressOutcome, type ProgressTarget } from '../progress.js';
-import { writeRunScopeView, writeStateFile, writeTestFailures } from '../state.js';
+import { writeRunScopeView, writeStateFile, writeSupervisorTiming, writeTestFailures } from '../state.js';
+import { supervisorTimingWarningLines } from '../supervisor-timing.js';
 import { keepFailureArtifacts } from '../failure-artifacts.js';
 import { expandSerialSelection } from '../serial-expansion.js';
 
@@ -5052,6 +5054,10 @@ async function runSupervisedTestGatesInner(
   let sessionTrace: readonly TracedTestInput[] | null = null;
   let lifecycleConflicts: string[] = [];
   let intentFailures: string[] = [];
+  // The drain client's per-path call timing (plan
+  // 20261021_0030_gf_infra_visibility, P3): captured in the `finally`
+  // below, then warned about and written to the state dir.
+  let supervisorTiming: SupervisorPathTiming[] = [];
   // The live attestation envelope (step 8 below) — fetched in the
   // `finally` while the spawned witness still serves, persisted as the
   // durable fallback, then the witness is stopped. `null` until then.
@@ -5174,6 +5180,7 @@ async function runSupervisedTestGatesInner(
     const drained = await drain.stop();
     lifecycleConflicts = drained.conflicts;
     intentFailures = drained.intentFailures;
+    supervisorTiming = drained.supervisorTiming;
     // Observe finalize notes are diagnostics (missing traffic,
     // ambiguity, adapter trouble) — the obligations stay blocking
     // through verdicts, which is the honest outcome. Surfaced on
@@ -5182,6 +5189,25 @@ async function runSupervisedTestGatesInner(
     for (const note of drained.observeNotes) {
       writeLine(io.stderr, `test-gates: ${note}`);
     }
+    // Supervisor-side infra trouble the drain could only warn about
+    // (plan 20261021_0030_gf_infra_visibility, P2 item 4): printed next
+    // to the observe notes so an operator sees machinery trouble that
+    // reaches no other returned array. Diagnostics, never run-fatal
+    // here — the gate's own fail-closed rules are untouched.
+    for (const infraEvent of drained.infraEvents) {
+      writeLine(io.stderr, `test-gates: infra: ${String(infraEvent.count)} ${infraEvent.kind}`);
+    }
+    // Near-budget supervisor→witness timing (plan
+    // 20261021_0030_gf_infra_visibility, P3): one warning per witness
+    // API path that took ≥ 80 % of its timeout, printed next to the
+    // infra lines so budget pressure is visible BEFORE a call actually
+    // exceeds its deadline, plus the always-on state document. Timing
+    // is always on (the host-load sampler above stays opt-in);
+    // reporting only — no pass/fail rule changes.
+    for (const line of supervisorTimingWarningLines(supervisorTiming)) {
+      writeLine(io.stderr, `test-gates: ${line}`);
+    }
+    writeSupervisorTiming(stateDir, manifest.runId, supervisorTiming);
     try {
       const trace = await supervisor.executionTrace();
       sessionTrace = trace === null ? null : trace.tests;
