@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.18.1
+
 - **Fixed: a slow observe finalize no longer delays the next test's
   witness session open.** The supervisor drain handled every spool
   event strictly one after another, and a PASSED test's outcome end
