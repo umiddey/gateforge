@@ -118,6 +118,8 @@ export type {
   SpoolEvent,
   SpoolEventKind,
   SpoolDrainHandle,
+  DrainInfraEvent,
+  SupervisorPathTiming,
   PersistenceIntent,
   PersistenceIntentOperation,
   PersistenceIntentPhase,

@@ -87,6 +87,7 @@ export const ENGINE_GENERATED_STATE_FILES: readonly string[] = [
   'runner-outcomes.json',
   'run-record.json',
   'run-scope.json',
+  'supervisor-timing.json',
   'test-catalog.json',
   'twin-inventory.json',
   'twin-shapes.json',

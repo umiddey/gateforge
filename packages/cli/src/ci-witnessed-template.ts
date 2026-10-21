@@ -123,6 +123,7 @@ ${ciScriptBlock(WITNESSED_VERDICT_SCRIPT)}
       - .gateforge/test-gates/receipt.json
       - .gateforge/test-gates/execution-result.json
       - .gateforge/test-gates/failures.json
+      - .gateforge/test-gates/supervisor-timing.json
     expire_in: 90 days
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
@@ -211,6 +212,7 @@ jobs:
             .gateforge/test-gates/receipt.json
             .gateforge/test-gates/execution-result.json
             .gateforge/test-gates/failures.json
+            .gateforge/test-gates/supervisor-timing.json
           if-no-files-found: warn
           retention-days: 90
 `;

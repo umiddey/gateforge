@@ -89,6 +89,11 @@ vi.mock('../src/supervisor/client.js', async () => {
     return sessionId;
   };
   class SupervisorClient {
+    // Plan 20261021_0030_gf_infra_visibility P3: the drain reads its
+    // client's per-path timing snapshot in `stop()`.
+    timingSnapshot(): Array<{ path: string; count: number; maxMs: number; nearBudget: number; budgetMs: number }> {
+      return [];
+    }
     async registerObserveDeclarations(): Promise<unknown> {
       harness.calls.push('register:observe');
       return {};

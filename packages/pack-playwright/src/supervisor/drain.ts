@@ -57,7 +57,7 @@ import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { WitnessRequestError } from '../fixture/witness-client.js';
 import type { SessionOpenResponse } from '../witness/types.js';
-import { SupervisorClient } from './client.js';
+import { SupervisorClient, type SupervisorPathTiming } from './client.js';
 import { readFreezeRequest } from '../discovery/prepare-barrier.js';
 import {
   persistenceIntentsPathFor,
@@ -77,6 +77,19 @@ interface OpenSlot {
   testId: string;
 }
 
+/**
+ * One counted class of supervisor-side infra trouble (plan
+ * 20261021_0030_gf_infra_visibility, P2 item 4): a failure the drain
+ * could only WARN about (its message reaches no other returned array),
+ * so the run report can still surface it.
+ */
+export interface DrainInfraEvent {
+  /** Stable machine kind, e.g. `session-close` or `lifecycle-event`. */
+  kind: string;
+  /** How many times the drain hit this class during the run. */
+  count: number;
+}
+
 /** Handle for a running drain (see {@link startSupervisorSpoolDrain}). */
 export interface SpoolDrainHandle {
   /**
@@ -92,8 +105,27 @@ export interface SpoolDrainHandle {
    * run-fatal). Genuine serial reporter events never conflict — any
    * conflict is worker-side forgery or runner confusion and must fail
    * the run closed downstream.
+   *
+   * `infraEvents` aggregates, per stable kind, every supervisor error
+   * the drain could only warn about (a failed session seal, an
+   * unprocessable lifecycle event, a lost persistence-intent forward,
+   * a failed outcome chain, a failed test-event observer) — the same
+   * events the drain printed to stderr, counted so the run report can
+   * surface supervisor trouble that reaches no other array.
+   *
+   * `supervisorTiming` carries the drain client's per-path call timing
+   * (plan 20261021_0030_gf_infra_visibility, P3): count, slowest call
+   * and near-budget calls (≥ 80 % of their timeout) per witness API
+   * path, sorted by path — the budget pressure is visible here BEFORE a
+   * call actually exceeds its deadline.
    */
-  stop: () => Promise<{ conflicts: string[]; intentFailures: string[]; observeNotes: string[] }>;
+  stop: () => Promise<{
+    conflicts: string[];
+    intentFailures: string[];
+    observeNotes: string[];
+    infraEvents: DrainInfraEvent[];
+    supervisorTiming: SupervisorPathTiming[];
+  }>;
   /**
    * Waits until the witness has ANSWERED the first `count` drained
    * persistence intents (refusals included — a typed refusal is an
@@ -251,8 +283,16 @@ export function startSupervisorSpoolDrain(options: {
   // session, re-deliveries behave identically, and `stop` settles the
   // queue before the report, audit and force-close read anything.
   let outcomeChains: Promise<void> = Promise.resolve();
+  // Supervisor-side infra trouble (P2 item 4): every site below that
+  // can only WARN about a supervisor error counts one event here, so
+  // stop() can return the counts and the run report can surface them.
+  const infraEventCounts = new Map<string, number>();
+  const countInfraEvent = (kind: string): void => {
+    infraEventCounts.set(kind, (infraEventCounts.get(kind) ?? 0) + 1);
+  };
   const enqueueOutcomeChain = (work: () => Promise<void>): void => {
     const chained = outcomeChains.then(work).catch((error: unknown) => {
+      countInfraEvent('outcome-chain');
       console.warn(`[gateforge] supervisor outcome chain failed: ${(error as Error).message}`);
     });
     outcomeChains = chained;
@@ -384,6 +424,7 @@ const releaseReachedWaiters = (): void => {
       // else surfaces in the trace grading (an unsealable session never
       // reads as passed).
       if (!(error instanceof WitnessRequestError)) {
+        countInfraEvent('session-close');
         console.warn(`[gateforge] supervisor session close failed: ${(error as Error).message}`);
       }
     }
@@ -452,6 +493,7 @@ const releaseReachedWaiters = (): void => {
     try {
       options.onTestEvent?.(event);
     } catch (error) {
+      countInfraEvent('test-event-observer');
       console.warn(`[gateforge] test event observer failed: ${(error as Error).message}`);
     }
     // The accepted-freeze marker is the trusted CLI's own line in this
@@ -650,6 +692,7 @@ const releaseReachedWaiters = (): void => {
           // A refused open (e.g. outside the registered expected set) is
           // logged once; the witness-side refusal is the enforcement —
           // the suite's submissions then fail closed on their own.
+          countInfraEvent('lifecycle-event');
           console.warn(
             `[gateforge] supervisor drain could not process a '${event.kind}' event for ` +
               `'${event.testId}': ${(error as Error).message}`,
@@ -693,6 +736,7 @@ const releaseReachedWaiters = (): void => {
       settling = previous
         .then(() => handleIntent(intent))
         .catch((error: unknown) => {
+          countInfraEvent('persistence-intent');
           console.warn(
             `[gateforge] supervisor drain could not forward a persistence intent for ` +
               `'${intent.claimId}': ${(error as Error).message}`,
@@ -763,7 +807,13 @@ const releaseReachedWaiters = (): void => {
   })();
 
   return {
-    stop: async (): Promise<{ conflicts: string[]; intentFailures: string[]; observeNotes: string[] }> => {
+    stop: async (): Promise<{
+      conflicts: string[];
+      intentFailures: string[];
+      observeNotes: string[];
+      infraEvents: DrainInfraEvent[];
+      supervisorTiming: SupervisorPathTiming[];
+    }> => {
       running = false;
       await loop.catch(() => undefined);
       await drainOnce();
@@ -851,7 +901,15 @@ const releaseReachedWaiters = (): void => {
           );
         }
       }
-      return { conflicts: [...conflicts], intentFailures: [...intentFailures], observeNotes: [...observeNotes] };
+      return {
+        conflicts: [...conflicts],
+        intentFailures: [...intentFailures],
+        observeNotes: [...observeNotes],
+        infraEvents: [...infraEventCounts.entries()]
+          .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+          .map(([kind, count]) => ({ kind, count })),
+        supervisorTiming: client.timingSnapshot(),
+      };
     },
     whenIntentsForwarded,
     markFreezeRelease: (marker): void => {

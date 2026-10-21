@@ -4080,16 +4080,55 @@ async function handleSessionOpen(
     const open = state.sessions.get(existingWorkerSession) as TestSession | undefined;
     if (open !== undefined && open.testId === testId) {
       // Idempotent re-open of the identical (worker, testId) session.
+      // While the first open's before-snapshots are still running, the
+      // re-open awaits the SAME readiness instead of minting a second
+      // session + proxy (the drain's one retry on a transport failure
+      // — including the client timeout — depends on this staying a
+      // single session): one open per (worker, testId), one snapshot
+      // pass, no orphaned binding.
+      if (open.snapshotReady !== null) {
+        await open.snapshotReady;
+        // The gate also settles when the session DIED unregistered (its
+        // proxy allocation failed, or a different test claimed this
+        // worker mid-round): re-check before answering and mirror the
+        // original open's failure — a 200 session view here would hand
+        // out a credential that can never work (plan P4 finish item 1).
+        if (state.sessions.get(open.sessionId) !== open) {
+          throw new HttpError(
+            500,
+            `session open failed: ${open.openFailure ?? 'the session was unregistered while its before-snapshots were still running'}`,
+          );
+        }
+      }
       sendJson(res, 200, sessionView(state, open));
       return;
     }
-    sendJson(res, 409, {
-      error:
-        `worker ${String(workerIndex)} already carries an open session for testId ` +
-        `'${open === undefined ? existingWorkerSession : open.testId}'; a worker runs one test ` +
-        'at a time — close the session before opening another',
-    });
-    return;
+    if (open !== undefined && open.snapshotReady !== null) {
+      // The worker's slot carries a PENDING session for a DIFFERENT
+      // test. The supervisor opens serially per worker, so THIS open is
+      // the lifecycle signal that the previous test ended — its open
+      // answer died with the transport that abandoned it (the 5 s
+      // client timeout included). Unbind the abandoned session so this
+      // worker is never 409-refused by a response nobody can read
+      // (plan P4 rework, third gate); its snapshot round still finishes
+      // bounded and then discards itself — the completion path answers
+      // the recorded failure, never 200.
+      open.openFailure =
+        "the worker moved to a different test before this session's before-snapshots finished";
+      state.observeSnapshots.delete(open.sessionId);
+      state.sessions.delete(open.sessionId);
+      if (state.workerSessions.get(workerIndex) === open.sessionId) {
+        state.workerSessions.delete(workerIndex);
+      }
+    } else {
+      sendJson(res, 409, {
+        error:
+          `worker ${String(workerIndex)} already carries an open session for testId ` +
+          `'${open === undefined ? existingWorkerSession : open.testId}'; a worker runs one test ` +
+          'at a time — close the session before opening another',
+      });
+      return;
+    }
   }
   // Phase 4 claim injection: the supervisor carries the mapped obligation
   // claims for this test on the session-open path. Claims stay
@@ -4130,15 +4169,33 @@ async function handleSessionOpen(
   // is being graded, not compared.
   const observationOnly = claims.length === 0 && (registered?.observationOnly ?? false);
   const sessionId = randomUUID();
+  // Readiness gate (plan 20261021_0030_gf_infra_visibility P4): the
+  // deferred settles when the session's before-snapshots are stored —
+  // or finalized as error snapshots; `takeObserveSnapshots` turns a
+  // failing resource into an error snapshot instead of throwing, so the
+  // gate always opens. The session registers under its (worker, testId)
+  // identity IMMEDIATELY (idempotency for the drain's re-open), while
+  // /sessions/resolve refuses it until this promise resolves. Executor
+  // form: this package's lib predates Promise.withResolvers.
+  let resolveSnapshotReady!: () => void;
+  const snapshotReady = new Promise<void>((resolveSnapshotReadyOnce) => {
+    resolveSnapshotReady = resolveSnapshotReadyOnce;
+  });
   const session: TestSession = {
     sessionId,
     token: randomUUID(),
     testId,
     workerIndex,
     status: 'open',
+    snapshotReady,
     openedTick: (state.tick += 1),
     sealedTick: null,
     outcome: null,
+    // Why the session died UNREGISTERED (plan P4 finish): the proxy
+    // allocation failure message, or the abandonment reason when a
+    // different test claimed the worker mid-round. Null while alive; a
+    // re-open that waited on the gate answers with exactly this.
+    openFailure: null,
     intervals: new Map(),
     // Filled below: the session's DEDICATED observation-proxy ports, one
     // per attested app origin this run declares.
@@ -4171,21 +4228,69 @@ async function handleSessionOpen(
     observationOnly,
     twinShapes: [],
   };
-  // Session attribution channel (plan Phase 1): a dedicated loopback
-  // proxy port whose traffic is attributed to THIS session. Exists only
-  // when an observation proxy is wired; otherwise nothing browser-side
-  // is attributable.
-  await startSessionProxy(state, session);
+  // Registration happens IMMEDIATELY (plan 20261021_0030_gf_infra_
+  // visibility P4 rework): an identical (worker, testId) re-open must
+  // find this session and await its readiness — minting a second
+  // session + proxy for the drain's one retry orphans the first binding
+  // and can 409 the worker's next test. The session is still NOT
+  // hand-out-able until its before-state exists: /sessions/resolve
+  // refuses a not-ready session exactly like an unknown one (404), so a
+  // fixture can never act against a half-open session.
   state.sessions.set(sessionId, session);
   state.workerSessions.set(workerIndex, sessionId);
-  // Observe before-snapshots (Phase 2): the witness lists the
-  // observe-declared resources ITSELF at open. Total by construction —
-  // a snapshot failure is finalize data, never an open failure.
   try {
+    // Session attribution channel (plan Phase 1): a dedicated loopback
+    // proxy port whose traffic is attributed to THIS session. Exists
+    // only when an observation proxy is wired; otherwise nothing
+    // browser-side is attributable.
+    await startSessionProxy(state, session);
+    // Observe before-snapshots (Phase 2): the witness lists the
+    // observe-declared resources ITSELF at open. Total by construction —
+    // a snapshot failure is finalize data, never an open failure.
     await takeObserveSnapshots(state, session);
-  } catch {
+  } catch (error) {
+    // The session never became usable (e.g. the proxy port could not be
+    // allocated): undo the registration so the worker is not blocked by
+    // a session that no open can ever return, and fail the request as
+    // before. Snapshots themselves never throw (a failing resource
+    // stores its error snapshot), so this is proxy-allocation failure
+    // surface only. The readiness gate settles RESOLVED — never
+    // rejected: an unobserved rejection is an unhandledRejection — so a
+    // concurrent re-open awaiting it wakes into the unregistered
+    // re-check below and answers this same failure instead of hanging
+    // forever (plan P4 finish item 1).
+    session.openFailure = error instanceof Error ? error.message : String(error);
     state.observeSnapshots.delete(sessionId);
+    state.sessions.delete(sessionId);
+    if (state.workerSessions.get(workerIndex) === sessionId) {
+      state.workerSessions.delete(workerIndex);
+    }
+    session.snapshotReady = null;
+    resolveSnapshotReady();
+    throw error;
   }
+  if (state.sessions.get(sessionId) !== session) {
+    // The session was UNBOUND while its snapshot round ran (a different
+    // test claimed the worker — the abandonment path in the open guard
+    // below): its open answer can no longer launch a test, so discard
+    // the late snapshots, free the dedicated proxy and answer with the
+    // recorded failure — never 200 (a session view here would hand out
+    // a credential every submission refuses). The gate still resolves
+    // so any waiter wakes into the unregistered re-check.
+    state.observeSnapshots.delete(sessionId);
+    await stopSessionProxy(session);
+    await stopPageObserver(state, sessionId);
+    session.snapshotReady = null;
+    resolveSnapshotReady();
+    throw new HttpError(
+      500,
+      `session open failed: ${session.openFailure ?? 'the session was unregistered while its before-snapshots were still running'}`,
+    );
+  }
+  // Ready: the before-state exists. Clear the gate first so a waiter
+  // waking on the promise observes a fully ready session.
+  session.snapshotReady = null;
+  resolveSnapshotReady();
   sendJson(res, 200, sessionView(state, session));
 }
 
@@ -4249,6 +4354,18 @@ async function handleSessionClose(
   const session = state.sessions.get(sessionId);
   if (session === undefined) {
     throw new HttpError(400, `session '${sessionId}' is unknown (never opened on this witness)`);
+  }
+  // The seal must never overtake the snapshot round (plan P4 finish
+  // item 2): snapshots are total, so awaiting the gate is bounded, and
+  // a late snapshot can then never store before-state into an already
+  // sealed session. The session may also have died unregistered while
+  // we waited (proxy failure, or a different test claimed the worker) —
+  // refuse it like an unknown one instead of sealing a ghost.
+  if (session.snapshotReady !== null) {
+    await session.snapshotReady;
+    if (state.sessions.get(sessionId) !== session) {
+      throw new HttpError(400, `session '${sessionId}' is unknown (never opened on this witness)`);
+    }
   }
   if (session.status === 'outcome-pending') {
     if (typeof outcome === 'string') {
@@ -4504,6 +4621,18 @@ async function handleSessionRelease(
   if (session === undefined) {
     throw new HttpError(400, `session '${sessionId}' is unknown (never opened on this witness)`);
   }
+  // Same bounded wait as the close (plan P4 finish item 2): the release
+  // seals the session's lifecycle (outcome-pending) and kills its
+  // dedicated proxy, so it must not outrun the snapshot round — a late
+  // snapshot must never store before-state into a released session
+  // whose proxy is already dead. A session that died unregistered while
+  // we waited is refused like an unknown one.
+  if (session.snapshotReady !== null) {
+    await session.snapshotReady;
+    if (state.sessions.get(sessionId) !== session) {
+      throw new HttpError(400, `session '${sessionId}' is unknown (never opened on this witness)`);
+    }
+  }
   if (session.status === 'open') {
     session.status = 'outcome-pending';
     session.sealedTick = (state.tick += 1);
@@ -4546,7 +4675,16 @@ async function handleSessionResolve(
   }
   const sessionId = state.workerSessions.get(workerIndex);
   const session = sessionId === undefined ? undefined : state.sessions.get(sessionId);
-  if (session === undefined || session.status !== 'open' || session.testId !== testId) {
+  if (
+    session === undefined ||
+    session.status !== 'open' ||
+    session.testId !== testId ||
+    // Readiness gate (plan P4): a session whose before-snapshots are
+    // still running is handed out to NO ONE — the fixture polls and
+    // gets the same 404 shape an unknown session produces, until the
+    // snapshot pass stores the before-state.
+    session.snapshotReady !== null
+  ) {
     sendJson(res, 404, {
       error:
         `no open session for (workerIndex ${String(workerIndex)}, testId '${testId}'); the ` +
@@ -5422,8 +5560,18 @@ async function takeObserveSnapshots(state: WitnessState, session: TestSession): 
   if (resources.size === 0) return;
   const perSession = new Map<string, ObserveResourceSnapshot>();
   state.observeSnapshots.set(session.sessionId, perSession);
-  for (const resourceId of [...resources].sort(compareStrings)) {
-    perSession.set(resourceId, await snapshotObserveResource(state, resourceId));
+  // One slow (or failing) resource must not stretch session open by the
+  // SUM of every resource's list time: the snapshots run concurrently
+  // (plan 20261021_0030_gf_infra_visibility P1), and the results are
+  // inserted in the same sorted order a serial loop produced, so the
+  // stored map is unchanged. `snapshotObserveResource` never throws, so
+  // a resource's error snapshot arrives exactly as before.
+  const sortedResourceIds = [...resources].sort(compareStrings);
+  const snapshots = await Promise.all(
+    sortedResourceIds.map(async (resourceId) => ({ resourceId, snapshot: await snapshotObserveResource(state, resourceId) })),
+  );
+  for (const { resourceId, snapshot } of snapshots) {
+    perSession.set(resourceId, snapshot);
   }
   session.activity += 1;
 }
