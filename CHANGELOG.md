@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.18.3
+
 - **An undeclared E2E kind can no longer bypass the observed-mocking
   refusal.** The mapping resolver's §5.3 check refused a sidecar entry
   that declared an E2E kind (`browser-e2e`, `observed-e2e`, `api-e2e`)
