@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- **An undeclared E2E kind can no longer bypass the observed-mocking
+  refusal.** The mapping resolver's §5.3 check refused a sidecar entry
+  that declared an E2E kind (`browser-e2e`, `observed-e2e`, `api-e2e`)
+  for a test whose catalog row observed mocking, but an entry that left
+  `kind` out skipped the check entirely: inference kept the row's E2E
+  kind, the entry bound, and its claims reached the grading seam (the
+  witnessed lane injects sidecar claims kind-blind, so the mocked
+  test's evidence could grade the obligation). The mock refusal now
+  keys on the effective kind (`entry.kind ?? row.inferredKind`): a
+  mocked row whose inferred kind is E2E raises the same
+  `TEST_MAPPING_AMBIGUOUS` problem, `TEST_KIND_UNKNOWN` handling is
+  unchanged, and unmocked or non-E2E rows bind exactly as before.
+  Declaring the kind honestly was already refused (exit 2 at
+  declaration time), so omitting `kind` was the only way to keep a
+  mocked E2E mapping — that hole is closed. Consumer scan with the
+  fixed engine: cp-mr98 turns 0 entries newly ambiguous (its 7
+  `TEST_MAPPING_AMBIGUOUS` entries are all pre-existing declared-kind
+  contradictions); pm/suite-combined-2's check runs at review (its
+  recorded gate-before is `TEST_MAPPING_AMBIGUOUS` 0).
+
 ## 0.18.2
 
 - **Session open runs the observe-declared resource snapshots
