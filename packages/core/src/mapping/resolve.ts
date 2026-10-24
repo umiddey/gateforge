@@ -469,36 +469,44 @@ export function resolveTestMappings(input: ResolveMappingsInput): ResolvedMappin
         }
         continue;
       }
-      if (entry.kind === undefined) {
-        if (row.inferredKind === 'unknown') {
-          for (const obligationId of claims) {
-            if (!knownClaim(obligationId)) continue;
-            pushProblem({
-              cause: 'TEST_KIND_UNKNOWN',
-              obligationId,
-              detail:
-                `test '${entry.key}' (${row.file}:${row.titlePath.join('>')}) is relevant but ` +
-                'code analysis could not classify its kind — inspect and declare its kind',
-              locations: [row.sourceLocation],
-            });
-          }
+      if (entry.kind === undefined && row.inferredKind === 'unknown') {
+        for (const obligationId of claims) {
+          if (!knownClaim(obligationId)) continue;
+          pushProblem({
+            cause: 'TEST_KIND_UNKNOWN',
+            obligationId,
+            detail:
+              `test '${entry.key}' (${row.file}:${row.titlePath.join('>')}) is relevant but ` +
+              'code analysis could not classify its kind — inspect and declare its kind',
+            locations: [row.sourceLocation],
+          });
         }
         continue;
       }
+      // §5.3 parity (2026-10-24): the observed-mocking refusal keys on
+      // the EFFECTIVE kind — a declared E2E kind is refused, and an E2E
+      // kind left to inference is refused the same way. Omitting `kind`
+      // must not route a mocked test around the refusal.
       const mock = row.suppressionSignals.find((signal) => signal.kind === 'mock');
-      if (E2E_KINDS.has(entry.kind) && mock !== undefined) {
+      const effectiveKind = entry.kind ?? row.inferredKind;
+      if (E2E_KINDS.has(effectiveKind) && mock !== undefined) {
         for (const obligationId of claims) {
           pushProblem({
             cause: 'TEST_MAPPING_AMBIGUOUS',
             obligationId,
             detail:
-              `sidecar entry '${entry.key}' declares kind '${entry.kind}' but the catalog observed ` +
-              `mocking (${mock.detail}) — an explicit kind cannot override observed mocking (§5.3)`,
+              entry.kind === undefined
+                ? `sidecar entry '${entry.key}' has no declared kind but inference resolved ` +
+                  `'${row.inferredKind}' while the catalog observed mocking (${mock.detail}) — ` +
+                  'an E2E kind cannot stand on observed mocking (§5.3)'
+                : `sidecar entry '${entry.key}' declares kind '${entry.kind}' but the catalog observed ` +
+                  `mocking (${mock.detail}) — an explicit kind cannot override observed mocking (§5.3)`,
             locations: [mock.location],
           });
         }
         continue;
       }
+      if (entry.kind === undefined) continue;
       const strong = row.kindSignals[0];
       if (
         row.inferredKind !== 'unknown' &&
