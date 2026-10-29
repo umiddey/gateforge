@@ -168,9 +168,13 @@ function scan(): ClassifierScanInput {
   };
 }
 
-function classifyInput(policy: ClassifierPolicy, signals: ClassificationSignal[]): ClassifyResourcesInput {
+function classifyInput(
+  policy: ClassifierPolicy,
+  signals: ClassificationSignal[],
+  endpointOptions?: { behaviorProof?: boolean },
+): ClassifyResourcesInput {
   return {
-    resources: [tableResource(), endpointResource()],
+    resources: [tableResource(), endpointResource(endpointOptions)],
     signals,
     policy,
     adapters: [],
@@ -187,7 +191,11 @@ function decisionFor(result: ClassificationResult, name: string) {
 describe('hidden resources (plan 20261028_1945, D)', () => {
   it('(a) hidden rule + one linked endpoint with a passing behavior proof: no ADAPTER_MISSING, no INCOMPLETE_PROOF_SCOPE, resource complete', () => {
     const result = classifyResources(
-      classifyInput(hiddenPolicy({ resourceName: TABLE }), signalsWithLink(true)),
+      classifyInput(
+        hiddenPolicy({ resourceName: TABLE }),
+        signalsWithLink(true),
+        { behaviorProof: true },
+      ),
     );
     expect(result.invalidSignals).toEqual([]);
 

@@ -33,6 +33,12 @@ export const CLASSIFIER_BLOCK_CODES = [
   'DELETE_SEMANTICS_UNRESOLVED',
   /** User-facing resource with no reviewed adapter in the adapters directory. */
   'ADAPTER_MISSING',
+  /**
+   * A hidden resource (hiddenRules) no endpoint's adapter-binding
+   * signal links to: nothing in the scan can ever prove its behavior,
+   * so the hidden declaration stays incomplete (plan 20261028_1945 D).
+   */
+  'HIDDEN_RESOURCE_UNLINKED',
   /** A signal whose target matches no discovered resource. */
   'STALE_SIGNAL_TARGET',
   /** A signal whose assertion shape contradicts its dimension. */
@@ -63,6 +69,7 @@ export const BLOCK_DIMENSIONS: Record<string, string> = {
   IDENTITY_UNRESOLVED: 'identity',
   DELETE_SEMANTICS_UNRESOLVED: 'delete-semantics',
   ADAPTER_MISSING: 'adapter-binding',
+  HIDDEN_RESOURCE_UNLINKED: 'exposure',
   STALE_SIGNAL_TARGET: 'target',
   INVALID_SIGNAL: 'assertion',
   UNAUTHORIZED_SUPPRESSIVE_SIGNAL: 'provenance',
@@ -119,6 +126,25 @@ export const LifecycleDerivationSchema = z
 export type LifecycleDerivation = z.infer<typeof LifecycleDerivationSchema>;
 
 /**
+ * The hidden-resource proof record (plan 20261028_1945 D): the honest
+ * limit of a `hidden` exposure. The hidden row itself is NOT observed —
+ * no read adapter exists and no route ever serves the rows — so
+ * completeness is proven only through the linked writing endpoints'
+ * passing behavior proofs.
+ */
+export const HiddenProofSchema = z
+  .object({
+    /** The hidden row was not observed; always false by construction. */
+    observed: z.literal(false),
+    /** Ids of the linked endpoints whose behavior proof proves completeness (sorted). */
+    provenThrough: z.array(z.string().min(1)).min(1),
+  })
+  .strict();
+
+/** Inferred hidden-proof shape. */
+export type HiddenProof = z.infer<typeof HiddenProofSchema>;
+
+/**
  * The explainability trace of one classification decision (ADR 0003 D1):
  * rule ids that selected each value, the conservative defaults applied,
  * the sorted contributing-signal identities, contradictions, and the
@@ -146,6 +172,8 @@ export const ClassificationDecisionTraceSchema = z
     decisionFingerprint: z.string().min(1),
     /** Lifecycle operations omitted or marked unobservable from detector facts. */
     lifecycleDerivation: z.array(LifecycleDerivationSchema).optional(),
+    /** Hidden-resource proof record; present only for proven `hidden` decisions. */
+    hiddenProof: HiddenProofSchema.optional(),
   })
   .strict();
 
@@ -175,6 +203,8 @@ export const EffectiveClassificationSchema = ClassificationSchema.extend({
   decisionFingerprint: z.string().min(1),
   /** Lifecycle operations omitted or marked unobservable from detector facts. */
   lifecycleDerivation: z.array(LifecycleDerivationSchema).optional(),
+  /** Hidden-resource proof record; present only for proven `hidden` decisions. */
+  hiddenProof: HiddenProofSchema.optional(),
 });
 
 /** Inferred effective-classification shape. */

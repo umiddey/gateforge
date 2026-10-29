@@ -25,7 +25,7 @@
  *   unique identities — pin #1's fingerprint keys on them).
  */
 import { z } from 'zod';
-import { LocationSchema, SchemaVersionField, type ContractName, type Location } from '../schemas/common.js';
+import { LocationSchema, SchemaVersionField, type ContractName, type Exposure, type Location } from '../schemas/common.js';
 import { CauseCodeSchema } from '../schemas/verdict.js';
 import { ObligationSchema, type Obligation } from '../schemas/obligation.js';
 import { PolicyFileSchema, type Policy, type PolicyFile } from '../schemas/policy.js';
@@ -459,7 +459,11 @@ function generateObligations(
         contract.startsWith(CRUD_CONTRACT_PREFIX) ||
         contract.startsWith(PERSISTENCE_CONTRACT_PREFIX)
       ) {
-        if (exposure === 'internal') continue; // ADR 0001: internal ⇒ no CRUD obligations
+        // ADR 0001: internal ⇒ no CRUD obligations. `hidden` (plan
+        // 20261028_1945 D) skips the same lane: a user's click writes
+        // the rows and no route ever serves them back, so no CRUD
+        // claim can ever be honestly carried against it.
+        if (exposure === 'internal' || exposure === 'hidden') continue;
         // ADR 0004 D8: endpoints are routes, not tables. CRUD state
         // obligations flow through the LINKED business resource's own
         // identity; generating persistence contracts against a route
@@ -524,7 +528,7 @@ function generateObligations(
 function policyMatches(
   policy: Policy,
   resource: GraphResource,
-  exposure: 'user-facing' | 'internal',
+  exposure: Exposure,
   observationScopeAll: boolean,
 ): boolean {
   const when = policy.when;

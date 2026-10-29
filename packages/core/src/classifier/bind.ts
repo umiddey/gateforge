@@ -152,6 +152,9 @@ function bindDecision(
       ...(bound.lifecycleDerivation !== undefined
         ? { lifecycleDerivation: bound.lifecycleDerivation.map((entry) => ({ ...entry })) }
         : {}),
+      // Hidden-resource proof rides the trace (plan 20261028_1945 D):
+      // the report renders "not observed; proven through <ids>" from it.
+      ...(bound.hiddenProof !== undefined ? { hiddenProof: { ...bound.hiddenProof } } : {}),
     },
   } as GraphResource;
 }

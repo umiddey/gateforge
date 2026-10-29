@@ -77,6 +77,13 @@ function describeResult(io: Io, pipeline: Awaited<ReturnType<typeof runPipeline>
           : ' (semantics UNRESOLVED)'),
     );
     writeLine(io.stdout, `    rules: ${trace.rules.join(', ')}`);
+    if (trace.hiddenProof !== undefined) {
+      // Plan 20261028_1945 D: never claim the hidden row was observed.
+      writeLine(
+        io.stdout,
+        `    hidden: not observed; proven through ${trace.hiddenProof.provenThrough.join(', ')}`,
+      );
+    }
     if (trace.defaultsApplied.length > 0) {
       writeLine(io.stdout, `    defaults: ${trace.defaultsApplied.join(', ')}`);
     }
