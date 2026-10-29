@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.19.0
 
 - **A table a user's click writes but no route ever serves back can now
   be declared `hidden` instead of being forced into a false label.**
