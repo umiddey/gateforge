@@ -40,8 +40,13 @@ export const LocationSchema = z
 /** Inferred source location shape. */
 export type Location = z.infer<typeof LocationSchema>;
 
-/** Whether a resource is exposed to end users or purely internal. */
-export const ExposureSchema = z.enum(['user-facing', 'internal']);
+/**
+ * Whether a resource is exposed to end users, purely internal, or
+ * hidden (plan 20261028_1945): a user's click writes its rows and no
+ * route ever serves them back — no adapter/UI lane, no internality
+ * certificate; completeness is proven through the writing endpoints.
+ */
+export const ExposureSchema = z.enum(['user-facing', 'internal', 'hidden']);
 
 /** Inferred exposure shape. */
 export type Exposure = z.infer<typeof ExposureSchema>;

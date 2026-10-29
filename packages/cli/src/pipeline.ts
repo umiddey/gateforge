@@ -20,6 +20,7 @@ import {
   ClaimSchema,
   ClassificationSignalSchema,
   DISPOSITION_MAX_DAYS,
+  HTTP_ENDPOINT_RESOURCE_KIND,
   PolicyFileSchema,
   PolicyEvaluationError,
   RunManifestSchema,
@@ -507,6 +508,40 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
   const scannedPaths = [...new Set(coverage.flatMap((entry) => entry.scannedPaths))].sort(
     compareStrings,
   );
+  // Behavior policy parse (needed BEFORE classification, plan
+  // 20261028_1945 D): the hidden-resource proof stamps derive from the
+  // approved behavioral declarations below. Same parse, same errors —
+  // only earlier, so the stamp sees it.
+  let parsedBehavior: BehaviorPolicy | undefined;
+  if (config.behaviorPolicy !== undefined) {
+    try {
+      parsedBehavior = parseBehaviorPolicy(
+        loadYaml(resolveRepoPath(cwd, config.behaviorPolicy), 'behavior policy'),
+      );
+    } catch (error) {
+      if (error instanceof PolicyEvaluationError) throw new UsageError(error.message);
+      throw error;
+    }
+  }
+  // Hidden resources (plan 20261028_1945 D): the classifier proves a
+  // `hidden` exposure through the behavior proofs of the linked writing
+  // endpoints, so the pipeline stamps each declared endpoint's proof
+  // state into its attributes before classification ('passing' = the
+  // endpoint has an approved behavioral declaration — the negation of
+  // ENDPOINT_BEHAVIOR_MISSING; no stamp reads unproven, never guessed).
+  // Without `hiddenRules:` nothing is stamped: byte-identical output.
+  if ((classifierPolicy.hiddenRules ?? []).length > 0) {
+    const behaviorDeclared = new Set(
+      (parsedBehavior?.endpoints ?? []).map((endpoint) => endpoint.resourceId),
+    );
+    for (const resource of built.resources) {
+      if (resource.kind !== HTTP_ENDPOINT_RESOURCE_KIND) continue;
+      if (resource.id === null) continue;
+      if (behaviorDeclared.has(resource.id)) {
+        resource.attributes['behaviorProof'] = 'passing';
+      }
+    }
+  }
   // Automatic conservative classification (plan phase 5, ADR 0003 D2/D5):
   // every run recomputes effective classifications from the detectors'
   // classification signals over the built graph. Uncertainty resolves
@@ -544,17 +579,6 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
   });
   const dispositionNow = clock.now();
   const dispositionMaxMs = (config.disposition?.maxDays ?? DISPOSITION_MAX_DAYS) * 86_400_000;
-  let parsedBehavior: BehaviorPolicy | undefined;
-  if (config.behaviorPolicy !== undefined) {
-    try {
-      parsedBehavior = parseBehaviorPolicy(
-        loadYaml(resolveRepoPath(cwd, config.behaviorPolicy), 'behavior policy'),
-      );
-    } catch (error) {
-      if (error instanceof PolicyEvaluationError) throw new UsageError(error.message);
-      throw error;
-    }
-  }
   let policy = evaluatePolicies({
     graph,
     policies: policiesParsed.data,

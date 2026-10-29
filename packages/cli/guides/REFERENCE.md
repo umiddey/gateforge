@@ -1847,6 +1847,7 @@ pin before strict gates run.
 | --- | --- | --- |
 | `trustedInternalEntryPoints` | which entry-point categories certify internality | category + patterns + detector |
 | `internalRules` | organization rules for internal resources | `resourceName` / `resourceKind` patterns |
+| `hiddenRules` | resources users write but no route ever serves back (see [below](#hidden-resources-the-hiddenrules-section)) | `match` + `reason`, same shape as `internalRules` |
 | `lifecycleRules` | operations that structurally do not exist, for one EXACT resource | exact `<plane>.<resource>` + `disable` |
 | `deleteRules` | how removal manifests, per source glob (a RESOURCE's own answer) | `match` glob + `semantics` (+ `archiveFields`) |
 | `planes` | the plane of a source tree or table set (see [below](#endpoint-plane-rules-the-planes-section)) | `rules[]` of `match`/`tables` + `plane` + `reason` |
@@ -1864,6 +1865,63 @@ Since 0.11.0 this document holds ONLY answers. The four scanner settings
 Unknown keys, an unknown value, and two rules answering the same target
 are refused (exit 2, fail closed) — the document is an input, never a
 place to smuggle intent past the schema.
+
+## Hidden resources (the `hiddenRules:` section)
+
+Some tables a user's own click WRITES and no route ever serves back: the
+reset-password POST writes `password_reset_tokens`, and returning those
+rows would leak the token. Neither existing exposure can say this —
+`internal` means no user reaches the table at all (false here), and
+`user-facing` would demand a read-evidence adapter for a read that must
+never exist. A `hiddenRules` entry is the third answer: it gives the
+matched resources the `hidden` exposure. Same `match` + `reason` shape
+as `internalRules` (at least one of `resourceName` / `resourceKind`;
+`resourceName` is a glob, `resourceKind` is exact), and like every key
+in this document an owner answer inside the trusted-policy digest —
+never an override.
+
+```yaml
+hiddenRules:
+  - match:
+      resourceName: password_reset_tokens
+    reason: rows carry single-use reset tokens; serving them back would leak the token
+```
+
+**When `hidden` is honest.** Users' actions write the rows, and no route
+ever returns them. The `reason` must say why the rows must never be
+shown — it is rendered verbatim in the decision trace
+(`ORGANIZATION_HIDDEN_RULE(<reason>)`). A repository without a
+`hiddenRules:` key, or with an empty one, is off byte for byte: nothing
+is stamped, no exposure changes, no new block appears.
+
+**What proves it.** The hidden row itself is never observed — there is
+no read to prove. The proof is the behavior of the endpoints the scan
+links to the table (the `resource:` declaration in the
+[`endpoints:` section](#endpoint-capability-rules-the-endpoints-section),
+the same adapter-binding link the classifier already consumes): every
+linked endpoint needs an approved behavioral declaration
+(`.gateforge/behavior.yml`; `gateforge behavior draft` scaffolds one),
+and at least one linked endpoint must exist. The endpoint's
+`behaviorProof: passing` stamp means the approved declaration exists —
+it is not "a passing test": the declaration's own behavior obligations
+still have to pass WITNESSED, and they block the scan on their own
+until they do.
+
+Fail-closed outcomes, so a hidden declaration can never wave a proof
+through:
+
+- a link whose endpoint has no approved declaration →
+  `INCOMPLETE_PROOF_SCOPE`, naming the unproven endpoint ids;
+- no link at all → `HIDDEN_RESOURCE_UNLINKED` (declare the resource on
+  the writing endpoint so the link exists);
+- a route that RETURNS the rows is never silenced: the positive read
+  exposure contradicts the hidden intent and the resource resolves
+  user-facing with `CLASSIFICATION_CONTRADICTION`, exactly as it
+  contradicts internal intent.
+
+**The honest limit, printed in the report.** A proven decision reads
+`hidden: not observed; proven through <endpoint ids>` — Gateforge never
+claims the hidden row was observed, because no observation of it exists.
 
 ## Business rules (the `rules:` section)
 

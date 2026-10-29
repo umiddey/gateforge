@@ -186,6 +186,7 @@ export const RULES = {
   identityEvidence: 'IDENTITY_DETECTOR_EVIDENCE',
   adapterNameMatch: 'ADAPTER_NAME_MATCH',
   orgInternalRule: 'ORGANIZATION_INTERNAL_RULE',
+  orgHiddenRule: 'ORGANIZATION_HIDDEN_RULE',
 } as const;
 
 /** The four lifecycle-gated operations, in canonical order. */
@@ -309,11 +310,6 @@ function assertionBoolean(assertion: SignalAssertion): boolean | null {
 /** Narrows a signal assertion to a non-empty string, when it is one. */
 function assertionString(assertion: SignalAssertion): string | null {
   return typeof assertion === 'string' ? assertion : null;
-}
-
-/** Narrows a signal assertion to an ordered string list, when it is one. */
-function assertionStringList(assertion: SignalAssertion): string[] | null {
-  return Array.isArray(assertion) ? assertion : null;
 }
 
 /** Narrows a signal assertion to a record, when it is one. */
@@ -946,6 +942,8 @@ export function classifyResources(input: ClassifyResourcesInput): Classification
     exposureComplete,
     trustedCategories,
     trustedEntries,
+    resources: input.resources,
+    signals: [...pluginSignals, ...authoritySignals],
   };
   const pools = input.resources.map((_, index) => ({
     plugin: byResource[index] ?? [],
@@ -1112,6 +1110,14 @@ interface ClassifyContext {
   exposureComplete: boolean;
   trustedCategories: ReadonlySet<string>;
   trustedEntries: ClassifierPolicy['trustedInternalEntryPoints'];
+  /**
+   * The pass's full resource list and merged signal pool (plan
+   * 20261028_1945 D): the hidden-resource completeness rule resolves
+   * endpoint→resource `adapter-binding` links, whose signals route to
+   * the ENDPOINT's pool — a pool one resource never sees alone.
+   */
+  resources: readonly ClassifierResourceRef[];
+  signals: readonly ClassificationSignal[];
 }
 
 /** Sorts decisions like graph resources: id-bearing first, then by name. */
@@ -1285,7 +1291,19 @@ function classifyOne(
   );
   const hasInternalIntent = internalDeclarations.length > 0 || matchedInternalRules.length > 0;
 
-  let exposure: 'user-facing' | 'internal';
+  // Hidden rules (plan 20261028_1945 D) match exactly like internal rules
+  // (same shape) but are a SEPARATE intent: they never feed the
+  // internality certificate and never silence a positive read exposure.
+  const matchedHiddenRules = (ctx.policy.hiddenRules ?? []).filter(
+    (rule) =>
+      (rule.match.resourceName === undefined || globMatch(resource.name, rule.match.resourceName)) &&
+      (rule.match.resourceKind === undefined || rule.match.resourceKind === resource.kind),
+  );
+  // Plane-qualified ids of linked endpoints whose behavior proof passed;
+  // non-empty exactly when a `hidden` decision is proven complete.
+  const hiddenProvenThrough: string[] = [];
+
+  let exposure: 'user-facing' | 'internal' | 'hidden';
   if (resource.kind === UI_PAGE_RESOURCE_KIND) {
     exposure = 'user-facing';
     rules.push(RULES.exposurePageAudience);
@@ -1308,6 +1326,83 @@ function classifyOne(
     exposure = 'internal';
     rules.push(RULES.exposureOperationalProbe);
     contribute(...positiveExposure);
+  } else if (matchedHiddenRules.length > 0) {
+    // Owner hidden rules (plan 20261028_1945 D): a user's click writes
+    // the rows and no route ever serves them back (a password reset
+    // token). `hidden` is the third exposure — no user-facing adapter/UI
+    // lane (the adapter gate below fires for user-facing only) and no
+    // internality certificate. The honest limit: the hidden row itself
+    // is NOT observed; completeness is proven through the behavior of
+    // the endpoints the scan links to this resource, never through a
+    // read. A positive read exposure is never silenced — it contradicts
+    // the declaration exactly as it contradicts internal intent.
+    for (const rule of matchedHiddenRules) {
+      rules.push(`${RULES.orgHiddenRule}(${rule.reason})`);
+    }
+    if (positiveExposure.length > 0) {
+      contribute(...positiveExposure);
+      exposure = 'user-facing';
+      rules.push(RULES.exposurePositive);
+      const positiveLocations = sortLocations(positiveExposure.map((s) => s.location));
+      const intentWhere = matchedHiddenRules
+        .map((rule) => `organization rule '${rule.reason}'`)
+        .join(', ');
+      const detail =
+        `hidden intent at ${intentWhere} contradicted by positive external signal at ` +
+        `${positiveLocations.map(locationText).join(', ')}; ` +
+        'decision: user-facing (conservative) — remove the false hidden declaration ' +
+        'or remove the public exposure';
+      const locations = sortLocations([...positiveLocations, resource.location]);
+      blocks.push({
+        code: 'CLASSIFICATION_CONTRADICTION',
+        resourceId: `${plane}.${resource.name}`,
+        name: resource.name,
+        detail,
+        locations,
+      });
+      contradictions.push({ dimension: 'exposure', detail, locations });
+    } else {
+      exposure = 'hidden';
+      const linked = hiddenLinkedEndpoints(resource, ctx);
+      contribute(...linked.flatMap((entry) => entry.signals));
+      if (linked.length === 0) {
+        blocks.push({
+          code: 'HIDDEN_RESOURCE_UNLINKED',
+          resourceId: `${plane}.${resource.name}`,
+          name: resource.name,
+          detail:
+            `hidden resource '${plane}.${resource.name}' is complete-proof only through ` +
+            'its writing endpoints, but no adapter-binding signal in the scan links an ' +
+            "endpoint to it; declare the resource on the writing endpoint (`resource:` " +
+            'in the `endpoints:` section) so the link exists',
+          locations: [resource.location],
+        });
+      } else {
+        const unproven = linked.filter(
+          (entry) => entry.endpoint.attributes['behaviorProof'] !== 'passing',
+        );
+        if (unproven.length > 0) {
+          const ids = unproven
+            .map((entry) => entry.endpoint.id ?? entry.endpoint.name)
+            .toSorted(compareStrings);
+          blocks.push({
+            code: 'INCOMPLETE_PROOF_SCOPE',
+            resourceId: `${plane}.${resource.name}`,
+            name: resource.name,
+            detail:
+              `hidden resource cannot be certified complete: linked endpoint(s) ` +
+              `${ids.join(', ')} carry no passing ENDPOINT_BEHAVIOR proof; the hidden row ` +
+              'itself is never observed, so completeness is proven only through the ' +
+              "linked endpoints' reviewed behavior",
+            locations: [resource.location],
+          });
+        } else {
+          for (const entry of linked) {
+            hiddenProvenThrough.push(entry.endpoint.id ?? entry.endpoint.name);
+          }
+        }
+      }
+    }
   } else if (positiveExposure.length > 0) {
     contribute(...positiveExposure);
     exposure = 'user-facing';
@@ -1779,6 +1874,13 @@ function classifyOne(
     detectors: contributingDetectors,
     contradictions: sortedContradictions,
   });
+  // Proven hidden decisions carry the proof record (plan 20261028_1945 D):
+  // the hidden row itself was NOT observed — completeness is proven only
+  // through the linked writing endpoints' passing behavior proofs.
+  const hiddenProof: ClassificationDecisionTrace['hiddenProof'] =
+    exposure === 'hidden' && hiddenProvenThrough.length > 0
+      ? { observed: false, provenThrough: hiddenProvenThrough.toSorted(compareStrings) }
+      : undefined;
   const trace: ClassificationDecisionTrace = {
     rules: sortedRules,
     defaultsApplied: sortedDefaults,
@@ -1790,6 +1892,7 @@ function classifyOne(
     ].sort(compareStrings),
     decisionFingerprint: fingerprint,
     ...(lifecycleDerivation.length > 0 ? { lifecycleDerivation } : {}),
+    ...(hiddenProof !== undefined ? { hiddenProof } : {}),
   };
   // The classification must always be a VALID Classification (the same
   // schema policy/verdict code consumes). Definitional blocks — delete
@@ -1817,6 +1920,48 @@ function classifyOne(
     blocks: sortBlocks(blocks),
     classification: { ...valid.data, ...trace },
   };
+}
+
+/**
+ * Endpoints the scan links to one hidden resource (plan 20261028_1945 D):
+ * code-positive `adapter-binding` signals asserting the resource's id or
+ * bare name (the bindAdapter predicate) whose target resolves to an
+ * `http.endpoint` resource. The endpoint's pipeline-stamped `behaviorProof`
+ * attribute carries the proof state — no stamp reads unproven, never
+ * guessed. Sorted by endpoint identity; deterministic.
+ */
+function hiddenLinkedEndpoints(
+  resource: ClassifierResourceRef,
+  ctx: ClassifyContext,
+): Array<{ endpoint: ClassifierResourceRef; signals: ClassificationSignal[] }> {
+  const byEndpoint = new Map<
+    string,
+    { endpoint: ClassifierResourceRef; signals: ClassificationSignal[] }
+  >();
+  for (const signal of ctx.signals) {
+    if (signal.dimension !== 'adapter-binding') continue;
+    if (signal.basis !== 'code-positive') continue;
+    const assertion = signal.assertion;
+    if (typeof assertion !== 'string') continue;
+    if (assertion !== resource.id && assertion !== resource.name) continue;
+    for (const candidate of ctx.resources) {
+      if (candidate.kind !== HTTP_ENDPOINT_RESOURCE_KIND) continue;
+      const matches =
+        (signal.target.resourceId !== undefined &&
+          candidate.id !== null &&
+          signal.target.resourceId === candidate.id) ||
+        (signal.target.resourceName !== undefined &&
+          signal.target.resourceName === candidate.name);
+      if (!matches) continue;
+      const key = candidate.id ?? `${candidate.name}\u0000${candidate.source}`;
+      const entry = byEndpoint.get(key) ?? { endpoint: candidate, signals: [] };
+      entry.signals.push(signal);
+      byEndpoint.set(key, entry);
+    }
+  }
+  return [...byEndpoint.values()].toSorted((a, b) =>
+    compareStrings(a.endpoint.id ?? a.endpoint.name, b.endpoint.id ?? b.endpoint.name),
+  );
 }
 
 /** Adapter binding: an explicit adapter-binding signal first, then id, then bare name. */

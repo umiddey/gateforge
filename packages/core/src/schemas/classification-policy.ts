@@ -390,6 +390,18 @@ export const ClassificationPolicySchema = z
     trustedInternalEntryPoints: z.array(InternalEntryPointCategorySchema),
     /** Organization internal rules — certificate inputs, never overrides. */
     internalRules: z.array(InternalRuleSchema),
+    /**
+     * Organization hidden rules (plan 20261028_1945, D): resources a
+     * user's click WRITES but no route ever serves back (a password
+     * reset token). Same match + reason shape as `internalRules` and,
+     * like them, an input to classification — never an override: the
+     * `hidden` exposure resolves only while no positive read exposure
+     * contradicts it (that stays CLASSIFICATION_CONTRADICTION), and
+     * completeness is proven through the linked writing endpoints'
+     * behavior proofs — never through a read of the hidden row.
+     * Absent or empty = off, byte for byte.
+     */
+    hiddenRules: z.array(InternalRuleSchema).optional(),
     /** Exact owner lifecycle disables; suppressive effects require scan proof. */
     lifecycleRules: LifecycleRulesSchema.optional(),
     /**

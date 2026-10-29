@@ -1,6 +1,29 @@
 # Changelog
 
-## Unreleased
+## 0.19.0
+
+- **A table a user's click writes but no route ever serves back can now
+  be declared `hidden` instead of being forced into a false label.**
+  `internal` means no user reaches the table at all (false when their
+  click writes it) and `user-facing` demands a read-evidence adapter for
+  a read that must never exist, so such a table could only be
+  mislabeled. A new optional `hiddenRules:` key in
+  `.gateforge/classification-policy.yml` (same `match` + `reason` shape
+  as `internalRules`) gives the matched resources the `hidden` exposure:
+  no user-facing adapter/UI lane, no internality certificate. The hidden
+  row itself is never observed; the resource is complete only when every
+  endpoint the scan links to it carries an approved behavioral
+  declaration (`behaviorProof: passing`, stamped only while
+  `hiddenRules` is non-empty) and at least one such endpoint exists —
+  the declaration's own behavior obligations still block the scan until
+  they pass witnessed, and the stamp is never read as "a passing test".
+  No link at all blocks `HIDDEN_RESOURCE_UNLINKED`; a link without a
+  declaration blocks `INCOMPLETE_PROOF_SCOPE` naming the endpoint; a
+  route that returns the rows is never silenced — a positive read
+  exposure stays `CLASSIFICATION_CONTRADICTION`, as for internal intent.
+  The classify report prints `hidden: not observed; proven through
+  <endpoint ids>`. A repository without `hiddenRules:` produces
+  byte-identical output.
 
 ## 0.18.3
 
