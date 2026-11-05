@@ -117,6 +117,17 @@ function projectBaseURL(testInfo: TestInfo): string | undefined {
 
 interface CdpInitiatorFrame {
   url?: string;
+  scriptId?: string;
+}
+
+interface CdpScriptParsedEvent {
+  scriptId?: string;
+  executionContextId?: number;
+  executionContextAuxData?: { isDefault?: boolean; type?: string };
+}
+
+interface CdpExecutionContextCreatedEvent {
+  context?: { id?: number; name?: string };
 }
 
 interface CdpInitiatorStack {
@@ -138,42 +149,159 @@ interface InitiatorTracking {
   classify(method: string, url: string): Promise<'page' | 'test-code' | 'unknown'>;
 }
 
+function isPlaywrightUtilityWorldContext(name: string | undefined): boolean {
+  return name?.startsWith('__playwright_utility_world_') === true;
+}
+
+/** Match CDP network events to route callbacks after session-proxy rewrites. */
+function initiatorCacheKey(method: string, url: string): string {
+  try {
+    return `${method} ${new URL(url).pathname}`;
+  } catch {
+    return `${method} ${url}`;
+  }
+}
+
+function utilityScriptVerdict(
+  scriptId: string,
+  utilityScripts: ReadonlySet<string>,
+  scriptAuxById: ReadonlyMap<string, { isDefault?: boolean; type?: string }>,
+  contextNameById: ReadonlyMap<number, string>,
+  scriptContextById: ReadonlyMap<string, number>,
+): 'page' | 'test-code' | 'unknown' {
+  if (utilityScripts.has(scriptId)) return 'page';
+  const aux = scriptAuxById.get(scriptId);
+  if (aux === undefined) return 'unknown';
+  if (aux.type !== 'isolated' || aux.isDefault === true) return 'test-code';
+  const contextId = scriptContextById.get(scriptId);
+  const contextName = contextId === undefined ? undefined : contextNameById.get(contextId);
+  if (contextName === undefined) return 'unknown';
+  return isPlaywrightUtilityWorldContext(contextName) ? 'page' : 'test-code';
+}
+
+function playwrightUtilityWorldVerdict(
+  stack: CdpInitiatorStack | undefined,
+  utilityScripts: ReadonlySet<string>,
+  scriptAuxById: ReadonlyMap<string, { isDefault?: boolean; type?: string }>,
+  contextNameById: ReadonlyMap<number, string>,
+  scriptContextById: ReadonlyMap<string, number>,
+): 'page' | 'test-code' | 'unknown' {
+  let deepest = stack;
+  while (deepest?.parent !== undefined) deepest = deepest.parent;
+  const frames = deepest?.callFrames ?? [];
+  const outermost = frames.at(-1);
+  if (outermost === undefined) return 'unknown';
+  if (outermost.url) return 'page';
+  for (let index = frames.length - 1; index >= 0; index -= 1) {
+    const frame = frames[index];
+    if (frame === undefined) continue;
+    if (frame.url) return 'page';
+    if (frame.scriptId === undefined) continue;
+    const scriptVerdict = utilityScriptVerdict(
+      frame.scriptId,
+      utilityScripts,
+      scriptAuxById,
+      contextNameById,
+      scriptContextById,
+    );
+    if (scriptVerdict === 'page') return 'page';
+    if (scriptVerdict === 'unknown') return 'unknown';
+  }
+  return 'test-code';
+}
+
 async function attachInitiatorTracking(page: Page, appOrigins: readonly URL[]): Promise<InitiatorTracking> {
   const session = await page.context().newCDPSession(page);
-  const pending = new Map<string, Array<'page' | 'test-code' | 'unknown'>>();
+  const pending = new Map<string, Array<CdpInitiatorStack | undefined>>();
   // Route callbacks that arrived before their CDP event, oldest first.
   const waiting = new Map<string, Array<(verdict: 'page' | 'test-code' | 'unknown') => void>>();
+  const scriptAuxById = new Map<string, { isDefault?: boolean; type?: string }>();
+  const scriptContextById = new Map<string, number>();
+  const contextNameById = new Map<number, string>();
+  const utilityScripts = new Set<string>();
+  const utilityContextIds = new Set<number>();
+  const markUtilityScriptsForContext = (contextId: number): void => {
+    for (const [scriptId, mappedContextId] of scriptContextById) {
+      if (mappedContextId === contextId) utilityScripts.add(scriptId);
+    }
+  };
+  const verdictForStack = async (stack: CdpInitiatorStack | undefined): Promise<'page' | 'test-code' | 'unknown'> => {
+    let verdict = playwrightUtilityWorldVerdict(
+      stack,
+      utilityScripts,
+      scriptAuxById,
+      contextNameById,
+      scriptContextById,
+    );
+    if ((verdict === 'test-code' || verdict === 'unknown') && stack !== undefined) {
+      await delay(200);
+      verdict = playwrightUtilityWorldVerdict(
+        stack,
+        utilityScripts,
+        scriptAuxById,
+        contextNameById,
+        scriptContextById,
+      );
+    }
+    return verdict;
+  };
   // EVERY app origin this session routes, not just the primary one: an
   // unclassified request on a declared second app would otherwise be
   // graded `unknown` and lose the test-code marking it must keep.
   const appOriginPrefixes = appOrigins.map((origin) => `${origin.origin}/`);
+  session.on('Debugger.scriptParsed', (event: CdpScriptParsedEvent) => {
+    if (event.scriptId === undefined) return;
+    if (event.executionContextAuxData !== undefined) {
+      scriptAuxById.set(event.scriptId, event.executionContextAuxData);
+    }
+    if (event.executionContextId !== undefined) {
+      scriptContextById.set(event.scriptId, event.executionContextId);
+      if (utilityContextIds.has(event.executionContextId)) {
+        utilityScripts.add(event.scriptId);
+      }
+      const contextName = contextNameById.get(event.executionContextId);
+      if (isPlaywrightUtilityWorldContext(contextName)) {
+        utilityScripts.add(event.scriptId);
+      }
+    }
+  });
+  session.on('Runtime.executionContextCreated', (event: CdpExecutionContextCreatedEvent) => {
+    const context = event.context;
+    if (context?.id === undefined) return;
+    contextNameById.set(context.id, context.name ?? '');
+    if (isPlaywrightUtilityWorldContext(context.name)) {
+      utilityContextIds.add(context.id);
+      markUtilityScriptsForContext(context.id);
+    }
+  });
   session.on('Network.requestWillBeSent', (event: CdpRequestInitiatorEvent) => {
     if (!appOriginPrefixes.some((prefix) => event.request.url.startsWith(prefix))) return;
     let deepest = event.initiator?.stack;
     while (deepest?.parent !== undefined) deepest = deepest.parent;
-    const outermost = deepest?.callFrames?.at(-1);
-    const verdict = outermost === undefined ? 'unknown' : outermost.url ? 'page' : 'test-code';
-    const key = `${event.request.method} ${event.request.url}`;
+    const key = initiatorCacheKey(event.request.method, event.request.url);
     const waiter = waiting.get(key)?.shift();
     if (waiter !== undefined) {
-      waiter(verdict);
+      void verdictForStack(deepest).then(waiter);
       return;
     }
     const queue = pending.get(key) ?? [];
-    queue.push(verdict);
+    queue.push(deepest);
     pending.set(key, queue);
   });
   await session.send('Network.enable');
   await session.send('Debugger.enable');
+  await session.send('Runtime.enable');
   await session.send('Debugger.setAsyncCallStackDepth', { maxDepth: 32 });
   return {
     session,
     classify(method, url) {
-      const key = `${method} ${url}`;
+      const key = initiatorCacheKey(method, url);
       const queue = pending.get(key);
-      const queued = queue?.shift();
-      if (queue?.length === 0) pending.delete(key);
-      if (queued !== undefined) return Promise.resolve(queued);
+      if (queue !== undefined && queue.length > 0) {
+        const stack = queue.shift();
+        if (queue.length === 0) pending.delete(key);
+        return verdictForStack(stack);
+      }
       // A burst of requests can deliver a CDP event just after its route
       // callback. Wait for that event only, never a fixed pause: a fixed
       // pause shifts the app's request timing. No event in 50 ms: unknown.
@@ -558,7 +686,14 @@ const extended = browserRunner.extend<EvidenceFixtures>({
       const ready = (async () => {
         let initiator: InitiatorTracking | undefined;
         if (browserName === 'chromium') {
-          initiator = await attachInitiatorTracking(page, appOrigins ?? []);
+          const trackedOrigins = [...(appOrigins ?? []), ...routes.map((entry) => entry.sessionOrigin)];
+          const seenOrigins = new Set<string>();
+          const dedupedOrigins = trackedOrigins.filter((origin) => {
+            if (seenOrigins.has(origin.origin)) return false;
+            seenOrigins.add(origin.origin);
+            return true;
+          });
+          initiator = await attachInitiatorTracking(page, dedupedOrigins);
           tracking.set(page, initiator);
         } else if (!unavailableInitiatorBrowsers.has(browserName)) {
           unavailableInitiatorBrowsers.add(browserName);

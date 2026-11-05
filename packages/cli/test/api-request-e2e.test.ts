@@ -14,7 +14,6 @@ import { withTempRepo } from '@gate-forge/core';
 import { trustedPolicyDigestForConfig } from '../src/execution.js';
 import { loadConfigAt } from '../src/commands/common.js';
 import {
-  cleanupWitnessedFixture,
   installStrictFixture,
   operatorEnvironment,
   ROOT,
@@ -31,6 +30,8 @@ const TITLE_CONTEXT_REQUEST = 'context.request alone is not UI evidence';
 const TITLE_EVALUATE_FETCH = 'page evaluate fetch is not UI evidence';
 const TITLE_EVALUATE_APP = 'page evaluate app function is not UI evidence';
 const TITLE_EVALUATE_HIDDEN = 'computed page evaluate fetch is not UI evidence';
+const TITLE_SELECT_OPTION = 'selectOption change handler is UI evidence';
+const TITLE_SET_INPUT_FILES = 'setInputFiles change handler is UI evidence';
 const TITLE_APP_ASYNC = 'app async handler remains UI evidence';
 
 /** The endpoint the witness must observe (resource name is deterministic). */
@@ -64,6 +65,12 @@ const UNREADABLE_STATUS = `tenant.${UNREADABLE_RESOURCE}:http:response-status-ok
 const ASYNC_RESOURCE = endpointResourceName('GET', '/api/app-async');
 const ASYNC_REQUEST = `tenant.${ASYNC_RESOURCE}:http:request-observed`;
 const ASYNC_STATUS = `tenant.${ASYNC_RESOURCE}:http:response-status-ok`;
+const SELECT_RESOURCE = endpointResourceName('GET', '/api/select-change');
+const SELECT_REQUEST = `tenant.${SELECT_RESOURCE}:http:request-observed`;
+const SELECT_STATUS = `tenant.${SELECT_RESOURCE}:http:response-status-ok`;
+const FILE_RESOURCE = endpointResourceName('GET', '/api/file-change');
+const FILE_REQUEST = `tenant.${FILE_RESOURCE}:http:request-observed`;
+const FILE_STATUS = `tenant.${FILE_RESOURCE}:http:response-status-ok`;
 
 const PLAYWRIGHT_CONFIG = `import { defineConfig } from 'playwright/test';
 export default defineConfig({
@@ -164,6 +171,30 @@ test('${TITLE_EVALUATE_HIDDEN}', async ({ page }) => {
 });
 `;
 
+const SELECT_OPTION_SPEC = `const { test } = require('./support/test.cjs');
+test('${TITLE_SELECT_OPTION}', async ({ page }) => {
+  await page.goto('/');
+  await Promise.all([
+    page.waitForResponse((response) => new URL(response.url()).pathname === '/api/select-change'),
+    page.locator('select').selectOption('b'),
+  ]);
+});
+`;
+
+const SET_INPUT_FILES_SPEC = `const { test } = require('./support/test.cjs');
+test('${TITLE_SET_INPUT_FILES}', async ({ page }) => {
+  await page.goto('/');
+  await Promise.all([
+    page.waitForResponse((response) => new URL(response.url()).pathname === '/api/file-change'),
+    page.locator('input[type=file]').setInputFiles({
+      name: 'sample.txt',
+      mimeType: 'text/plain',
+      buffer: Buffer.from('fixture'),
+    }),
+  ]);
+});
+`;
+
 const APP_ASYNC_SPEC = `import { test } from '@gate-forge/pack-playwright';
 test('${TITLE_APP_ASYNC}', async ({ page }) => {
   await page.goto('/');
@@ -223,6 +254,8 @@ export default {
     route('eval_hidden_get', 'GET', '/api/eval-hidden', 17);
     route('unreadable_get', 'GET', '/api/unreadable', 18);
     route('async_get', 'GET', '/api/app-async', 19);
+    route('select_change_get', 'GET', '/api/select-change', 20);
+    route('file_change_get', 'GET', '/api/file-change', 21);
     return { resources, unresolved: [], findings: [], classificationSignals };
   },
 };
@@ -254,7 +287,13 @@ async function startApiApp(): Promise<{
     }
     if (request.method === 'GET' && path === '/') {
       response.setHeader('content-type', 'text/html');
-      response.end('<button>Load items</button><button>Load async</button><div id="result"></div><script>window.appAsync=async()=>{await new Promise(r=>setTimeout(r,0));await fetch("/api/eval-app")};document.querySelectorAll("button")[0].onclick=async()=>{await fetch("/api/ui-items");document.querySelector("#result").textContent="Items loaded"};document.querySelectorAll("button")[1].onclick=async()=>{await new Promise(r=>setTimeout(r,0));await fetch("/api/app-async")}</script>');
+      response.end(
+        '<button>Load items</button><button>Load async</button>' +
+          '<select onchange="fetch(\'/api/select-change\')"><option value="a">A</option><option value="b">B</option></select>' +
+          '<input type="file" onchange="fetch(\'/api/file-change\')" />' +
+          '<div id="result"></div>' +
+          '<script>window.appAsync=async()=>{await new Promise(r=>setTimeout(r,0));await fetch("/api/eval-app")};document.querySelectorAll("button")[0].onclick=async()=>{await fetch("/api/ui-items");document.querySelector("#result").textContent="Items loaded"};document.querySelectorAll("button")[1].onclick=async()=>{await new Promise(r=>setTimeout(r,0));await fetch("/api/app-async")}</script>',
+      );
       return;
     }
     if (request.method === 'POST' && path === '/api/seed') {
@@ -275,7 +314,9 @@ async function startApiApp(): Promise<{
         path === '/api/eval-app' ||
         path === '/api/eval-hidden' ||
         path === '/api/unreadable' ||
-        path === '/api/app-async')
+        path === '/api/app-async' ||
+        path === '/api/select-change' ||
+        path === '/api/file-change')
     ) {
       response.setHeader('content-type', 'application/json');
       response.end(JSON.stringify({ ok: true, seeded }));
@@ -363,6 +404,8 @@ describe('witnessed API request channel through the actual CLI', () => {
           'specs/eval-fetch.spec.cjs': EVALUATE_FETCH_SPEC,
           'specs/eval-app.spec.cjs': EVALUATE_APP_SPEC,
           'specs/eval-hidden.spec.cjs': EVALUATE_HIDDEN_SPEC,
+          'specs/select-option.spec.cjs': SELECT_OPTION_SPEC,
+          'specs/set-input-files.spec.cjs': SET_INPUT_FILES_SPEC,
           'specs/app-async.spec.js': APP_ASYNC_SPEC,
           'specs/unreadable.spec.js':
             `import { test } from '@gate-forge/pack-playwright/fixture';\ntest('unreadable list-only claim', async ({ page }) => { await page.goto('/'); });\n`,
@@ -454,6 +497,24 @@ tests:
     kind: observed-e2e
     claims: ['${EVAL_HIDDEN_REQUEST}', '${EVAL_HIDDEN_STATUS}']
     reason: Computed page evaluation starts test-code traffic, not an app UI action.
+  - key: playwright:chromium:specs/select-option.spec.cjs:${TITLE_SELECT_OPTION}
+    selector:
+      runner: playwright
+      project: chromium
+      file: specs/select-option.spec.cjs
+      titlePath: ['${TITLE_SELECT_OPTION}']
+    kind: observed-e2e
+    claims: ['${SELECT_REQUEST}', '${SELECT_STATUS}']
+    reason: Playwright selectOption drives the app onchange handler.
+  - key: playwright:chromium:specs/set-input-files.spec.cjs:${TITLE_SET_INPUT_FILES}
+    selector:
+      runner: playwright
+      project: chromium
+      file: specs/set-input-files.spec.cjs
+      titlePath: ['${TITLE_SET_INPUT_FILES}']
+    kind: observed-e2e
+    claims: ['${FILE_REQUEST}', '${FILE_STATUS}']
+    reason: Playwright setInputFiles drives the app onchange handler.
   - key: playwright:chromium:specs/unreadable.spec.js:unreadable list-only claim
     selector:
       runner: playwright
@@ -569,8 +630,12 @@ tests:
           expect(report.verdicts.find((item) => item.obligationId === obligationId), observed)
             .toMatchObject({ verdict: 'satisfied' });
         }
+        for (const obligationId of [SELECT_REQUEST, SELECT_STATUS, FILE_REQUEST, FILE_STATUS]) {
+          const verdict = report.verdicts.find((item) => item.obligationId === obligationId);
+          expect(verdict, `${obligationId}: ${verdict?.reason ?? ''}`).toMatchObject({ verdict: 'satisfied' });
+        }
         expect(run.code, observed).toBe(1);
-        expect(report.execution.selectedTests).toMatchObject({ selected: 11, passed: 11, failed: 0 });
+        expect(report.execution.selectedTests).toMatchObject({ selected: 13, passed: 13, failed: 0 });
         expect(app.requestsByPath.get('/api/items')).toBe(2);
         expect(app.requestsByPath.get('/api/setup')).toBe(6);
         expect(app.requestsByPath.get('/api/seed')).toBe(1);
@@ -582,6 +647,8 @@ tests:
         expect(app.requestsByPath.get('/api/eval-hidden')).toBe(1);
         expect(app.requestsByPath.get('/api/app-async')).toBe(1);
         expect(app.requestsByPath.get('/api/ui-items')).toBe(1);
+        expect(app.requestsByPath.get('/api/select-change')).toBe(1);
+        expect(app.requestsByPath.get('/api/file-change')).toBe(1);
         const recordedPaths = recordedExchangePaths(records);
         for (const path of ['/api/page-request', '/api/context-request']) {
           expect(recordedPaths.some((exchangePath) => exchangePath.endsWith(path))).toBe(false);
@@ -596,6 +663,8 @@ tests:
         expect(recordedPaths.some((path) => path.endsWith('/api/eval-app'))).toBe(true);
         expect(recordedPaths.some((path) => path.endsWith('/api/eval-hidden'))).toBe(true);
         expect(recordedPaths.some((path) => path.endsWith('/api/app-async'))).toBe(true);
+        expect(recordedPaths.some((path) => path.endsWith('/api/select-change'))).toBe(true);
+        expect(recordedPaths.some((path) => path.endsWith('/api/file-change'))).toBe(true);
         const outcomesDoc = JSON.parse(readFileSync(repo.path('.gateforge/test-gates/runner-outcomes.json'), 'utf8')) as {
           outcomes?: Array<{ testId?: string; titlePath?: string[] }>;
         };
