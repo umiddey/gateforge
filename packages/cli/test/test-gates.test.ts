@@ -12,6 +12,8 @@ import { GateReceiptSchema, RunManifestSchema, loadConfig, withTempRepo, fingerp
 import { PLUGIN_SOURCE, configYml, fixtureFingerprint, installFixture, runCli, stubPlaywrightFiles } from './helpers.js';
 import { trustedPolicyDigestForConfig } from '../src/execution.js';
 import { mintCompleteRunReceipt } from './gate-receipts.js';
+import { behaviorCaseAssignments } from '../src/commands/test-gates.js';
+import type { BehaviorCatalog, TestCatalog, TestMap } from '@gate-forge/core';
 
 /** A stub suite: reports one claimed ui.action record for the target. */
 const SUITE_SOURCE = `import { writeFileSync, mkdirSync } from 'node:fs';
@@ -636,4 +638,25 @@ describe('carry-forward over an adopted baseline', () => {
       expect(existsSync(repo.path('.gateforge/test-gates/receipt.json'))).toBe(false);
     });
   }, 180_000);
+});
+
+describe('behaviorCaseAssignments binds canonical case ids only', () => {
+  const catalog = { entries: [{ logicalKey: 'k1', parameterIdentity: 'runner-id-1' }] } as unknown as TestCatalog;
+  const behaviorCatalog = {
+    cases: [{ caseId: 'CANON-1', definition: { id: 'alias-1' }, obligationIds: ['OBL-1'] }],
+  } as unknown as BehaviorCatalog;
+
+  it('sends the canonical id for a definition.id alias and drops a stale id', () => {
+    const sidecar = {
+      tests: [{ key: 'k1', claims: ['OBL-1'], caseIds: ['alias-1', 'gone-id'] }],
+    } as unknown as TestMap;
+    expect(behaviorCaseAssignments(catalog, sidecar, behaviorCatalog)).toEqual({ 'runner-id-1': ['CANON-1'] });
+  });
+
+  it('binds nothing when every declared id is stale or outside the claims', () => {
+    const sidecar = {
+      tests: [{ key: 'k1', claims: ['OBL-2'], caseIds: ['alias-1', 'gone-id'] }],
+    } as unknown as TestMap;
+    expect(behaviorCaseAssignments(catalog, sidecar, behaviorCatalog)).toEqual({});
+  });
 });
