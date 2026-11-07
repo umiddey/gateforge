@@ -1215,6 +1215,8 @@ as an observation but never satisfies transport evidence; when it is the
 only matching exchange, the verifier directs the owner to drive the
 operation through the UI. Requests without a script stack and requests whose
 outermost frame belongs to page code remain eligible.
+Evaluate-family calls (`page.evaluate`, `addInitScript`, `exposeFunction`) never
+count as UI, even when the same test also drives the page through Playwright UI actions.
 This initiator distinction is Chromium-only. Firefox and WebKit preserve
 their prior behavior and emit a diagnostic that the distinction is
 unavailable.

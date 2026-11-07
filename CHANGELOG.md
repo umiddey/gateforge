@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+- **Fixed: Playwright UI actions count as page traffic, not test code.**
+  `selectOption`, `setInputFiles`, and keyboard actions parsed in Playwright's
+  utility world now satisfy UI transport claims (`44c1e091`).
+- **Fixed: the Observe grader grades other-endpoint exchanges `missing`.**
+  Traffic that reaches the proxy but not the claimed route yields `missing`
+  with a `waitForResponse` hint instead of `invalid nomatch`; noncanonical paths
+  on the claimed route stay `invalid` (`19fc11c8`).
+- **Fixed: test-gates binds only canonical behavior case ids.** A declared id
+  binds the compiled case whose `caseId` or definition id matches and whose
+  obligations overlap the entry's claims; a stale id binds nothing (`55d48317`).
+- **Changed: an excused obligation names the disposition that withheld it.**
+  The `tests mark-excused` error gives the surface, resource, disposition kind,
+  and reason, and names a classification-policy `disable` op as the way to excuse
+  one operation (`68dd375a`).
+- **Changed: the undetermined-browser refusal names the pin.** An evaluate-only
+  tamper on a project with no resolved browser says so and gives
+  `use: { browserName: 'chromium' }`; the unnamed-project warning suggests that
+  pin (`86cde6fd`).
+
 ## 0.19.0
 
 - **A table a user's click writes but no route ever serves back can now
