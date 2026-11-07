@@ -1343,7 +1343,7 @@ export async function nextCommand(io: Io, argv: readonly string[]): Promise<numb
             ...(parameterNames.some((name) => pageBindings?.[name] === undefined)
               ? [`PAGE_PARAM_UNBOUND: set pages.params['${pagePath}'] with seeded values for ${parameterNames.map((name) => `'${name}'`).join(', ')}; Gateforge never guesses an id.`]
               : []),
-            'If PAGE_OBSERVATION_TAMPER_RISK is reported, remove page.evaluate, route interception, route.fulfill, or direct CDP use from the test or its helpers.',
+            'If PAGE_OBSERVATION_TAMPER_RISK is reported, remove page.evaluate, route interception, route.fulfill, or direct CDP use from the test or its helpers; for an undetermined project browser, pin use: { browserName: \'chromium\' } on the project.',
           ],
         };
   const unresolvedRoute = pipeline.classification.decisions.find(
