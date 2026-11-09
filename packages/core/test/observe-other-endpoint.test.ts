@@ -26,6 +26,7 @@ const OBLIGATION: Obligation = {
   resourceId: ROOMS_RESOURCE,
   contract: 'http:request-observed',
   policyId: 'test-policy',
+  lifecycle: { create: false, read: true, update: true, delete: false },
 };
 
 const CLAIM: Claim = { schemaVersion: 1, obligationId: OBLIGATION_ID, testId: TEST_ID };
@@ -106,6 +107,11 @@ function gradeObserveTransport(exchanges: Array<Record<string, unknown>>) {
   });
 }
 
+/** Only non-satisfied outcomes carry a reason. */
+function reasonOf(outcome: { status: string } | null | undefined): string | undefined {
+  return (outcome as { reason?: string } | null | undefined)?.reason;
+}
+
 describe('Observe channel: other-endpoint exchanges', () => {
   it('missing when the session has traffic but not on the claimed endpoint', () => {
     const outcome = gradeObserveTransport([
@@ -113,9 +119,9 @@ describe('Observe channel: other-endpoint exchanges', () => {
       { method: 'GET', url: '/api/v1/x', status: 200 },
     ]);
     expect(outcome?.status).toBe('missing');
-    expect(outcome?.reason).toContain('no PATCH /api/v1/rooms/{}');
-    expect(outcome?.reason).toMatch(/waitForResponse/i);
-    expect(outcome?.reason).not.toMatch(/matches none of/i);
+    expect(reasonOf(outcome)).toContain('no PATCH /api/v1/rooms/{}');
+    expect(reasonOf(outcome)).toMatch(/waitForResponse/i);
+    expect(reasonOf(outcome)).not.toMatch(/matches none of/i);
   });
 
   it('invalid when the obligation endpoint appears but status is not 2xx', () => {
@@ -140,13 +146,13 @@ describe('Observe channel: other-endpoint exchanges', () => {
       httpRoutes: HTTP_ROUTES,
     });
     expect(outcome?.status).toBe('invalid');
-    expect(outcome?.reason).toMatch(/not a 2xx/i);
+    expect(reasonOf(outcome)).toMatch(/not a 2xx/i);
   });
 
   it('invalid for a noncanonical observed path on a would-be own-endpoint call', () => {
     const outcome = gradeObserveTransport([{ method: 'PATCH', url: '/api//v1/rooms/42', status: 200 }]);
     expect(outcome?.status).toBe('invalid');
-    expect(outcome?.reason).toMatch(/noncanonical observed path/i);
+    expect(reasonOf(outcome)).toMatch(/noncanonical observed path/i);
   });
 
   it('missing when the own-endpoint call was test-initiated', () => {
@@ -159,6 +165,6 @@ describe('Observe channel: other-endpoint exchanges', () => {
       },
     ]);
     expect(outcome?.status).toBe('missing');
-    expect(outcome?.reason).toMatch(/test code running in the page/i);
+    expect(reasonOf(outcome)).toMatch(/test code running in the page/i);
   });
 });

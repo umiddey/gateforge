@@ -8,7 +8,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { GateReceiptSchema, RunManifestSchema, loadConfig, withTempRepo, fingerprint, type TempRepo } from '@gate-forge/core';
+import { BEHAVIOR_CASE_DOMAIN, GateReceiptSchema, RunManifestSchema, loadConfig, sha256Canonical, withTempRepo, fingerprint, type TempRepo } from '@gate-forge/core';
 import { PLUGIN_SOURCE, configYml, fixtureFingerprint, installFixture, runCli, stubPlaywrightFiles } from './helpers.js';
 import { trustedPolicyDigestForConfig } from '../src/execution.js';
 import { mintCompleteRunReceipt } from './gate-receipts.js';
@@ -66,7 +66,7 @@ describe('gateforge test-gates', () => {
       const obligations = JSON.parse(
         readFileSync(join(stateDir, 'obligations.json'), 'utf8'),
       ) as { obligations: Array<{ id: string; fingerprint: string; source: string }> };
-      expect(obligations.obligations.map((o) => o.id).sort()).toEqual([
+      expect(obligations.obligations.map((o) => o.id).toSorted()).toEqual([
         'tenant.accounts:persistence:read',
         'tenant.orders:persistence:read',
       ]);
@@ -659,4 +659,286 @@ describe('behaviorCaseAssignments binds canonical case ids only', () => {
     } as unknown as TestMap;
     expect(behaviorCaseAssignments(catalog, sidecar, behaviorCatalog)).toEqual({});
   });
+});
+
+/**
+ * Route source: an in-process plugin string written into the temp repo, the
+ * same precedent as `behavior draft`'s hand-built `http.endpoint` detector.
+ * The shared fixture plugin emits only `raw.*` resources, so it cannot
+ * satisfy `registerWitnessBehaviorCatalog`'s non-empty route requirement.
+ * No new file: the plugin, policy, sidecar, and runner stub are fixture
+ * text this test writes, like every other case in this file.
+ *
+ * The behavior-catalog route records the body, then applies the witness's
+ * canonical-id check (server.ts: names unknown case unless the assignment
+ * id is a compiled `caseId`). Every other route returns the existing stub
+ * body `{records: []}`, plus the fields the supervised path reads before
+ * it writes a report (`enumerationDigest`, `tests`, `sessionId`). Without
+ * those fields the run throws and assertion (1) cannot be observed.
+ */
+describe('stale caseId and alias survive a supervised test-gates run', () => {
+  const resourceId = 'tenant.http-get-rooms';
+  const alias = 'alias-1';
+  const stale = 'gone-id';
+  const obligationId = `${resourceId}:http:request-observed`;
+  const specFile = 'e2e/alias.spec.mjs';
+  const title = 'proves the alias';
+  const logicalKey = `playwright:chromium:${specFile}:${title}`;
+  const canonicalCaseId = sha256Canonical({ domain: BEHAVIOR_CASE_DOMAIN, resourceId, id: alias });
+  const loopback = [127, 0, 0, 1].join('.');
+
+  it('sends the canonical case id, drops the stale one, and still writes the report', async () => {
+    await withTempRepo({}, async (repo) => {
+      installFixture(repo);
+      repo.writeFiles({
+        '.gateforge.yml': configYml().replace(
+          /^policies:/m,
+          'behaviorPolicy: .gateforge/behavior.yml\npolicies:',
+        ),
+        'plugin.mjs': [
+          "const DETECTOR = { id: 'fixture.plugin', version: '1.0.0' };",
+          'export default {',
+          '  discover(paths) {',
+          '    return {',
+          '      resources: [{',
+          '        schemaVersion: 1,',
+          `        id: ${JSON.stringify(resourceId)},`,
+          "        kind: 'http.endpoint',",
+          "        source: 'src/rooms.txt',",
+          "        location: { file: 'src/rooms.txt', line: 1, col: 0 },",
+          '        detectorVersion: DETECTOR.version,',
+          '        attributes: {',
+          "          plane: 'tenant',",
+          "          resourceName: 'http-get-rooms',",
+          "          method: 'GET',",
+          "          canonicalPath: '/api/v1/rooms',",
+          "          capabilities: ['crud-read'],",
+          '        },',
+          '      }],',
+          '      unresolved: [],',
+          '      findings: [],',
+          '      classificationSignals: [{',
+          '        schemaVersion: 1,',
+          "        target: { resourceName: 'http-get-rooms' },",
+          "        dimension: 'plane',",
+          "        assertion: 'tenant',",
+          "        basis: 'code-positive',",
+          "        source: 'fixture.plugin',",
+          "        location: { file: 'src/rooms.txt', line: 1, col: 0 },",
+          '        detector: DETECTOR,',
+          '      }, {',
+          '        schemaVersion: 1,',
+          "        target: { resourceName: 'http-get-rooms' },",
+          "        dimension: 'identity',",
+          "        assertion: ['method', 'path'],",
+          "        basis: 'code-positive',",
+          "        source: 'fixture.plugin',",
+          "        location: { file: 'src/rooms.txt', line: 1, col: 0 },",
+          '        detector: DETECTOR,',
+          '      }],',
+          '      scannedPaths: paths,',
+          '    };',
+          '  },',
+          '};',
+          '',
+        ].join('\n'),
+        'src/rooms.txt': 'rooms\n',
+        '.gateforge/policies.yml':
+          'schemaVersion: 1\npolicies:\n  - id: endpoint-observed\n    when:\n      kind: http.endpoint\n    require: [http:request-observed]\n',
+        '.gateforge/behavior.yml': [
+          'schemaVersion: 1',
+          'endpoints:',
+          `  - resourceId: ${resourceId}`,
+          '    effects: []',
+          '    cases:',
+          `      - id: ${alias}`,
+          '        contract: "http:request-observed"',
+          '        channel: engine-http',
+          '        fixture: operational',
+          '        actor: anonymous',
+          '        action:',
+          '          kind: request',
+          '          method: GET',
+          '          pathTemplate: /api/v1/rooms',
+          '          path: {}',
+          '          query: {}',
+          '          body:',
+          '            encoding: json',
+          '            fields: {}',
+          '          credentialVariant: valid',
+          '        expect:',
+          '          statuses: [200]',
+          '          response: []',
+          '          state: []',
+          'resources: []',
+          '',
+        ].join('\n'),
+        '.gateforge/test-map.yml': [
+          'schemaVersion: 1',
+          'tests:',
+          `  - key: ${JSON.stringify(logicalKey)}`,
+          '    selector:',
+          '      runner: playwright',
+          '      project: chromium',
+          `      file: ${specFile}`,
+          '      titlePath:',
+          `        - ${title}`,
+          `    claims: [${JSON.stringify(obligationId)}]`,
+          `    caseIds: [${alias}, ${stale}]`,
+          '    reason: the live alias plus one id the catalog no longer has',
+          '',
+        ].join('\n'),
+        'playwright.config.mjs': "export default { testDir: 'e2e', projects: [{ name: 'chromium' }] };\n",
+        [specFile]: `import { test } from 'playwright/test.js';\ntest(${JSON.stringify(title)}, () => {});\n`,
+        ...stubPlaywrightFiles([
+          "const { readFileSync, writeFileSync, mkdirSync } = require('node:fs');",
+          'const argv = process.argv.slice(2);',
+          'if (argv.includes("--list")) {',
+          '  const document = {',
+          '    config: { rootDir: process.cwd(), projects: [{ name: "chromium" }] },',
+          '    suites: [{',
+          `      file: ${JSON.stringify(specFile)},`,
+          '      specs: [{',
+          `        id: ${JSON.stringify(specFile)},`,
+          `        title: ${JSON.stringify(title)},`,
+          '        line: 2,',
+          '        column: 0,',
+          '        tests: [{ projectId: "chromium", projectName: "chromium", expectedStatus: "passed", annotations: [] }],',
+          '      }],',
+          '    }],',
+          '  };',
+          '  const text = JSON.stringify(document);',
+          '  if (process.env.PLAYWRIGHT_JSON_OUTPUT_FILE) writeFileSync(process.env.PLAYWRIGHT_JSON_OUTPUT_FILE, text);',
+          '  process.stdout.write(text);',
+          '} else {',
+          "  const config = readFileSync(argv[argv.indexOf('--config') + 1], 'utf8');",
+          '  const reporter = /"stateDir":"([^"]+)","runId":"([^"]+)","outcomesPath":"([^"]+)"/.exec(config);',
+          '  if (reporter) {',
+          "    const spool = reporter[1] + '/spool/' + reporter[2] + '/events.jsonl';",
+          "    mkdirSync(spool.replace(/\\/[^/]+$/, ''), { recursive: true });",
+          '    const events = [',
+          `      { kind: 'testBegin', testId: ${JSON.stringify(specFile)}, workerIndex: 0, file: ${JSON.stringify(specFile)}, titlePath: [${JSON.stringify(title)}], project: 'chromium' },`,
+          `      { kind: 'testEnd', testId: ${JSON.stringify(specFile)}, workerIndex: 0, file: ${JSON.stringify(specFile)}, titlePath: [${JSON.stringify(title)}], project: 'chromium', outcome: 'passed', attempt: 1 },`,
+          '    ];',
+          "    writeFileSync(spool, events.map((event) => JSON.stringify(event)).join('\\n') + '\\n');",
+          '    writeFileSync(reporter[3], JSON.stringify({',
+          '      schemaVersion: 1,',
+          "      runStatus: 'passed',",
+          '      runnerErrors: [],',
+          '      shard: null,',
+          '      outcomes: [{',
+          `        testId: ${JSON.stringify(specFile)},`,
+          `        file: ${JSON.stringify(specFile)},`,
+          `        titlePath: [${JSON.stringify(title)}],`,
+          "        project: 'chromium',",
+          "        status: 'passed',",
+          '        attempt: 1,',
+          '        expectedFailure: false,',
+          '      }],',
+          '    }));',
+          '  }',
+          '}',
+          '',
+        ].join('\n')),
+      });
+      repo.stage();
+
+      const catalogPosts: string[] = [];
+      const stub = createServer((req, res) => {
+        const chunks: Buffer[] = [];
+        req.on('data', (chunk: Buffer) => chunks.push(chunk));
+        req.on('end', () => {
+          const path = (req.url ?? '').split('?')[0] ?? '';
+          const raw = Buffer.concat(chunks).toString('utf8');
+          if (req.method === 'POST' && path === '/runs/behavior-catalog') {
+            catalogPosts.push(raw);
+            const posted = JSON.parse(raw) as {
+              catalog?: { cases?: Array<{ caseId?: string }> };
+              assignments?: Record<string, string[]>;
+            };
+            const known = new Set((posted.catalog?.cases ?? []).map((item) => item.caseId));
+            for (const [testId, ids] of Object.entries(posted.assignments ?? {})) {
+              for (const id of ids) {
+                if (!known.has(id)) {
+                  res.writeHead(400, { 'content-type': 'application/json' });
+                  res.end(JSON.stringify({
+                    error: `behavior-catalog assignment for test '${testId}' names unknown case '${id}' — cases resolve by canonical case id only`,
+                  }));
+                  return;
+                }
+              }
+            }
+          }
+          res.writeHead(200, { 'content-type': 'application/json' });
+          if (path === '/health') {
+            res.end(JSON.stringify({ ok: true, runId: '22222222-3333-4444-8555-666666666666' }));
+            return;
+          }
+          if (path === '/runs/expected-set') {
+            res.end(JSON.stringify({ bound: true, count: 1, enumerationDigest: 'a'.repeat(64), records: [] }));
+            return;
+          }
+          if (path === '/runs/execution-trace') {
+            res.end(JSON.stringify({ tests: [], records: [] }));
+            return;
+          }
+          if (path === '/sessions/open') {
+            res.end(JSON.stringify({ sessionId: 'sess-1', openedTick: 1, records: [] }));
+            return;
+          }
+          res.end(JSON.stringify({ records: [] }));
+        });
+      });
+      await new Promise<void>((resolve) => {
+        stub.listen(0, loopback, () => resolve());
+      });
+      const address = stub.address();
+      if (address === null || typeof address === 'string') throw new Error('stub witness did not bind a port');
+      const port = address.port;
+      const out = 'selected-state';
+      try {
+        const result = await runCli(
+          repo,
+          [
+            'test-gates',
+            '--changed',
+            '--scope',
+            'changed',
+            '--result-only',
+            '--format',
+            'json',
+            '--witness-url',
+            `http://${loopback}:${String(port)}`,
+            '--run-token',
+            'stub-token',
+            '--out',
+            out,
+          ],
+          { GATEFORGE_WITNESS_VERIFIER_KEY: 'stale-case-verifier-key' },
+        );
+        const output = `${result.stdout}\n${result.stderr}`;
+        expect(output, output).not.toContain('names unknown case');
+        expect(existsSync(repo.path(`${out}/report.json`)), output).toBe(true);
+        const report = JSON.parse(readFileSync(repo.path(`${out}/report.json`), 'utf8')) as {
+          blocking?: Array<{ cause?: string | null }>;
+        };
+        expect(report.blocking?.some((entry) => entry.cause === 'TEST_MAPPING_STALE'), output).toBe(true);
+        expect(catalogPosts, output).toHaveLength(1);
+        const posted = JSON.parse(catalogPosts[0] ?? '') as {
+          catalog: { cases: Array<{ caseId: string; definition: { id: string } }> };
+          assignments: Record<string, string[]>;
+        };
+        const assigned = Object.values(posted.assignments).flat();
+        expect(assigned, JSON.stringify(posted.assignments)).toEqual([canonicalCaseId]);
+        expect(JSON.stringify(posted), JSON.stringify(posted.assignments)).not.toContain(stale);
+        expect(
+          posted.catalog.cases.some((item) => item.caseId === canonicalCaseId && item.definition.id === alias),
+        ).toBe(true);
+      } finally {
+        await new Promise<void>((resolve, reject) => {
+          stub.close((error) => (error ? reject(error) : resolve()));
+        });
+      }
+    });
+  }, 120_000);
 });
