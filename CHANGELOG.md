@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.19.1
+
 - **Fixed: Playwright UI actions count as page traffic, not test code.**
   `selectOption`, `setInputFiles`, and keyboard actions parsed in Playwright's
   utility world now satisfy UI transport claims (`44c1e091`).
