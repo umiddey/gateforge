@@ -200,3 +200,139 @@ describe('internal routes carry transport obligations like any route (plan 20261
     expect(outcome.reason).toContain('is internal');
   });
 });
+
+describe('out-of-scope disposition skips the source-link conflict (plan 20261109_1030 P2b)', () => {
+  const LINKED_ID = 'global.http-get-api-v1-service-requests-trades';
+
+  /** A business-linked route whose compiler link (`trades`) no effect can match. */
+  function linkedRoute(extraAttributes: Record<string, unknown>): GraphResource {
+    return GraphResourceSchema.parse({
+      schemaVersion: 1,
+      id: LINKED_ID,
+      name: 'http-get-api-v1-service-requests-trades',
+      plane: 'global',
+      kind: 'http.endpoint',
+      source: 'backend/api/service_requests.py',
+      location: { file: 'backend/api/service_requests.py', line: 1, col: 0 },
+      exposure: 'user-facing',
+      classification: {
+        exposure: 'user-facing',
+        plane: 'global',
+        lifecycle: { create: false, read: true, update: false, delete: false },
+        primaryKey: ['method', 'path'],
+        evidenceLane: 'claims',
+      },
+      classificationTrace: null,
+      detector: { id: 'gateforge.endpoint-compiler', version: '1' },
+      attributes: {
+        method: 'GET',
+        canonicalPath: '/api/v1/service-requests/trades',
+        linkedResourceName: 'trades',
+        ...extraAttributes,
+      },
+    });
+  }
+
+  /** A real graph resource so an effect on it passes the stale-reference check. */
+  const INVOICES = GraphResourceSchema.parse({
+    schemaVersion: 1,
+    id: 'global.invoices',
+    name: 'invoices',
+    plane: 'global',
+    kind: 'sql.table',
+    source: 'backend/models.py',
+    location: { file: 'backend/models.py', line: 1, col: 0 },
+    exposure: 'user-facing',
+    classification: {
+      exposure: 'user-facing',
+      plane: 'global',
+      lifecycle: { create: false, read: true, update: false, delete: false },
+      primaryKey: ['id'],
+      evidenceAdapter: 'invoices',
+    },
+    classificationTrace: null,
+    detector: { id: 'fixture', version: '1' },
+    attributes: {},
+  });
+
+  /** An effect whose resource (`invoices`) differs from the source link (`trades`). */
+  const INVOICE_EFFECT = {
+    id: 'e1',
+    resourceId: 'global.invoices',
+    adapter: 'invoices',
+    scope: 'global',
+    identityFields: ['id'],
+    fields: ['status'],
+    completion: 'immediate' as const,
+  };
+
+  /** A minimal in-scope case: the schema refuses zero-case entries without a disposition. */
+  const READ_CASE = {
+    id: 'c1',
+    contract: 'http:request-observed' as const,
+    channel: 'engine-http' as const,
+    fixture: 'operational',
+    actor: 'anonymous',
+    action: {
+      kind: 'request' as const,
+      method: 'GET' as const,
+      pathTemplate: '/api/v1/service-requests/trades',
+      path: {},
+      query: {},
+      body: { encoding: 'json' as const, fields: {} },
+      credentialVariant: 'valid' as const,
+    },
+    expect: { statuses: [200], response: [], state: [] },
+  };
+
+  it('T7: an out-of-scope endpoint yields no BEHAVIOR_BINDING_MISMATCH for an unmatchable link', () => {
+    const behavior = compileBehaviorPolicy({
+      graph: graphOf([linkedRoute({})]),
+      policy: {
+        schemaVersion: 1,
+        resources: [],
+        endpoints: [
+          {
+            resourceId: LINKED_ID,
+            effects: [],
+            cases: [],
+            disposition: { kind: 'out-of-scope', reason: 'serves no table' },
+          },
+        ],
+      },
+      now: NOW,
+    });
+    expect(behavior.blocking).toEqual([]);
+    expect(behavior.obligations).toEqual([]);
+  });
+
+  it('T8 guard: without a disposition the unmatchable link still blocks', () => {
+    const behavior = compileBehaviorPolicy({
+      graph: graphOf([linkedRoute({})]),
+      policy: {
+        schemaVersion: 1,
+        resources: [],
+        endpoints: [{ resourceId: LINKED_ID, effects: [], cases: [READ_CASE] }],
+      },
+      now: NOW,
+    });
+    expect(behavior.blocking.some((entry) => entry.cause === 'BEHAVIOR_BINDING_MISMATCH')).toBe(
+      true,
+    );
+  });
+
+  it('T8 guard: an effect on a different resource still blocks without a disposition', () => {
+    const behavior = compileBehaviorPolicy({
+      graph: graphOf([linkedRoute({}), INVOICES]),
+      policy: {
+        schemaVersion: 1,
+        resources: [],
+        endpoints: [{ resourceId: LINKED_ID, effects: [INVOICE_EFFECT], cases: [READ_CASE] }],
+      },
+      now: NOW,
+    });
+    expect(behavior.blocking.some((entry) => entry.cause === 'BEHAVIOR_BINDING_MISMATCH')).toBe(
+      true,
+    );
+  });
+});
