@@ -48,7 +48,7 @@ const WITH_PERSISTENCE = {
     ...STARTER.policies,
     {
       id: 'user-facing-persistence',
-      when: { exposure: 'internal' },
+      when: { exposure: 'internal' as const },
       require: [
         'persistence:create',
         'persistence:read',

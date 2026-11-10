@@ -226,7 +226,7 @@ describe('browser-driven observation proxy (real chromium, playwright-evidence)'
         return base;
       }
       const transportObligation = {
-        schemaVersion: 1,
+        schemaVersion: 1 as const,
         id: TRANSPORT_OBLIGATION_ID,
         resourceId: 'tenant.http-post-api-contracts-browser',
         contract: 'http:request-observed',
