@@ -579,9 +579,7 @@ test('visits customers instead of the promised orders page', async ({ page }) =>
         const next = await runCliProcess(repo.root, ['next', '--json'], env);
         expect(next.code, `${next.stdout}\n${next.stderr}`).toBe(1);
         const guidance = JSON.parse(next.stdout) as { do?: string; pageGuidance?: string[] };
-        expect(guidance.pageGuidance).toContain(
-          'If PAGE_OBSERVATION_TAMPER_RISK is reported, remove page.evaluate, route interception, route.fulfill, or direct CDP use from the test or its helpers.',
-        );
+        expect(guidance.pageGuidance?.some((line) => line.startsWith('If PAGE_OBSERVATION_TAMPER_RISK is reported, remove page.evaluate'))).toBe(true);
         expect(guidance.do).toMatch(/no test opens \/|resolve PAGE_/);
       } finally {
         await proxy.stop();

@@ -4337,7 +4337,7 @@ async function runSupervisedTestGatesInner(
       runToken,
       verifierKey: witnessVerifierKey,
       catalog: pipeline.behaviorCatalog,
-      assignments: behaviorCaseAssignments(catalog ?? EMPTY_CATALOG, behaviorSidecar),
+      assignments: behaviorCaseAssignments(catalog ?? EMPTY_CATALOG, behaviorSidecar, pipeline.behaviorCatalog),
       routes: httpRoutes,
       authorityProfileDigest: engineBundleDigestOf(VERSION, trustedPolicy),
     });
@@ -6968,13 +6968,15 @@ async function bindWitnessContext(
  * Args:
  *   catalog: the current discovered test catalog.
  *   sidecar: the validated `.gateforge/test-map.yml`, or null.
+ *   behaviorCatalog: the compiled behavior catalog the witness binds, or null.
  *
  * Returns:
  *   Record<string, string[]>: session test id → sorted case ids.
  */
-function behaviorCaseAssignments(
+export function behaviorCaseAssignments(
   catalog: TestCatalog,
   sidecar: TestMap | null,
+  behaviorCatalog: BehaviorCatalog | null,
 ): Record<string, string[]> {
   if (sidecar === null) return {};
   const identityByKey = new Map<string, string>();
@@ -6992,8 +6994,17 @@ function behaviorCaseAssignments(
     const identity = identityByKey.get(entry.key);
     if (identity === undefined) continue;
     const merged = new Set(assignments[identity] ?? []);
-    for (const caseId of entry.caseIds) merged.add(caseId);
-    assignments[identity] = [...merged].sort(compareStrings);
+    for (const rawId of entry.caseIds) {
+      // The sidecar may name a canonical case id or its `definition.id`
+      // alias; the witness takes canonical ids only (server.ts:3195), so
+      // send the canonical one. An id that resolves to no case of this
+      // entry's claims binds nothing; core's TEST_MAPPING_STALE reports it.
+      const compiled = (behaviorCatalog?.cases ?? []).find(
+        (item) => item.caseId === rawId || item.definition.id === rawId,
+      );
+      if (compiled?.obligationIds.some((id) => entry.claims.includes(id))) merged.add(compiled.caseId);
+    }
+    if (merged.size > 0) assignments[identity] = [...merged].sort(compareStrings);
   }
   return assignments;
 }

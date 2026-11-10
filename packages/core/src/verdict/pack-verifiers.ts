@@ -817,7 +817,7 @@ function gradeObservedExchange(
       reason:
         `'${input.obligation.id}': ${subject} carries a noncanonical observed path: ` +
         `${interpreted.reason}`,
-      ownRoute: false,
+      ownRoute: true,
     };
   }
   // Identity match (plan §9, D2 — fail closed, no any-endpoint
@@ -1105,6 +1105,20 @@ function gradeAnchoredTransport(input: ClaimEvidenceInput): ClaimOutcome {
  *   matching exchange, the sharpest typed reason otherwise, or null
  *   when no witnessed Observe-channel record is present at all.
  */
+function observeMissingOwnEndpointReason(input: ClaimEvidenceInput, exchangeCount: number): string {
+  const candidates = (input.httpRoutes ?? []) as readonly HttpRouteCandidate[];
+  const own = candidates.find((candidate) => candidate.resourceId === input.obligation.resourceId);
+  const call =
+    own === undefined
+      ? input.obligation.resourceId
+      : `${own.method} ${own.canonicalPath}`;
+  const plural = exchangeCount === 1 ? '' : 's';
+  return (
+    `'${input.obligation.id}': the session's ${exchangeCount} exchange${plural} include no ${call}; ` +
+    'the test may end before the app makes this call — await it (e.g. Promise.all with page.waitForResponse)'
+  );
+}
+
 function gradeObservedTransport(input: ClaimEvidenceInput): ClaimOutcome | null {
   const records = input.evidence.filter(
     (entry) =>
@@ -1124,6 +1138,7 @@ function gradeObservedTransport(input: ClaimEvidenceInput): ClaimOutcome | null 
   const invalidReasons: string[] = [];
   const testInitiatedReasons: string[] = [];
   const missingReasons: string[] = [];
+  let proxiedExchangeCount = 0;
   for (const entry of records) {
     const label = String(entry.record.recordId);
     const subject = `observe-channel exchange in witnessed '${HTTP_OBSERVED_KIND}' record '${label}'`;
@@ -1143,12 +1158,12 @@ function gradeObservedTransport(input: ClaimEvidenceInput): ClaimOutcome | null 
       );
       continue;
     }
-    let invalid: string | null = null;
     let ownInvalid: string | null = null;
     let testInitiated: string | null = null;
     let missing: string | null = null;
     let matchedHere = false;
     for (const raw of exchanges) {
+      proxiedExchangeCount += 1;
       const facts =
         typeof raw === 'object' && raw !== null && !Array.isArray(raw)
           ? { method: raw['method'], url: raw['url'], status: raw['status'], initiator: raw['initiator'], shape: raw['shape'] }
@@ -1161,9 +1176,9 @@ function gradeObservedTransport(input: ClaimEvidenceInput): ClaimOutcome | null 
       if (grade.status === 'invalid') {
         if (grade.ownRoute) {
           if (ownInvalid === null) ownInvalid = grade.reason;
-        } else if (invalid === null) {
-          invalid = grade.reason;
         }
+        // Exchanges on other endpoints (or on none) never outrank a missing
+        // claim on the obligation's own route.
       } else if (grade.testInitiated) {
         if (testInitiated === null) testInitiated = grade.reason;
       } else if (missing === null) {
@@ -1177,7 +1192,6 @@ function gradeObservedTransport(input: ClaimEvidenceInput): ClaimOutcome | null 
       );
     } else if (ownInvalid !== null) ownInvalidReasons.push(ownInvalid);
     else if (testInitiated !== null) testInitiatedReasons.push(testInitiated);
-    else if (invalid !== null) invalidReasons.push(invalid);
     else if (missing !== null) missingReasons.push(missing);
   }
   if (satisfied.length > 0) {
@@ -1197,7 +1211,16 @@ function gradeObservedTransport(input: ClaimEvidenceInput): ClaimOutcome | null 
   if (invalidReasons.length > 0) {
     return { status: 'invalid', reason: invalidReasons.sort(compareStrings)[0] as string };
   }
-  return { status: 'missing', reason: missingReasons.sort(compareStrings)[0] as string };
+  if (missingReasons.length > 0) {
+    return { status: 'missing', reason: missingReasons.sort(compareStrings)[0] as string };
+  }
+  if (proxiedExchangeCount > 0) {
+    return {
+      status: 'missing',
+      reason: observeMissingOwnEndpointReason(input, proxiedExchangeCount),
+    };
+  }
+  return { status: 'missing', reason: `'${input.obligation.id}': no matching observe-channel exchange` };
 }
 
 /**
@@ -1280,6 +1303,7 @@ function gradeTransportObservation(input: ClaimEvidenceInput): ClaimOutcome {
     observed.status === 'missing' &&
     observed.reason?.includes('the request was started by test code running in the page')
   ) return observed;
+  if (observed.status === 'missing' && observed.reason?.includes('waitForResponse')) return observed;
   return {
     status: 'missing',
     reason: [anchored.reason, observed.reason].sort(compareStrings)[0] as string,

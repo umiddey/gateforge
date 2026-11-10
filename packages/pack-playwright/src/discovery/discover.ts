@@ -43,7 +43,7 @@ import {
   type TestCatalogEntry,
   type WeakSignal,
 } from '@gate-forge/core';
-import { inferTestKind, isMockedFolderPath } from './inference.js';
+import { inferTestKind, isMockedFolderPath, UNDETERMINED_BROWSER_HINT } from './inference.js';
 import {
   collectPytestSuite,
   pytestCollectArgv,
@@ -221,7 +221,7 @@ export interface DiscoveryTimings {
 export function unnamedProjectConfigWarning(configPath: string): string {
   return (
     `playwright config ${configPath} declares no named project; test-gates ` +
-    "need one — add projects: [{ name: 'chromium' }] (behaviour-neutral)"
+    "need one — add projects: [{ name: 'chromium', use: { browserName: 'chromium' } }]"
   );
 }
 
@@ -858,6 +858,8 @@ class CatalogBuilder {
     // an empty-string project is a schema violation, never an identity.
     const project = instance.project === '' ? null : instance.project;
     const callSiteFacts = this.rowFacts(staticEntry?.facts ?? locationGap?.facts, project);
+    // A project with no resolved browser (projectBrowsers gap) cannot be told apart from a chromium pin here.
+    const browserUndetermined = project !== null && !this.projectBrowsers.has(project);
     const callSiteSignals = staticEntry?.signals ?? locationGap?.signals ?? [];
     const callSiteFile = staticEntry?.file ?? locationGap?.file ?? instance.file;
     const matched = callSiteFacts !== undefined;
@@ -869,11 +871,12 @@ class CatalogBuilder {
             title: instance.title,
             titlePath: instance.titlePath,
             facts: callSiteFacts,
+            browserUndetermined,
           });
     const suppression =
       callSiteFacts === undefined
         ? { mocks: nativeSuppression(instance.annotations, instance.location), flags: [] }
-        : suppressionOf(callSiteFile, callSiteFacts, callSiteSignals, instance.annotations, instance.location);
+        : suppressionOf(callSiteFile, callSiteFacts, callSiteSignals, instance.annotations, instance.location, browserUndetermined);
     const weakSignals = [...inference.weakSignals];
     if (template !== undefined) {
       // The identity is a concrete enumerated instance; the static facts
@@ -939,7 +942,7 @@ class CatalogBuilder {
       facts: staticEntry.facts,
     });
     const digest = fileDigest(this.cwd, staticEntry.file);
-    const suppression = suppressionOf(staticEntry.file, staticEntry.facts, staticEntry.signals, [], staticEntry.location);
+    const suppression = suppressionOf(staticEntry.file, staticEntry.facts, staticEntry.signals, [], staticEntry.location, false);
     const owner = this.ownerOf(staticEntry.file);
     this.recordAttribution(owner, staticEntry.file);
     const foreign = owner !== '' && owner !== this.runner;
@@ -1389,8 +1392,9 @@ function suppressionOf(
   signals: StaticScanResult['entries'][number]['signals'],
   annotations: readonly string[],
   annotationLocation: Location,
+  browserUndetermined: boolean,
 ) {
-  const mocks = mockSignalsOf(file, facts);
+  const mocks = mockSignalsOf(file, facts, browserUndetermined);
   const flags = signals.map((signal) => ({
     kind: signal.kind,
     detail: signal.detail,
@@ -1420,7 +1424,7 @@ function nativeSuppression(annotations: readonly string[], location: Location) {
 }
 
 /** Mock suppression signals from call-site facts. */
-function mockSignalsOf(file: string, facts: StaticTestFacts) {
+function mockSignalsOf(file: string, facts: StaticTestFacts, browserUndetermined: boolean) {
   const signals: Array<{ kind: 'mock'; detail: string; location: Location }> = [];
   if (facts.pageRoute !== null) {
     signals.push({ kind: 'mock', detail: 'page.route interception inside the test body', location: facts.pageRoute });
@@ -1428,7 +1432,9 @@ function mockSignalsOf(file: string, facts: StaticTestFacts) {
   if (facts.fileRouteInterception !== null) {
     signals.push({
       kind: 'mock',
-      detail: `PAGE_OBSERVATION_TAMPER_RISK: browser API mutation at ${facts.fileRouteInterception.file}:${facts.fileRouteInterception.line}`,
+      detail:
+        `PAGE_OBSERVATION_TAMPER_RISK: browser API mutation at ${facts.fileRouteInterception.file}:${facts.fileRouteInterception.line}` +
+        (browserUndetermined && facts.fileRouteInterceptionNonEvaluate === null ? UNDETERMINED_BROWSER_HINT : ''),
       location: facts.fileRouteInterception,
     });
   }

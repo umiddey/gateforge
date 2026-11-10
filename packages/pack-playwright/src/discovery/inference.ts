@@ -30,6 +30,10 @@ import { BROWSER_FIXTURE_PARAMS } from './static-discovery.js';
 /** Signature parameter names that prove a real API context is in play. */
 export const API_FIXTURE_PARAMS: readonly string[] = ['request'];
 
+/** Appended to a tamper refusal when the project's browser is undetermined (evaluate-only). */
+export const UNDETERMINED_BROWSER_HINT =
+  "; the project's browser is undetermined, so evaluate-family calls refuse; pin use: { browserName: 'chromium' } on the project to run them as chromium";
+
 /** The facts inference consumes (file-level facts shared by the scan). */
 export interface InferenceFacts {
   /** Repo-relative file (weak path hints). */
@@ -38,6 +42,12 @@ export interface InferenceFacts {
   title: string;
   /** Full title path (weak title hints). */
   titlePath: readonly string[];
+  /**
+   * The row's project has no resolved browser (a `projectBrowsers` gap).
+   * Read only for an evaluate-only tamper: a chromium-pinned project does
+   * not refuse it, so the refusal names the pin that clears it.
+   */
+  browserUndetermined?: boolean;
   /** The static facts of the call: fixtures + body/file patterns. */
   facts: StaticTestFacts;
 }
@@ -241,7 +251,8 @@ export function inferTestKind(input: InferenceFacts): InferenceResult {
   if (input.facts.fileRouteInterception !== null) {
     const riskDetail =
       `PAGE_OBSERVATION_TAMPER_RISK: browser API mutation at ${input.facts.fileRouteInterception.file}:` +
-      `${input.facts.fileRouteInterception.line} in the spec or its imported helper`;
+      `${input.facts.fileRouteInterception.line} in the spec or its imported helper` +
+      (input.browserUndetermined === true && input.facts.fileRouteInterceptionNonEvaluate === null ? UNDETERMINED_BROWSER_HINT : '');
     mockSignals.push({
       kind: 'mock',
       detail: riskDetail,
