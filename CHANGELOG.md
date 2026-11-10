@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.19.2
+
 - **Fixed: transport obligations on `internal` routes are graded.**
   A route classified `internal` (every unlinked `/health`, `/ops`,
   `/metrics` route, or a certified internal route) that a policy matched
@@ -11,6 +13,14 @@
   `missing` until the same witnessed exchange proves them. `crud:`/
   `persistence:` on internal resources stay invalid. No policy or digest
   change is needed.
+
+- **Fixed: an `out-of-scope` endpoint no longer blocks on a source-link
+  guess.** An entry whose owner-approved disposition is `out-of-scope`
+  now skips the `BEHAVIOR_BINDING_MISMATCH` source-link check, because
+  no truthful config can clear a link that no declared effect can match
+  (for example a route that returns a hardcoded list but is linked to a
+  table by name). An expired disposition is void, and entries without a
+  disposition keep the check.
 
 ## 0.19.1
 
