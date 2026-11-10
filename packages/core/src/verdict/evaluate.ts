@@ -43,8 +43,9 @@
  *   an `entityId` equal to the UI action's entity. Composite identity is a
  *   column-keyed object whose keys are exactly the `primaryKey` columns
  *   (D3); single-column resources require a scalar id.
- * - Internal resources carry no CRUD obligations; their claims are invalid
- *   (ADR 0001, matching the policy engine's claim assessment).
+ * - Internal resources carry no CRUD/persistence obligations; claims for
+ *   those contracts are invalid (ADR 0003 D3, matching the policy engine's
+ *   claim assessment). Transport contracts grade like any other route.
  * - Unclassified resources block as `unclassified` (invariant 1).
  *   Unresolved resources never reach this evaluator: they generate no
  *   obligations — the policy engine emits blocking entries for them.
@@ -2476,14 +2477,20 @@ export function evaluateObligation(
   }
   const classification = parsedClassification.data;
 
-  // 2. Internal resources carry no CRUD obligations; their claims are
-  //    invalid (ADR 0001, matching the policy engine's convention).
-  if (classification.exposure === 'internal') {
+  // 2. Internal resources carry no CRUD/persistence obligations; claims
+  //    for those contracts are invalid (ADR 0003 D3, matching the policy
+  //    engine's convention). Transport contracts grade like any other
+  //    route's — the same witnessed exchange proves them.
+  if (
+    classification.exposure === 'internal' &&
+    (verified.contract.startsWith(CRUD_CONTRACT_PREFIX) ||
+      verified.contract.startsWith(PERSISTENCE_CONTRACT_PREFIX))
+  ) {
     return {
       verdict: 'invalid',
       reason:
-        `resource '${verified.resourceId}' is internal; internal resources carry no CRUD ` +
-        'obligations and their claims are invalid (ADR 0001)',
+        `resource '${verified.resourceId}' is internal; internal resources carry ` +
+        'no CRUD/persistence obligations and such claims are invalid (ADR 0003 D3)',
       recordIds: [],
     };
   }
