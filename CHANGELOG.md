@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **Fixed: transport obligations on `internal` routes are graded.**
+  A route classified `internal` (every unlinked `/health`, `/ops`,
+  `/metrics` route, or a certified internal route) that a policy matched
+  still got `http:request-observed`/`http:response-status-ok`, and then
+  always graded `invalid` ("carry no CRUD obligations"). This included
+  the `operational-only` transport case. They now grade like any route:
+  `missing` until the same witnessed exchange proves them. `crud:`/
+  `persistence:` on internal resources stay invalid. No policy or digest
+  change is needed.
+
 ## 0.19.1
 
 - **Fixed: Playwright UI actions count as page traffic, not test code.**
