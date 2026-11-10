@@ -1433,7 +1433,10 @@ Enforcement-relevant sections:
   policies.yml rule obligation for that endpoint. An active table
   disposition withholds `persistence:*` rule obligations for that table.
   Expired dispositions excuse neither. `operational-only` still excuses
-  no rule obligation (transport case only). The check report lists each
+  no rule obligation (transport case only). Health/ops routes classify
+  `internal`, and their transport case and any matched `http:*` rule
+  obligation grade on the normal transport evidence.
+  The check report lists each
   withheld obligation as `excused` with the reason. `disposition list`
   names the excuse (`rule-obligations`, `persistence`, or none).
   The owner renews a timer with

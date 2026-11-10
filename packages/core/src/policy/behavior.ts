@@ -198,7 +198,16 @@ export function compileBehaviorPolicy(input: CompileBehaviorPolicyInput): Compil
       );
       continue;
     }
-    const linkedError = linkedResourceConflict(resource, declared.effects);
+    // An owner-approved `out-of-scope` disposition IS the statement that
+    // this endpoint is not graded, so a source-link guess that no
+    // declared effect can match must not block it — no truthful config
+    // can clear such a conflict (an effect must name a real resource).
+    // An expired disposition is void (above) and every other entry keeps
+    // the check (plan 20261109_1030 P2b).
+    const linkedError =
+      disposition?.kind === 'out-of-scope'
+        ? null
+        : linkedResourceConflict(resource, declared.effects);
     if (linkedError !== null) {
       blocking.push(
         block('finding', resourceId, resource.name, linkedError, resource.location, 'BEHAVIOR_BINDING_MISMATCH'),

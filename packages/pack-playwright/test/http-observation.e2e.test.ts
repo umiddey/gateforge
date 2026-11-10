@@ -225,33 +225,40 @@ describe('browser-driven observation proxy (real chromium, playwright-evidence)'
         });
         return base;
       }
-      const transportOutcome = evaluateObligation(
-        {
-          schemaVersion: 1,
-          id: TRANSPORT_OBLIGATION_ID,
-          resourceId: 'tenant.http-post-api-contracts-browser',
-          contract: 'http:request-observed',
-          policyId: 'p',
-          lifecycle: { create: false, read: false, update: false, delete: false },
-        },
-        {
-          claims: [{ schemaVersion: 1, obligationId: TRANSPORT_OBLIGATION_ID, testId: TEST_ID }],
-          records: [provenancedAnchor(TRANSPORT_OBLIGATION_ID), ...(ledger.records as unknown[])],
-          waivers: [],
-          classification,
-          // Complete inventory (plan §9, D2): the browser-driven
-          // observation attributes to the obligation's own endpoint.
-          httpRoutes: [
-            {
-              resourceId: 'tenant.http-post-api-contracts-browser',
-              method: 'POST',
-              canonicalPath: '/api/contracts',
-            },
-          ],
-          now: '2026-01-01T00:00:00.000Z',
-        },
-      );
+      const transportObligation = {
+        schemaVersion: 1 as const,
+        id: TRANSPORT_OBLIGATION_ID,
+        resourceId: 'tenant.http-post-api-contracts-browser',
+        contract: 'http:request-observed',
+        policyId: 'p',
+        lifecycle: { create: false, read: false, update: false, delete: false },
+      };
+      const transportContext = {
+        claims: [{ schemaVersion: 1, obligationId: TRANSPORT_OBLIGATION_ID, testId: TEST_ID }],
+        records: [provenancedAnchor(TRANSPORT_OBLIGATION_ID), ...(ledger.records as unknown[])],
+        waivers: [],
+        classification,
+        // Complete inventory (plan §9, D2): the browser-driven
+        // observation attributes to the obligation's own endpoint.
+        httpRoutes: [
+          {
+            resourceId: 'tenant.http-post-api-contracts-browser',
+            method: 'POST',
+            canonicalPath: '/api/contracts',
+          },
+        ],
+        now: '2026-01-01T00:00:00.000Z',
+      };
+      const transportOutcome = evaluateObligation(transportObligation, transportContext);
       expect(transportOutcome.verdict).toBe('satisfied');
+      // Plan 20261109_1030 P1: the same witnessed exchange satisfies the
+      // transport contract under an `internal` classification too —
+      // exposure never gates transport grading.
+      const internalOutcome = evaluateObligation(transportObligation, {
+        ...transportContext,
+        classification: { ...classification, exposure: 'internal' },
+      });
+      expect(internalOutcome.verdict).toBe('satisfied');
       const frontendOutcome = evaluateObligation(
         {
           schemaVersion: 1,

@@ -459,7 +459,7 @@ function generateObligations(
         contract.startsWith(CRUD_CONTRACT_PREFIX) ||
         contract.startsWith(PERSISTENCE_CONTRACT_PREFIX)
       ) {
-        // ADR 0001: internal ⇒ no CRUD obligations. `hidden` (plan
+        // ADR 0003 D3: internal ⇒ no CRUD/persistence obligations. `hidden` (plan
         // 20261028_1945 D) skips the same lane: a user's click writes
         // the rows and no route ever serves them back, so no CRUD
         // claim can ever be honestly carried against it.
@@ -575,11 +575,12 @@ function policyMatches(
 }
 
 /**
- * Assesses claims against the generated obligation set. Claims on
- * internal resources are invalid outright (ADR 0001 — internal
- * resources carry no CRUD obligations and never accept claims);
- * claims whose obligation id was not generated are invalid as unknown;
- * the rest are valid linkages (validity ≠ satisfaction — pin #9).
+ * Assesses claims against the generated obligation set. Claims for
+ * `crud:`/`persistence:` contracts on internal resources are invalid
+ * outright (ADR 0003 D3 — internal resources carry no CRUD/persistence
+ * obligations and never accept those claims); claims whose obligation
+ * id was not generated are invalid as unknown; the rest are valid
+ * linkages (validity ≠ satisfaction — pin #9).
  */
 function assessClaims(
   claims: Claim[],
@@ -593,12 +594,18 @@ function assessClaims(
     }
   }
   return claims.map((claim) => {
-    const resourceId = claim.obligationId.slice(0, claim.obligationId.indexOf(':'));
-    if (internalIds.has(resourceId)) {
+    const separator = claim.obligationId.indexOf(':');
+    const resourceId = claim.obligationId.slice(0, separator);
+    const contract = claim.obligationId.slice(separator + 1);
+    if (
+      internalIds.has(resourceId) &&
+      (contract.startsWith(CRUD_CONTRACT_PREFIX) ||
+        contract.startsWith(PERSISTENCE_CONTRACT_PREFIX))
+    ) {
       return {
         claim,
         status: 'invalid' as const,
-        reason: `resource '${resourceId}' is internal: internal resources carry no CRUD obligations and their claims are invalid (ADR 0001)`,
+        reason: `resource '${resourceId}' is internal; internal resources carry no CRUD/persistence obligations and such claims are invalid (ADR 0003 D3)`,
       };
     }
     if (!knownIds.has(claim.obligationId)) {
