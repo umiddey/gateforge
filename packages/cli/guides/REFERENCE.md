@@ -2422,12 +2422,32 @@ that name DIFFERENT resources are a blocking
 first-rule-wins. A valid declaration clears THIS entry for the declared
 route (a declared route never falls back to the candidate channel), so it
 stops failing a run-wide complete-scan proof. A rule may carry
-`capability:` as well; `capability` is optional exactly when `resource:`
-is present, and every rule carries at least one of the two plus a
-non-empty `reason`. With no `resource:` anywhere the compiled output is
+`capability:` as well; `capability` is optional when `resource:` or
+`noResource: true` is present, and every rule carries at least one of the
+three plus a non-empty `reason`. With no `resource:` anywhere the compiled output is
 unchanged. If none of the candidates is right, the route genuinely serves
 something the resource graph does not model. A route that links, a route
 with nothing near it, and any collection route are unaffected.
+
+A route that serves no single resource at all (it reads several, or none
+the resource graph models) is declared with `noResource: true` in place of
+`resource:`, never both:
+
+```yaml
+endpoints:
+  rules:
+    - match: backend/routes/exports.py
+      noResource: true
+      reason: the export reads several tables and serves no single resource
+```
+
+The declaration clears this entry for that route, and the report lists it
+under "routes declared to serve no single resource". It never links a
+resource and never exempts a route from behavior or transport obligations.
+It is refused with a blocking `ENDPOINT_RESOURCE_DECLARATION_CONTRADICTION`
+when the route's path names one or more discovered resources. That check
+compares names only (an exact name, or the singular form of one trailing
+`s`), so a merely similar name never refuses.
 
 Whether the entry BLOCKS is the owner's call, in `.gateforge.yml`:
 
