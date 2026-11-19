@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.20.0
 
 - **Added: `noResource: true` endpoint rule — an owner's explicit answer that
   a route serves no single business resource.** A route that reads several
