@@ -76,7 +76,16 @@ export type EndpointCapability = (typeof ENDPOINT_CAPABILITIES)[number];
 const RULE_METHODS: readonly string[] = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'];
 
 /** The only keys a rule object may carry. */
-const RULE_KEYS: readonly string[] = ['match', 'handlers', 'paths', 'method', 'capability', 'resource', 'reason'];
+const RULE_KEYS: readonly string[] = [
+  'match',
+  'handlers',
+  'paths',
+  'method',
+  'capability',
+  'resource',
+  'noResource',
+  'reason',
+];
 
 /** One reviewed capability rule of the declarative endpoint config. */
 export interface EndpointCapabilityRule {
@@ -102,10 +111,9 @@ export interface EndpointCapabilityRule {
   /** Exact HTTP method this rule is scoped to (never `ANY`). */
   readonly method?: HttpMethod;
   /**
-   * The capability this rule asserts (strict vocabulary). Optional since
-   * (b, 2026-10-20): a rule that declares a `resource` instead carries
-   * the route→resource link — every rule must carry at least one of the
-   * two.
+   * The capability this rule asserts (strict vocabulary). Optional: a rule
+   * may instead carry a `resource`, or `noResource: true`; every rule must
+   * carry at least one of the three.
    */
   readonly capability?: EndpointCapability;
   /**
@@ -116,6 +124,13 @@ export interface EndpointCapabilityRule {
    * are a typed contradiction and link nothing.
    */
   readonly resource?: string;
+  /**
+   * `true` only: the owner's explicit answer that this route serves NO
+   * single business resource. It never links, never exempts behavior or
+   * transport obligations, and is refused (typed contradiction) when the
+   * route's path names one or more discovered resources (name-only check).
+   */
+  readonly noResource?: true;
   /** Required non-empty human rationale; rides contradiction diagnostics. */
   readonly reason: string;
 }
@@ -215,9 +230,22 @@ function parseEndpointCapabilityRule(value: unknown, index: number): EndpointCap
   }
   const capability = record['capability'];
   const resource = record['resource'];
-  if (capability === undefined && resource === undefined) {
+  const noResource = record['noResource'];
+  if (noResource !== undefined && noResource !== true) {
     throw new Error(
-      `invalid endpoints config: ${at} must carry at least one of 'capability' or 'resource'`,
+      `invalid endpoints config: ${at}.noResource must be the literal true (omit the key otherwise)`,
+    );
+  }
+  if (noResource === true && resource !== undefined) {
+    throw new Error(
+      `invalid endpoints config: ${at} carries both 'resource' and 'noResource' ` +
+        '(a route serves the declared resource or none)',
+    );
+  }
+  if (capability === undefined && resource === undefined && noResource === undefined) {
+    throw new Error(
+      `invalid endpoints config: ${at} must carry at least one of 'capability' or 'resource', ` +
+        `or 'noResource: true'`,
     );
   }
   let declaredCapability: EndpointCapability | undefined;
@@ -259,6 +287,7 @@ function parseEndpointCapabilityRule(value: unknown, index: number): EndpointCap
     ...(method !== undefined ? { method } : {}),
     ...(declaredCapability !== undefined ? { capability: declaredCapability } : {}),
     ...(declaredResource !== undefined ? { resource: declaredResource } : {}),
+    ...(noResource === true ? { noResource: true as const } : {}),
     reason,
   };
 }
@@ -417,8 +446,8 @@ export function resolveDeclaredCapabilities(
 export interface EndpointResourceHit {
   /** The rule's 0-based index in the config document. */
   readonly index: number;
-  /** The declared business resource name. */
-  readonly resource: string;
+  /** The declared business resource name; null for a noResource rule. */
+  readonly resource: string | null;
   /** The rule's human review rationale. */
   readonly reason: string;
 }
@@ -438,7 +467,7 @@ export interface EndpointResourceResolution {
  * that declaration links the endpoint INSTEAD of the path-derived name
  * guess; when they disagree, `conflict` is true and NOTHING is linked
  * (the compiler emits the typed contradiction — never first-rule-wins).
- * Rules without `resource` never match here.
+ * Rules without `resource` or `noResource` never match here.
  */
 export function resolveDeclaredResources(
   config: EndpointsConfig,
@@ -447,9 +476,9 @@ export function resolveDeclaredResources(
   const hits: EndpointResourceHit[] = [];
   for (let index = 0; index < config.rules.length; index += 1) {
     const rule = config.rules[index];
-    if (rule === undefined || rule.resource === undefined) continue;
+    if (rule === undefined || (rule.resource === undefined && rule.noResource !== true)) continue;
     if (!endpointRuleMatches(rule, input)) continue;
-    hits.push({ index, resource: rule.resource, reason: rule.reason });
+    hits.push({ index, resource: rule.resource ?? null, reason: rule.reason });
   }
   const first = hits[0];
   const conflict = first !== undefined && hits.some((hit) => hit.resource !== first.resource);

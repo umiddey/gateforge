@@ -49,6 +49,21 @@ export function renderEndpointInventory(inventory: EndpointInventory): string {
         `consumed=${calls > 0 ? 'yes' : 'no'}  link=${link}  route=${route?.file}:${route?.line}  callsites=${calls}`,
     );
   }
+  const declaredNone = inventory.endpoints.flatMap((endpoint) =>
+    endpoint.noResource === undefined
+      ? []
+      : [{ identity: endpoint.identity, ...endpoint.noResource }],
+  );
+  if (declaredNone.length > 0) {
+    lines.push(
+      `routes declared to serve no single resource (${declaredNone.length}) — owner-declared; checked only against resource names:`,
+    );
+    for (const declared of declaredNone) {
+      lines.push(
+        `  ${declared.identity}  noResource=rules[${String(declared.rule)}]: ${declared.reason}`,
+      );
+    }
+  }
 
   const unwired = inventory.unwired;
   lines.push(`unmatched frontend calls (${unwired.length}):`);

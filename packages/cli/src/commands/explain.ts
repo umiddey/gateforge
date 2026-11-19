@@ -176,6 +176,10 @@ export async function explainCommand(io: Io, argv: readonly string[]): Promise<n
       writeLine(io.stdout, `    - ${traceEntry.capability} <- ${traceEntry.rule}`);
     }
     writeLine(io.stdout, `  linkedResource: ${String(attributes['linkedResourceName'] ?? '<none>')}`);
+    const noResource = attributes['noResource'] as { rule: number; reason: string } | undefined;
+    if (noResource !== undefined) {
+      writeLine(io.stdout, `  noResource: rules[${String(noResource.rule)}] — ${noResource.reason}`);
+    }
     writeLine(io.stdout, `  frontendConsumed: ${String(attributes['frontendConsumed'] ?? 'false')}`);
     for (const source of (attributes['serverSources'] as string[] | undefined) ?? []) {
       writeLine(io.stdout, `  route source: ${source}`);

@@ -1,6 +1,19 @@
 # Changelog
 
-## Unreleased
+## 0.20.0
+
+- **Added: `noResource: true` endpoint rule — an owner's explicit answer that
+  a route serves no single business resource.** A route that reads several
+  tables, or none the resource graph models, can say so in
+  `endpoints.rules[]` instead of leaving `ENDPOINT_RESOURCE_CANDIDATE_UNMATCHED`
+  open. The rule never links a resource and never exempts behavior or
+  transport obligations. It is refused with
+  `ENDPOINT_RESOURCE_DECLARATION_CONTRADICTION` when the route's path names one
+  or more discovered resources (name-only match: an exact name, or the singular
+  form of one trailing `s`; a merely similar name does not refuse). Setting
+  `noResource` and `resource` on one rule is rejected. The key is new: older
+  Gateforge versions reject the config with an unknown-key error. The report
+  lists these routes under "routes declared to serve no single resource".
 
 ## 0.19.2
 
