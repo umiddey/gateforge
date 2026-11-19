@@ -93,7 +93,6 @@ import {
   parseEndpointsConfigDocument,
   resolveDeclaredCapabilities,
   resolveDeclaredResources,
-  type EndpointResourceHit,
   type EndpointsConfig,
 } from './endpoint-config.js';
 import { UsageError } from './errors.js';
@@ -113,6 +112,8 @@ export interface EndpointRecord {
   capabilities: string[];
   capabilityTrace: Array<{ capability: string; rule: string; evidence: string }>;
   linkedResourceName: string | null;
+  /** The owner's noResource declaration (rule index and reason); absent otherwise. */
+  noResource?: { rule: number; reason: string };
   frontendConsumed: boolean;
   deleteSemantics: 'hard' | 'archive' | null;
   routes: HttpContractFact[];
@@ -817,8 +818,18 @@ export function compileEndpointContribution(
     //   - no matching rule declares a resource → the path-derived
     //     channel below decides exactly as before (byte-identical).
     // The capability channel below keeps its own semantics byte-identical.
-    let declaredResource: EndpointResourceHit | null = null;
+    // Business resources the path-derived name could mean: one or more
+    // refuse a noResource declaration; exactly one is the link candidate.
+    const singularCandidate = candidate?.endsWith('s') ? candidate.slice(0, -1) : candidate;
+    const matches =
+      candidate === null
+        ? []
+        : [...businessNames.values()].filter(
+            (entry) => entry.name === candidate || entry.name === singularCandidate,
+          );
+    let declaredResource: string | null = null;
     let declarationBlocked = false;
+    let noResourceDeclaration: { rule: number; reason: string } | null = null;
     if (endpointsConfig !== null) {
       const resourceResolution = resolveDeclaredResources(endpointsConfig, endpointMatchInput);
       const declared = resourceResolution.hits[0];
@@ -831,16 +842,39 @@ export function compileEndpointContribution(
             code: ENDPOINT_RESOURCE_DECLARATION_CONTRADICTION,
             detail:
               `endpoint '${identity}' matches ${resourceResolution.hits.length} endpoint-resource ` +
-              `rules asserting ${resourceResolution.hits.map((hit) => `'${hit.resource}'`).join(' vs ')}: ` +
+              `rules asserting ${resourceResolution.hits.map((hit) => (hit.resource === null ? 'no resource' : `'${hit.resource}'`)).join(' vs ')}: ` +
               resourceResolution.hits
-                .map((hit) => `rules[${String(hit.index)}] -> '${hit.resource}' (${hit.reason})`)
+                .map((hit) => `rules[${String(hit.index)}] -> ${hit.resource === null ? 'no resource' : `'${hit.resource}'`} (${hit.reason})`)
                 .join('; ') +
               '; endpoint-resource rules are explicit declarations for this endpoint — ' +
               'make the matching rules agree or remove the losing rule',
             location: endpointRoutes[0]?.source ?? { file: '<unknown>', line: 1, col: 0 },
           });
         }
-      } else if (declared !== undefined && !businessNames.has(declared.resource)) {
+      } else if (declared !== undefined && declared.resource === null) {
+        // noResource: the owner's explicit "serves no single resource".
+        // A path naming discovered resources contradicts it (typed,
+        // blocking). A path naming none records the declaration and keeps
+        // the path-derived channel off (declarationBlocked).
+        declarationBlocked = true;
+        if (matches.length > 0) {
+          const key = `resource-config:${identity}`;
+          if (!seenEndpointUnresolved.has(key)) {
+            seenEndpointUnresolved.add(key);
+            unresolved.push({
+              code: ENDPOINT_RESOURCE_DECLARATION_CONTRADICTION,
+              detail:
+                `endpoint '${identity}' rules[${String(declared.index)}] declares noResource ` +
+                `(${declared.reason}), but its path names discovered business resource(s) ` +
+                `${matches.map((discovered) => `'${discovered.name}'`).join(', ')}; a route serves ` +
+                'the declared resource or none — remove the noResource rule or the resource rule it contradicts',
+              location: endpointRoutes[0]?.source ?? { file: '<unknown>', line: 1, col: 0 },
+            });
+          }
+        } else {
+          noResourceDeclaration = { rule: declared.index, reason: declared.reason };
+        }
+      } else if (declared !== undefined && declared.resource !== null && !businessNames.has(declared.resource)) {
         declarationBlocked = true;
         const key = `resource-config:${identity}`;
         if (!seenEndpointUnresolved.has(key)) {
@@ -871,8 +905,8 @@ export function compileEndpointContribution(
             location: endpointRoutes[0]?.source ?? { file: '<unknown>', line: 1, col: 0 },
           });
         }
-      } else if (declared !== undefined) {
-        declaredResource = declared;
+      } else if (declared !== undefined && declared.resource !== null) {
+        declaredResource = declared.resource;
       }
     }
 
@@ -891,12 +925,8 @@ export function compileEndpointContribution(
     const byIdEndpoint = canonicalPath.endsWith(HTTP_PARAM_SLOT);
     if (declaredResource !== null) {
       // The owner declared the link: it REPLACES the path-derived guess.
-      linkedResourceName = declaredResource.resource;
+      linkedResourceName = declaredResource;
     } else if (!declarationBlocked && candidate !== null) {
-      const singularCandidate = candidate.endsWith('s') ? candidate.slice(0, -1) : candidate;
-      const matches = [...businessNames.values()].filter(
-        (entry) => entry.name === candidate || entry.name === singularCandidate,
-      );
       const match = matches[0];
       if (matches.length === 1 && match !== undefined) {
         const corroboratedBySchema = endpointRoutes.some((route) =>
@@ -1243,6 +1273,7 @@ export function compileEndpointContribution(
       linkedResourceName,
       frontendConsumed: consumed,
       deleteSemantics,
+      ...(noResourceDeclaration !== null ? { noResource: noResourceDeclaration } : {}),
       routes: [...endpointRoutes].sort((a, b) => compareText(JSON.stringify(a), JSON.stringify(b))),
       calls: [...endpointCalls].sort((a, b) => compareText(JSON.stringify(a), JSON.stringify(b))),
     };
@@ -1284,6 +1315,7 @@ export function compileEndpointContribution(
           ? { typedPathParams: true }
           : {}),
         ...(linkedResourceName !== null ? { linkedResourceName } : {}),
+        ...(noResourceDeclaration !== null ? { noResource: noResourceDeclaration } : {}),
         frontendConsumed: consumed,
         ...(deleteSemantics !== null ? { deleteSemantics } : {}),
       },
