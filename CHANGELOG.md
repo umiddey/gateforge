@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.20.1
+
+- **Fixed: `gateforge doctor` and the enforcement probes no longer crash on a
+  repository with a very large file list.** The staged-index listing was read
+  through a default 1 MiB child-process buffer, so a large clone (hundreds of
+  thousands of tracked files) made the listing fail and the probe reported it
+  as an empty index. The buffer is now 64 MiB, and a listing that still cannot
+  be read fails with "could not be listed", distinct from "is empty".
+- **Fixed: the verifier-key exposure scan no longer throws `RangeError` on a
+  very large file list.** The scan spread the whole list into one call; it now
+  fills a set in a loop. No policy, config or digest change is needed.
+
 ## 0.20.0
 
 - **Added: `noResource: true` endpoint rule — an owner's explicit answer that
