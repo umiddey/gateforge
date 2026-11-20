@@ -164,7 +164,7 @@ export interface DoctorReport {
  * reports the failure class, it never throws).
  */
 function probe(cwd: string, env: NodeJS.ProcessEnv, args: readonly string[]): string | null {
-  const result = spawnSync('git', [...args], { cwd, env, encoding: 'utf8' });
+  const result = spawnSync('git', [...args], { cwd, env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
   if (result.error !== undefined || result.status !== 0) return null;
   return (result.stdout ?? '').trim();
 }
@@ -291,7 +291,12 @@ function stagedPolicyState(io: Io): StagedPolicyState {
   // stable message (a scratch-directory path would make the report move
   // between two runs of an unchanged repository).
   const staged = probe(io.cwd, io.env, ['ls-files', '--stage', '-z']);
-  if (staged === null || staged.length === 0) {
+  if (staged === null) {
+    throw new UsageError(
+      'the staged index could not be listed: git ls-files failed or its output overflowed the 64 MiB buffer',
+    );
+  }
+  if (staged.length === 0) {
     throw new UsageError('the staged index is empty — stage the policy inputs (git add) to evaluate them');
   }
   const frozen = freezeStagedCandidate(io.cwd, io.env);
@@ -624,17 +629,17 @@ function verifierKeyExposure(cwd: string, env: NodeJS.ProcessEnv): { paths: stri
     ['ls-files', '--cached', '--others', '--exclude-standard', '-z'],
     ['ls-files', '--others', '--ignored', '--exclude-standard', '-z'],
   ];
-  const listedPaths: string[] = [];
+  const listedPaths = new Set<string>();
   for (const args of listingArgs) {
-    const listed = spawnSync('git', args, { cwd, env, encoding: 'utf8' });
+    const listed = spawnSync('git', args, { cwd, env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
     if (listed.error !== undefined || listed.status !== 0) {
       return { paths: [], configured, scanError: true };
     }
-    listedPaths.push(...(listed.stdout ?? '').split('\0'));
+    for (const entry of (listed.stdout ?? '').split('\0')) listedPaths.add(entry);
   }
   const keyBytes = activeKey === undefined ? null : Buffer.from(activeKey, 'utf8');
   const paths: string[] = [];
-  for (const relativePath of new Set(listedPaths)) {
+  for (const relativePath of listedPaths) {
     if (relativePath.length === 0) continue;
     const absolutePath = resolve(cwd, relativePath);
     try {
