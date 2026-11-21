@@ -1934,10 +1934,10 @@ scan has that name; an ambiguous name gives no signal.
 
 A literal table name is the identifier itself: `"route rows"` names
 `route rows`, not `route`, and an optional `ONLY` before the table name is
-skipped. A `table(...)` argument is checked against module-level bindings
-only. The `insert`, `update` and `delete` name must be the `sqlalchemy`
-import: a name bound more than once in the module, or rebound in the calling
-function or passed to it as a parameter, gives no signal.
+skipped. The sqlalchemy names a write uses (`insert`, `update`, `delete`,
+`text`, `table`, `Session` and `sessionmaker`) must be the imports: a name
+bound more than once in the module, or rebound in the calling function or
+passed to it as a parameter, gives no signal.
 
 What gives no signal (the table is not proven internal):
 

@@ -13,8 +13,9 @@
 - Existing configurations are unaffected until a category is bound. Binding
   edits `.gateforge/classification-policy.yml`, so approved policy pins must be
   re-approved.
-- Reachability resolves names more strictly. An `insert`, `update` or `delete`
-  name that is rebound in the module or in the calling function gives no
+- Reachability resolves names more strictly. An `insert`, `update`, `delete`,
+  `text`, `table`, `Session` or `sessionmaker` name that is rebound in the
+  module, in the calling function, or passed in as a parameter gives no
   signal, a `@<app>.task` decorator needs `<app>` to be `Celery` imported from
   `celery`, and a quoted SQL table name (`"route rows"`) is read whole. A route
   that writes a table through a helper, or enqueues a worker with `.delay()`, is
