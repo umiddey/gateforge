@@ -344,3 +344,31 @@ describe('fixture 3: shadowed sqlalchemy names are not the import', () => {
     expect(found[0]?.assertion).toBe('migration');
   });
 });
+
+describe('literal sql and celery names', () => {
+  const F3 = join(HERE, 'fixtures', 'reachability-shadow');
+
+  it('R81 a quoted name with a space is its own table, not the word before it: no signal', async () => {
+    const sigs = await discover(F3, { trustedInternalEntryPoints: ALL });
+    expect(hits(sigs, 'route', 'Route')).toHaveLength(0);
+  });
+
+  it('R82 control: UPDATE ONLY names the table after ONLY: migration signal', async () => {
+    const sigs = await discover(F3, { trustedInternalEntryPoints: ALL });
+    const found = hits(sigs, 'only_rows', 'OnlyRow');
+    expect(found).toHaveLength(1);
+    expect(found[0]?.assertion).toBe('migration');
+  });
+
+  it('R83 a local class Celery is not celery.Celery: its @app.task gives no worker signal', async () => {
+    const sigs = await discover(F3, { trustedInternalEntryPoints: ALL });
+    expect(hits(sigs, 'shadow_task_rows', 'ShadowTaskRow')).toHaveLength(0);
+  });
+
+  it('R84 control: from celery import Celery makes @app.task a worker signal', async () => {
+    const sigs = await discover(F3, { trustedInternalEntryPoints: ALL });
+    const found = hits(sigs, 'shadow_real_task_rows', 'ShadowRealTaskRow');
+    expect(found).toHaveLength(1);
+    expect(found[0]?.assertion).toBe('worker');
+  });
+});

@@ -1,3 +1,4 @@
+from alembic import op
 from sqlalchemy import insert
 
 from helper_shadow import param_write, real_write
@@ -12,6 +13,8 @@ def upgrade():
     param_write(print)
     def_write()
     real_write()
+    op.execute('INSERT INTO "route rows" (id) VALUES (1)')
+    op.execute("UPDATE ONLY only_rows SET id = 1")
 
     def insert(model):
         return None

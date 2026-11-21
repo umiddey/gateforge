@@ -22,3 +22,23 @@ class ShadowLocalRow(Base):
 class ShadowRealRow(Base):
     __tablename__ = "shadow_real_rows"
     id = Column(Integer, primary_key=True)
+
+
+class Route(Base):
+    __tablename__ = "route"
+    id = Column(Integer, primary_key=True)
+
+
+class OnlyRow(Base):
+    __tablename__ = "only_rows"
+    id = Column(Integer, primary_key=True)
+
+
+class ShadowTaskRow(Base):
+    __tablename__ = "shadow_task_rows"
+    id = Column(Integer, primary_key=True)
+
+
+class ShadowRealTaskRow(Base):
+    __tablename__ = "shadow_real_task_rows"
+    id = Column(Integer, primary_key=True)

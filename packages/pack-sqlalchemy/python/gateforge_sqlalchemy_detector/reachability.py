@@ -21,8 +21,11 @@ SA_MODULES = frozenset({"sqlalchemy", "sqlalchemy.orm"})
 SERVER_NAMES = frozenset({"run", "serve", "serve_forever"})
 WRITE_CALLS = frozenset({"insert", "update", "delete"})
 SESSION_ADD_CALLS = frozenset({"add", "add_all"})
+SQL_IDENT = r'(?:"(?:[^"]|"")+"|\w+)'
 LITERAL_WRITE = re.compile(
-    r'^\s*(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+(?:"?\w+"?\s*\.\s*)?"?(\w+)"?',
+    rf"^\s*(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+"
+    rf"(?:ONLY\s+(?!(?:SET|WHERE|VALUES|SELECT|USING)\b))?"
+    rf"(?:{SQL_IDENT}\s*\.\s*)?({SQL_IDENT})",
     re.IGNORECASE,
 )
 SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
@@ -113,15 +116,25 @@ def _has_revision(tree):
     return False
 
 
-def _celery_bindings(tree):
-    """Module-level names bound by ``<name> = Celery(...)``."""
+def _is_celery_class_call(node, imports):
+    """True for a call to ``celery.Celery``, however celery was imported."""
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    if isinstance(func, ast.Name):
+        ref = imports.get(func.id)
+        return ref is not None and ref.level == 0 and ref.module == "celery" and ref.name == "Celery"
+    if isinstance(func, ast.Attribute) and func.attr == "Celery" and isinstance(func.value, ast.Name):
+        ref = imports.get(func.value.id)
+        return ref is not None and ref.level == 0 and ref.module == "celery" and ref.name is None
+    return False
+
+
+def _celery_bindings(tree, imports):
+    """Module-level names bound by ``<name> = Celery(...)``, Celery being celery's."""
     names = set()
     for stmt in tree.body:
-        if (
-            isinstance(stmt, ast.Assign)
-            and isinstance(stmt.value, ast.Call)
-            and _final_name(stmt.value.func) == "Celery"
-        ):
+        if isinstance(stmt, ast.Assign) and _is_celery_class_call(stmt.value, imports):
             for target in stmt.targets:
                 if isinstance(target, ast.Name):
                     names.add(target.id)
@@ -204,7 +217,7 @@ class _Walker:
             }
             for rel, tree in trees.items()
         }
-        self.celery_apps = {rel: _celery_bindings(tree) for rel, tree in trees.items()}
+        self.celery_apps = {rel: _celery_bindings(tree, self.indexes[rel].imports) for rel, tree in trees.items()}
         self.module_bound = {rel: Counter(_bound_names(_own_nodes(tree.body))) for rel, tree in trees.items()}
 
     # -- name resolution ------------------------------------------------
@@ -386,7 +399,10 @@ class _Walker:
         match = LITERAL_WRITE.match(text)
         if match is None:
             return []
-        return _listed(self._literal_table(match.group(1)))
+        name = match.group(1)
+        if name.startswith('"'):
+            name = name[1:-1].replace('""', '"')
+        return _listed(self._literal_table(name))
 
     # -- entry points and closure ---------------------------------------
 
