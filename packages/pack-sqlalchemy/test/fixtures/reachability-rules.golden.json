@@ -1,0 +1,4789 @@
+{
+  "resources": [
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:AddAllNegRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 62,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "AddAllNegRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "add_all_neg_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:AddAllRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 57,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "AddAllRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "add_all_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:AliasRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 177,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "AliasRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "alias_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:AmbiguousRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 92,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "AmbiguousRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "ambiguous_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:AttrRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 172,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "AttrRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "attr_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:BareRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 207,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "BareRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "bare_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:BareRunRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 237,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "BareRunRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "bare_run_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:ClassDup",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 202,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "ClassDup",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "classdup_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:ClassDup",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 312,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "ClassDup",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "classdup_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:ClassRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 277,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "ClassRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "class_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:CycleRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 117,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "CycleRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "cycle_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:DecoRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 222,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "DecoRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "decorated_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:DelFakeRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 272,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "DelFakeRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "fake_delete_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:DelRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 132,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "DelRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "func_delete_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:DowngradeRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 242,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "DowngradeRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "downgrade_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:DynRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 162,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "DynRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "dyn_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:DynamicRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 87,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "DynamicRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "dynamic_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:FakeExecRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 282,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "FakeExecRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "fake_exec_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:FakeOpRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 142,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "FakeOpRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "fake_op_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:FakeTextRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 292,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "FakeTextRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "fake_text_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:ForeignOrmSessionRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 307,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "ForeignOrmSessionRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "foreign_orm_session_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:ForeignSessionRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 302,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "ForeignSessionRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "foreign_session_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:ForeignSharedRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 262,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "ForeignSharedRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "foreign_shared_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:HelperRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 82,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "HelperRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "helper_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:HelperServerRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 197,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "HelperServerRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "helper_server_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:HelperSessionRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 182,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "HelperSessionRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "helper_session_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:LocalExecRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 287,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "LocalExecRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "local_exec_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:LocalRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 137,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "LocalRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "local_insert_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:LocalSharedRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 257,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "LocalSharedRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "local_shared_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:LocalTextRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 297,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "LocalTextRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "local_text_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:LowerRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 152,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "LowerRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "lower_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:MakerRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 72,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "MakerRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "maker_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:MissingRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 112,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "MissingRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "missing_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:NestedMainRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 217,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "NestedMainRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "nested_main_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:NestedRevRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 252,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "NestedRevRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "nested_rev_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:NonStrRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 247,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "NonStrRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "nonstring_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:NorevRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 147,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "NorevRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "norev_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:OrderRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 122,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "OrderRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "order_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:OrmSessionRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 187,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "OrmSessionRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "orm_session_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:ParamRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 67,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "ParamRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "param_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:PlainRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 167,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "PlainRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "plain_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:QuotedRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 157,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "QuotedRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "quoted_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:ServeForeverRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 232,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "ServeForeverRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "serve_forever_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:ServeRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 227,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "ServeRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "serve_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:ShadowRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 192,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "ShadowRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "shadow_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:SharedRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 97,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "SharedRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "shared_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:SqlDeleteRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 17,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "SqlDeleteRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "sql_delete_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:SqlInsertRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 7,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "SqlInsertRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "sql_insert_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:SqlUpdateRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 12,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "SqlUpdateRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "sql_update_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:TableAttrRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 212,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "TableAttrRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "table_arg_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:TableDeleteRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 52,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "TableDeleteRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "table_delete_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:TableInsertRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 42,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "TableInsertRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "table_insert_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:TableUpdateRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 47,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "TableUpdateRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "table_update_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:TextDeleteRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 32,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "TextDeleteRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "text_delete_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:TextInsertRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 22,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "TextInsertRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "text_insert_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:TextSelectRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 37,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "TextSelectRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "text_select_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:TextUpdateRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 27,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "TextUpdateRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "text_update_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:TwiceRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 77,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "TwiceRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "twice_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:UnboundRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 107,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "UnboundRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "unbound_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:UpdFakeRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 267,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "UpdFakeRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "fake_update_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:UpdRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 127,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "UpdRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "func_update_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.class:models.py:WorkerCallRow",
+      "kind": "gateforge.class",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 102,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "qname": "WorkerCallRow",
+        "resourceKind": "sqlalchemy.table",
+        "abstract": false,
+        "tablenameUnresolved": false,
+        "baseNames": [
+          "Base"
+        ],
+        "tableName": "worker_call_rows"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:AddAllNegRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 62,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "add_all_neg_rows",
+        "classQname": "AddAllNegRow",
+        "scope": "module",
+        "tableName": "add_all_neg_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:AddAllRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 57,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "add_all_rows",
+        "classQname": "AddAllRow",
+        "scope": "module",
+        "tableName": "add_all_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:AliasRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 177,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "alias_rows",
+        "classQname": "AliasRow",
+        "scope": "module",
+        "tableName": "alias_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:AmbiguousRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 92,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "ambiguous_rows",
+        "classQname": "AmbiguousRow",
+        "scope": "module",
+        "tableName": "ambiguous_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:AttrRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 172,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "attr_rows",
+        "classQname": "AttrRow",
+        "scope": "module",
+        "tableName": "attr_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:BareRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 207,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "bare_rows",
+        "classQname": "BareRow",
+        "scope": "module",
+        "tableName": "bare_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:BareRunRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 237,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "bare_run_rows",
+        "classQname": "BareRunRow",
+        "scope": "module",
+        "tableName": "bare_run_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:ClassDup",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 202,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "classdup_rows",
+        "classQname": "ClassDup",
+        "scope": "module",
+        "tableName": "classdup_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:ClassDup",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 312,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "classdup_rows",
+        "classQname": "ClassDup",
+        "scope": "module",
+        "tableName": "classdup_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:ClassRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 277,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "class_rows",
+        "classQname": "ClassRow",
+        "scope": "module",
+        "tableName": "class_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:CycleRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 117,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "cycle_rows",
+        "classQname": "CycleRow",
+        "scope": "module",
+        "tableName": "cycle_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:DecoRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 222,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "decorated_rows",
+        "classQname": "DecoRow",
+        "scope": "module",
+        "tableName": "decorated_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:DelFakeRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 272,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "fake_delete_rows",
+        "classQname": "DelFakeRow",
+        "scope": "module",
+        "tableName": "fake_delete_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:DelRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 132,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "func_delete_rows",
+        "classQname": "DelRow",
+        "scope": "module",
+        "tableName": "func_delete_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:DowngradeRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 242,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "downgrade_rows",
+        "classQname": "DowngradeRow",
+        "scope": "module",
+        "tableName": "downgrade_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:DynRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 162,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "dyn_rows",
+        "classQname": "DynRow",
+        "scope": "module",
+        "tableName": "dyn_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:DynamicRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 87,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "dynamic_rows",
+        "classQname": "DynamicRow",
+        "scope": "module",
+        "tableName": "dynamic_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:FakeExecRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 282,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "fake_exec_rows",
+        "classQname": "FakeExecRow",
+        "scope": "module",
+        "tableName": "fake_exec_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:FakeOpRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 142,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "fake_op_rows",
+        "classQname": "FakeOpRow",
+        "scope": "module",
+        "tableName": "fake_op_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:FakeTextRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 292,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "fake_text_rows",
+        "classQname": "FakeTextRow",
+        "scope": "module",
+        "tableName": "fake_text_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:ForeignOrmSessionRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 307,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "foreign_orm_session_rows",
+        "classQname": "ForeignOrmSessionRow",
+        "scope": "module",
+        "tableName": "foreign_orm_session_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:ForeignSessionRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 302,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "foreign_session_rows",
+        "classQname": "ForeignSessionRow",
+        "scope": "module",
+        "tableName": "foreign_session_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:ForeignSharedRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 262,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "foreign_shared_rows",
+        "classQname": "ForeignSharedRow",
+        "scope": "module",
+        "tableName": "foreign_shared_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:HelperRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 82,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "helper_rows",
+        "classQname": "HelperRow",
+        "scope": "module",
+        "tableName": "helper_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:HelperServerRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 197,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "helper_server_rows",
+        "classQname": "HelperServerRow",
+        "scope": "module",
+        "tableName": "helper_server_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:HelperSessionRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 182,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "helper_session_rows",
+        "classQname": "HelperSessionRow",
+        "scope": "module",
+        "tableName": "helper_session_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:LocalExecRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 287,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "local_exec_rows",
+        "classQname": "LocalExecRow",
+        "scope": "module",
+        "tableName": "local_exec_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:LocalRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 137,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "local_insert_rows",
+        "classQname": "LocalRow",
+        "scope": "module",
+        "tableName": "local_insert_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:LocalSharedRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 257,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "local_shared_rows",
+        "classQname": "LocalSharedRow",
+        "scope": "module",
+        "tableName": "local_shared_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:LocalTextRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 297,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "local_text_rows",
+        "classQname": "LocalTextRow",
+        "scope": "module",
+        "tableName": "local_text_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:LowerRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 152,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "lower_rows",
+        "classQname": "LowerRow",
+        "scope": "module",
+        "tableName": "lower_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:MakerRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 72,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "maker_rows",
+        "classQname": "MakerRow",
+        "scope": "module",
+        "tableName": "maker_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:MissingRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 112,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "missing_rows",
+        "classQname": "MissingRow",
+        "scope": "module",
+        "tableName": "missing_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:NestedMainRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 217,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "nested_main_rows",
+        "classQname": "NestedMainRow",
+        "scope": "module",
+        "tableName": "nested_main_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:NestedRevRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 252,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "nested_rev_rows",
+        "classQname": "NestedRevRow",
+        "scope": "module",
+        "tableName": "nested_rev_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:NonStrRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 247,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "nonstring_rows",
+        "classQname": "NonStrRow",
+        "scope": "module",
+        "tableName": "nonstring_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:NorevRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 147,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "norev_rows",
+        "classQname": "NorevRow",
+        "scope": "module",
+        "tableName": "norev_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:OrderRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 122,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "order_rows",
+        "classQname": "OrderRow",
+        "scope": "module",
+        "tableName": "order_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:OrmSessionRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 187,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "orm_session_rows",
+        "classQname": "OrmSessionRow",
+        "scope": "module",
+        "tableName": "orm_session_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:ParamRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 67,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "param_rows",
+        "classQname": "ParamRow",
+        "scope": "module",
+        "tableName": "param_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:PlainRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 167,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "plain_rows",
+        "classQname": "PlainRow",
+        "scope": "module",
+        "tableName": "plain_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:QuotedRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 157,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "quoted_rows",
+        "classQname": "QuotedRow",
+        "scope": "module",
+        "tableName": "quoted_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:ServeForeverRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 232,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "serve_forever_rows",
+        "classQname": "ServeForeverRow",
+        "scope": "module",
+        "tableName": "serve_forever_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:ServeRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 227,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "serve_rows",
+        "classQname": "ServeRow",
+        "scope": "module",
+        "tableName": "serve_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:ShadowRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 192,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "shadow_rows",
+        "classQname": "ShadowRow",
+        "scope": "module",
+        "tableName": "shadow_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:SharedRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 97,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "shared_rows",
+        "classQname": "SharedRow",
+        "scope": "module",
+        "tableName": "shared_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:SqlDeleteRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 17,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "sql_delete_rows",
+        "classQname": "SqlDeleteRow",
+        "scope": "module",
+        "tableName": "sql_delete_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:SqlInsertRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 7,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "sql_insert_rows",
+        "classQname": "SqlInsertRow",
+        "scope": "module",
+        "tableName": "sql_insert_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:SqlUpdateRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 12,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "sql_update_rows",
+        "classQname": "SqlUpdateRow",
+        "scope": "module",
+        "tableName": "sql_update_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:TableAttrRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 212,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "table_arg_rows",
+        "classQname": "TableAttrRow",
+        "scope": "module",
+        "tableName": "table_arg_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:TableDeleteRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 52,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "table_delete_rows",
+        "classQname": "TableDeleteRow",
+        "scope": "module",
+        "tableName": "table_delete_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:TableInsertRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 42,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "table_insert_rows",
+        "classQname": "TableInsertRow",
+        "scope": "module",
+        "tableName": "table_insert_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:TableUpdateRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 47,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "table_update_rows",
+        "classQname": "TableUpdateRow",
+        "scope": "module",
+        "tableName": "table_update_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:TextDeleteRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 32,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "text_delete_rows",
+        "classQname": "TextDeleteRow",
+        "scope": "module",
+        "tableName": "text_delete_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:TextInsertRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 22,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "text_insert_rows",
+        "classQname": "TextInsertRow",
+        "scope": "module",
+        "tableName": "text_insert_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:TextSelectRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 37,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "text_select_rows",
+        "classQname": "TextSelectRow",
+        "scope": "module",
+        "tableName": "text_select_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:TextUpdateRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 27,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "text_update_rows",
+        "classQname": "TextUpdateRow",
+        "scope": "module",
+        "tableName": "text_update_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:TwiceRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 77,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "twice_rows",
+        "classQname": "TwiceRow",
+        "scope": "module",
+        "tableName": "twice_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:UnboundRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 107,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "unbound_rows",
+        "classQname": "UnboundRow",
+        "scope": "module",
+        "tableName": "unbound_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:UpdFakeRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 267,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "fake_update_rows",
+        "classQname": "UpdFakeRow",
+        "scope": "module",
+        "tableName": "fake_update_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:UpdRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 127,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "func_update_rows",
+        "classQname": "UpdRow",
+        "scope": "module",
+        "tableName": "func_update_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "id": "sqlalchemy.table:models.py:WorkerCallRow",
+      "kind": "sqlalchemy.table",
+      "source": "models.py",
+      "location": {
+        "file": "models.py",
+        "line": 102,
+        "col": 0
+      },
+      "detectorVersion": "0.2.0",
+      "attributes": {
+        "resourceName": "worker_call_rows",
+        "classQname": "WorkerCallRow",
+        "scope": "module",
+        "tableName": "worker_call_rows",
+        "tablenameProvenance": "literal",
+        "hasTableArgs": false,
+        "tableArgsSchema": null,
+        "tableKeywordTrue": false,
+        "abstract": false,
+        "baseNames": [
+          "Base"
+        ],
+        "columnNames": [
+          "id"
+        ],
+        "primaryKeyColumns": [
+          "id"
+        ]
+      }
+    }
+  ],
+  "unresolved": [],
+  "findings": [
+    {
+      "code": "CLASS_NAME_REPEATED_IN_FILE",
+      "detail": "class name 'ClassDup' occurs in 2 distinct scopes; kept as distinct resources: ['ClassDup', 'ClassDup']",
+      "locations": [
+        {
+          "file": "models.py",
+          "line": 202,
+          "col": 0
+        },
+        {
+          "file": "models.py",
+          "line": 312,
+          "col": 0
+        }
+      ]
+    },
+    {
+      "code": "DUPLICATE_TABLE_NAME",
+      "detail": "table 'classdup_rows' declared 2 times across 1 file(s) (declarations: ClassDup, ClassDup)",
+      "locations": [
+        {
+          "file": "models.py",
+          "line": 202,
+          "col": 0
+        },
+        {
+          "file": "models.py",
+          "line": 312,
+          "col": 0
+        }
+      ]
+    }
+  ],
+  "classificationSignals": [
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "worker_call_rows",
+        "symbol": "WorkerCallRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 102,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "unbound_rows",
+        "symbol": "UnboundRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 107,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "missing_rows",
+        "symbol": "MissingRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 112,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "cycle_rows",
+        "symbol": "CycleRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 117,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "order_rows",
+        "symbol": "OrderRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 122,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "func_update_rows",
+        "symbol": "UpdRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 127,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "sql_update_rows",
+        "symbol": "SqlUpdateRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 12,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "func_delete_rows",
+        "symbol": "DelRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 132,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "local_insert_rows",
+        "symbol": "LocalRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 137,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "fake_op_rows",
+        "symbol": "FakeOpRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 142,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "norev_rows",
+        "symbol": "NorevRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 147,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "lower_rows",
+        "symbol": "LowerRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 152,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "quoted_rows",
+        "symbol": "QuotedRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 157,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "dyn_rows",
+        "symbol": "DynRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 162,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "plain_rows",
+        "symbol": "PlainRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 167,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "attr_rows",
+        "symbol": "AttrRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 172,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "alias_rows",
+        "symbol": "AliasRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 177,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "sql_delete_rows",
+        "symbol": "SqlDeleteRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 17,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "helper_session_rows",
+        "symbol": "HelperSessionRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 182,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "orm_session_rows",
+        "symbol": "OrmSessionRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 187,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "shadow_rows",
+        "symbol": "ShadowRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 192,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "helper_server_rows",
+        "symbol": "HelperServerRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 197,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "classdup_rows",
+        "symbol": "ClassDup"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 202,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "bare_rows",
+        "symbol": "BareRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 207,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "table_arg_rows",
+        "symbol": "TableAttrRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 212,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "nested_main_rows",
+        "symbol": "NestedMainRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 217,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "decorated_rows",
+        "symbol": "DecoRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 222,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "serve_rows",
+        "symbol": "ServeRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 227,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "text_insert_rows",
+        "symbol": "TextInsertRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 22,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "serve_forever_rows",
+        "symbol": "ServeForeverRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 232,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "bare_run_rows",
+        "symbol": "BareRunRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 237,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "downgrade_rows",
+        "symbol": "DowngradeRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 242,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "nonstring_rows",
+        "symbol": "NonStrRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 247,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "nested_rev_rows",
+        "symbol": "NestedRevRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 252,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "local_shared_rows",
+        "symbol": "LocalSharedRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 257,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "foreign_shared_rows",
+        "symbol": "ForeignSharedRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 262,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "fake_update_rows",
+        "symbol": "UpdFakeRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 267,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "fake_delete_rows",
+        "symbol": "DelFakeRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 272,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "class_rows",
+        "symbol": "ClassRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 277,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "text_update_rows",
+        "symbol": "TextUpdateRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 27,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "fake_exec_rows",
+        "symbol": "FakeExecRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 282,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "local_exec_rows",
+        "symbol": "LocalExecRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 287,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "fake_text_rows",
+        "symbol": "FakeTextRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 292,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "local_text_rows",
+        "symbol": "LocalTextRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 297,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "foreign_session_rows",
+        "symbol": "ForeignSessionRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 302,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "foreign_orm_session_rows",
+        "symbol": "ForeignOrmSessionRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 307,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "classdup_rows",
+        "symbol": "ClassDup"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 312,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "text_delete_rows",
+        "symbol": "TextDeleteRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 32,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "text_select_rows",
+        "symbol": "TextSelectRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 37,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "table_insert_rows",
+        "symbol": "TableInsertRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 42,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "table_update_rows",
+        "symbol": "TableUpdateRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 47,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "table_delete_rows",
+        "symbol": "TableDeleteRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 52,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "add_all_rows",
+        "symbol": "AddAllRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 57,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "add_all_neg_rows",
+        "symbol": "AddAllNegRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 62,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "param_rows",
+        "symbol": "ParamRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 67,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "maker_rows",
+        "symbol": "MakerRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 72,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "twice_rows",
+        "symbol": "TwiceRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 77,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "sql_insert_rows",
+        "symbol": "SqlInsertRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 7,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "helper_rows",
+        "symbol": "HelperRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 82,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "dynamic_rows",
+        "symbol": "DynamicRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 87,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "ambiguous_rows",
+        "symbol": "AmbiguousRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 92,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "target": {
+        "resourceName": "shared_rows",
+        "symbol": "SharedRow"
+      },
+      "dimension": "identity",
+      "assertion": [
+        "id"
+      ],
+      "basis": "code-positive",
+      "source": "gateforge.pack-sqlalchemy",
+      "location": {
+        "file": "models.py",
+        "line": 97,
+        "col": 0
+      },
+      "detector": {
+        "id": "gateforge.pack-sqlalchemy",
+        "version": "0.2.0"
+      }
+    }
+  ],
+  "scannedPaths": [
+    "app/helpers_dup.py",
+    "app/workers_local_neg.py",
+    "app/workers_shared_neg.py",
+    "helpers_rules.py",
+    "legacy/helpers_dup.py",
+    "migrations/versions/0002_sql_writes.py",
+    "migrations/versions/0003_fake_op.py",
+    "migrations/versions/0004_norev.py",
+    "migrations/versions/0005_downgrade_only.py",
+    "migrations/versions/0006_nonstring_rev.py",
+    "migrations/versions/0007_nested_rev.py",
+    "migrations/versions/0008_fake_execute.py",
+    "migrations/versions/0009_local_op.py",
+    "models.py",
+    "scripts/maintenance/a_entry.py",
+    "scripts/maintenance/add_all.py",
+    "scripts/maintenance/bare_run_rules.py",
+    "scripts/maintenance/class_rows.py",
+    "scripts/maintenance/cycle_rules.py",
+    "scripts/maintenance/func_forms.py",
+    "scripts/maintenance/func_forms_neg.py",
+    "scripts/maintenance/helper_server.py",
+    "scripts/maintenance/mod_call.py",
+    "scripts/maintenance/serve_forever_rules.py",
+    "scripts/maintenance/serve_rules.py",
+    "scripts/maintenance/session_foreign.py",
+    "scripts/maintenance/session_receivers.py",
+    "scripts/maintenance/session_shadow.py",
+    "scripts/maintenance/table_attr.py",
+    "scripts/maintenance/text_fake.py",
+    "scripts/maintenance/text_local.py",
+    "scripts/maintenance/text_sql.py",
+    "scripts/maintenance/workers_rules.py",
+    "scripts/maintenance/z_entry.py"
+  ]
+}
