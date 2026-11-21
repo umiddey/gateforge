@@ -13,7 +13,7 @@ const SQL_DETECTOR = 'gateforge.pack-sqlalchemy';
 const COMPILER_DETECTOR = 'gateforge.compiler';
 
 function tableResource(): ClassifierResourceRef {
-  return { kind: 'sql.table', id: null, name: TABLE, detector: SQL_DETECTOR, attributes: { plane: 'tenant' } } as ClassifierResourceRef;
+  return { kind: 'sql.table', id: null, name: TABLE, source: 'app/models.py', location: { file: 'app/models.py', line: 1, col: 1 }, detector: { id: SQL_DETECTOR, version: '0.2.0' }, attributes: { plane: 'tenant' } };
 }
 
 function endpointResource(): ClassifierResourceRef {
@@ -21,11 +21,11 @@ function endpointResource(): ClassifierResourceRef {
     kind: HTTP_ENDPOINT_RESOURCE_KIND,
     id: null,
     name: ENDPOINT,
-    detector: COMPILER_DETECTOR,
+    detector: { id: COMPILER_DETECTOR, version: '1' },
     source: ROUTE,
     location: { file: ROUTE, line: 1, col: 1 },
     attributes: { resourceName: ENDPOINT, method: 'POST', canonicalPath: '/notes', linkedResourceName: TABLE },
-  } as ClassifierResourceRef;
+  };
 }
 
 function signal(
