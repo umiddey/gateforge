@@ -62,10 +62,10 @@ describe('fixture 1: internal reachability positives and pins', () => {
     const sigs = await discover(F1, { trustedInternalEntryPoints: ALL });
     const found = hits(sigs, 'seed_codes');
     expect(found).toHaveLength(1);
-    expect(found[0].assertion).toBe('migration');
-    expect(found[0].basis).toBe('code-positive');
-    expect(JSON.stringify(found[0].location)).toContain('migrations/versions/0001_seed.py');
-    const loc = found[0].location as { file: string; line: number };
+    expect(found[0]?.assertion).toBe('migration');
+    expect(found[0]?.basis).toBe('code-positive');
+    expect(JSON.stringify(found[0]?.location)).toContain('migrations/versions/0001_seed.py');
+    const loc = found[0]?.location as { file: string; line: number };
     const revisionFile = 'migrations/versions/0001_seed.py';
     const defLine = readFileSync(join(F1, revisionFile), 'utf8').split('\n').findIndex((l) => l.startsWith('def upgrade(')) + 1;
     expect(defLine).toBeGreaterThan(0);
@@ -77,17 +77,17 @@ describe('fixture 1: internal reachability positives and pins', () => {
     const sigs = await discover(F1, { trustedInternalEntryPoints: ALL });
     const found = hits(sigs, 'export_logs', 'ExportLog');
     expect(found).toHaveLength(1);
-    expect(found[0].assertion).toBe('worker');
-    expect(JSON.stringify(found[0].location)).toContain('app/tasks.py');
-    expect(found[0].target).not.toHaveProperty('resourceName');
+    expect(found[0]?.assertion).toBe('worker');
+    expect(JSON.stringify(found[0]?.location)).toContain('app/tasks.py');
+    expect(found[0]?.target).not.toHaveProperty('resourceName');
   });
 
   it('R3 ledger_entries is maintenance-command in rebuild_ledger.py', async () => {
     const sigs = await discover(F1, { trustedInternalEntryPoints: ALL });
     const found = hits(sigs, 'ledger_entries', 'LedgerEntry');
     expect(found).toHaveLength(1);
-    expect(found[0].assertion).toBe('maintenance-command');
-    expect(JSON.stringify(found[0].location)).toContain('scripts/maintenance/rebuild_ledger.py');
+    expect(found[0]?.assertion).toBe('maintenance-command');
+    expect(JSON.stringify(found[0]?.location)).toContain('scripts/maintenance/rebuild_ledger.py');
   });
 
   it('R4 orphan_rows, route_notes, indirect_rows, dup_rows get no signal', async () => {
@@ -247,8 +247,8 @@ describe('fixture 2: rule coverage', () => {
     it(`positive ${table} (${assertion}) at ${file}`, () => {
       const found = hits(rules, table, cls);
       expect(found).toHaveLength(1);
-      expect(found[0].assertion).toBe(assertion);
-      expect(JSON.stringify(found[0].location)).toContain(file);
+      expect(found[0]?.assertion).toBe(assertion);
+      expect(JSON.stringify(found[0]?.location)).toContain(file);
     });
   }
 
