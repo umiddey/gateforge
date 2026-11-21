@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.21.0
 
 - **Added: code-derived internal reachability for `gateforge.pack-sqlalchemy`.**
   A table is internal only when the bundled detector finds a static path to it
