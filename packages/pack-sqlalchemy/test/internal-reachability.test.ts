@@ -65,7 +65,12 @@ describe('fixture 1: internal reachability positives and pins', () => {
     expect(found[0].assertion).toBe('migration');
     expect(found[0].basis).toBe('code-positive');
     expect(JSON.stringify(found[0].location)).toContain('migrations/versions/0001_seed.py');
-    expect(JSON.stringify(found[0].location)).toContain('upgrade');
+    const loc = found[0].location as { file: string; line: number };
+    const revisionFile = 'migrations/versions/0001_seed.py';
+    const defLine = readFileSync(join(F1, revisionFile), 'utf8').split('\n').findIndex((l) => l.startsWith('def upgrade(')) + 1;
+    expect(defLine).toBeGreaterThan(0);
+    expect(loc.file.endsWith(revisionFile)).toBe(true);
+    expect(loc.line).toBe(defLine);
   });
 
   it('R2 ExportLog is worker at nightly_export in app/tasks.py, symbol-only target', async () => {
@@ -256,13 +261,13 @@ describe('fixture 2: rule coverage', () => {
 
 describe('argv: internal entry categories and the root', () => {
   const PY = ['python3', '-m', 'gateforge_sqlalchemy_detector'];
-  const SQL = ['sql_insert_rows', 'sql_update_rows', 'sql_delete_rows'];
+  const SQL: Array<[string, string]> = [['sql_insert_rows', 'SqlInsertRow'], ['sql_update_rows', 'SqlUpdateRow'], ['sql_delete_rows', 'SqlDeleteRow']];
   const PY_DIR = join(HERE, '..', 'python');
 
   it('R23 flag before the root selects the migration category by name', async () => {
     const sigs = await discover(F2, undefined, [...PY, '--internal-entry-categories=migration', F2]);
-    for (const table of SQL) {
-      expect(hits(sigs, table).length).toBeGreaterThan(0);
+    for (const [table, cls] of SQL) {
+      expect(hits(sigs, table, cls).length).toBeGreaterThan(0);
     }
   });
 
