@@ -362,11 +362,12 @@ export function createSqlalchemyDetector(options: SqlalchemyDetectorOptions = {}
 
   return {
     async discover(paths, context) {
+      const categories = grantedInternalCategories(context?.sections.trustedInternalEntryPoints);
       if (paths.length === 0) {
         return { resources: [], unresolved: [], findings: [], classificationSignals: [] };
       }
       const session = new PluginSession({
-        command: [...command],
+        command: launchCommand(command, categories),
         pluginId,
         pluginVersion,
         cwd: process.cwd(),
@@ -398,6 +399,49 @@ export function createSqlalchemyDetector(options: SqlalchemyDetectorOptions = {}
       }
     },
   };
+}
+
+/** Entry-point categories this detector derives internal claims for. */
+const INTERNAL_ENTRY_CATEGORIES: Record<string, true> = {
+  migration: true,
+  'maintenance-command': true,
+  worker: true,
+};
+
+/**
+ * The internal entry-point categories the trusted policy grants this detector
+ * (`trustedInternalEntryPoints`). Absent section grants none. A grant bound to
+ * another detector is not ours and is dropped; a malformed grant, or one of ours
+ * naming an unknown category, throws so a typo can never silently widen or
+ * narrow the derived claims.
+ */
+function grantedInternalCategories(section: unknown): string[] {
+  if (section === undefined) return [];
+  if (!Array.isArray(section)) {
+    throw new Error('trustedInternalEntryPoints must be an array of entry-point grants');
+  }
+  const granted: string[] = [];
+  for (const entry of section) {
+    if (typeof entry !== 'object' || entry === null) {
+      throw new Error('trustedInternalEntryPoints entries must be objects');
+    }
+    const grant = entry as { category?: unknown; detector?: unknown };
+    if (typeof grant.category !== 'string' || grant.category === '') {
+      throw new Error('trustedInternalEntryPoints entries need a non-empty string category');
+    }
+    if (grant.detector !== PACK_PLUGIN_ID) continue;
+    if (!Object.hasOwn(INTERNAL_ENTRY_CATEGORIES, grant.category)) {
+      throw new Error(`trustedInternalEntryPoints names unknown category '${grant.category}'`);
+    }
+    granted.push(grant.category);
+  }
+  return granted;
+}
+
+/** The pinned command plus `--internal-entry-categories` when any category is granted. */
+function launchCommand(base: readonly string[], categories: readonly string[]): string[] {
+  if (categories.length === 0) return [...base];
+  return [...base, `--internal-entry-categories=${categories.join(',')}`];
 }
 
 /** True when a plane rule can never map anything. */

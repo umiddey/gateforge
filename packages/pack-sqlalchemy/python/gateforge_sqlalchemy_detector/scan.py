@@ -783,6 +783,7 @@ class FileIndex:
 
     def __init__(self, relpath: str, tree: ast.Module):
         self.relpath = relpath
+        self.tree = tree
         self.classes: list[ClassRecord] = []
         self.table_calls: list[dict] = []  # {table_name, target, node}
         # Module-level bindings of the form ``X = declarative_base()`` /
@@ -1812,13 +1813,16 @@ def _normalize_path(rel: str) -> str:
     return path
 
 
-def scan(paths: list[str], root: Path | None = None) -> dict:
+def scan(
+    paths: list[str], root: Path | None = None, categories: tuple[str, ...] = ()
+) -> dict:
     """Collect the full deterministic discovery outcome for one request.
 
     Args:
         paths: Repo-root-relative paths from the discover request.
         root: Scan root directory (defaults to the process cwd, which the
             CLI sets to the repo root).
+        categories: Internal entry-point categories to derive; empty derives none.
 
     Returns:
         dict: {"resources": [...], "unresolved": [...], "findings": [...],
@@ -1851,6 +1855,7 @@ def scan(paths: list[str], root: Path | None = None) -> dict:
             continue
         indexes[relpath] = index
     resources: list[dict] = []
+    table_refs: list[tuple[str, str | None, str]] = []
     unresolved: list[dict] = []
     signals: list[dict] = []
 
@@ -1932,6 +1937,7 @@ def scan(paths: list[str], root: Path | None = None) -> dict:
                     else SQLMODEL_CLASS_NAME_PROVENANCE
                 )
                 resources.append(_table_resource(relpath, rec, provenance, table_name))
+                table_refs.append((relpath, rec.qname, table_name))
                 identity = _identity_signal(rec, relpath, table_name, rec.node)
                 if identity is not None:
                     signals.append(identity)
@@ -1944,10 +1950,24 @@ def scan(paths: list[str], root: Path | None = None) -> dict:
     for relpath in sorted(indexes):
         for call in indexes[relpath].table_calls:
             resources.append(_call_table_resource(relpath, call))
+            table_refs.append((relpath, None, call["table_name"]))
             facts = _table_call_facts(call)
             identity = _identity_signal(facts, relpath, call["table_name"], call["node"])
             if identity is not None:
                 signals.append(identity)
+
+    if categories:
+        # Imported here: reachability.py imports this module's helpers.
+        from .reachability import reachability_signals
+
+        signals.extend(
+            reachability_signals(
+                indexes,
+                {rel: idx.tree for rel, idx in indexes.items()},
+                table_refs,
+                categories,
+            )
+        )
 
     resources.sort(key=lambda r: r["id"])
     unresolved.sort(

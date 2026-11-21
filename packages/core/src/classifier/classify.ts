@@ -1431,6 +1431,7 @@ function classifyOne(
     }
   } else if (hasInternalIntent) {
     contribute(...internalDeclarations);
+    const linkedEndpoints = hiddenLinkedEndpoints(resource, ctx);
     const reachability = signals.filter(
       (s) => s.dimension === 'internality' && s.basis === 'code-positive',
     );
@@ -1517,6 +1518,24 @@ function classifyOne(
           categories.length === 0
             ? [resource.location]
             : sortLocations(positiveLifecycle.map((s) => s.location)),
+      });
+    } else if (linkedEndpoints.length > 0) {
+      exposure = 'user-facing';
+      rules.push(RULES.exposureDefault);
+      defaultsApplied.push(RULES.exposureDefault);
+      blocks.push({
+        code: 'INCOMPLETE_PROOF_SCOPE',
+        resourceId: `${plane}.${resource.name}`,
+        name: resource.name,
+        detail:
+          'internal intent cannot be certified: endpoint(s) ' +
+          `${linkedEndpoints
+            .map((entry) => entry.endpoint.id ?? entry.endpoint.name)
+            .toSorted(compareStrings)
+            .join(', ')} ` +
+          'link this resource, so its reachable entry points are not only internal; ' +
+          'decision: user-facing (conservative)',
+        locations: sortLocations(linkedEndpoints.map((entry) => entry.endpoint.location)),
       });
     } else {
       exposure = 'internal';

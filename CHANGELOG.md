@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.21.0
+
+- **Added: code-derived internal reachability for `gateforge.pack-sqlalchemy`.**
+  A table is internal only when the bundled detector finds a static path to it
+  from an entry point of a category the owner trusts (`migration`,
+  `maintenance-command`, `worker`). Each category needs an explicit
+  `trustedInternalEntryPoints` grant with `detector: gateforge.pack-sqlalchemy`;
+  an unbound category emits nothing. A declaration alone never proves internality.
+  Reachability is one input to the certificate: a complete scan, exhaustive
+  exposure, and no linked `http.endpoint` are still required.
+- Existing configurations are unaffected until a category is bound. Binding
+  edits `.gateforge/classification-policy.yml`, so approved policy pins must be
+  re-approved.
+- Reachability resolves names more strictly. An `insert`, `update`, `delete`,
+  `text`, `table`, `Session` or `sessionmaker` name that is rebound in the
+  module, in the calling function, or passed in as a parameter gives no
+  signal, a `@<app>.task` decorator needs `<app>` to be `Celery` imported from
+  `celery`, and a quoted SQL table name (`"route rows"`) is read whole. A route
+  that writes a table through a helper, or enqueues a worker with `.delay()`, is
+  not linked to that endpoint, so the endpoint check does not block that table;
+  narrow the category with `patterns`.
+
 ## 0.20.1
 
 - **Fixed: `gateforge doctor` and the enforcement probes no longer crash on a
