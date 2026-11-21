@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Fixed: pack-sqlalchemy discover waits up to 10 minutes before the plugin is killed.**
+
 ## 0.21.0
 
 - **Added: code-derived internal reachability for `gateforge.pack-sqlalchemy`.**
