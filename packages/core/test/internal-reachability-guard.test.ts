@@ -22,6 +22,8 @@ function endpointResource(): ClassifierResourceRef {
     id: null,
     name: ENDPOINT,
     detector: COMPILER_DETECTOR,
+    source: ROUTE,
+    location: { file: ROUTE, line: 1, col: 1 },
     attributes: { resourceName: ENDPOINT, method: 'POST', canonicalPath: '/notes', linkedResourceName: TABLE },
   } as ClassifierResourceRef;
 }
@@ -55,8 +57,8 @@ const reachability = signal(
 
 const binding = signal(
   'adapter-binding',
-  'links' as SignalAssertion,
-  { resourceName: TABLE },
+  TABLE as SignalAssertion,
+  { resourceName: ENDPOINT },
   COMPILER_DETECTOR,
   { file: ROUTE, line: 1, col: 1 },
 );
