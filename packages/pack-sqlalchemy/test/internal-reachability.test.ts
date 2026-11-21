@@ -280,6 +280,8 @@ describe('argv: internal entry categories and the root', () => {
     const run = spawnSync('python3', ['-m', 'gateforge_sqlalchemy_detector', '--internal-entry-categories=bogus', F2], {
       cwd: PY_DIR,
       input: '',
+      // The candidate tree seals gitignored bytes too: a bytecode cache written here would change it mid-run.
+      env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' },
       encoding: 'utf8',
       timeout: 10_000,
     });
