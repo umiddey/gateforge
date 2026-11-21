@@ -5,7 +5,6 @@ from models import AliasRow, AttrRow, HelperSessionRow, MakerRow, OrmSessionRow,
 
 engine = create_engine("sqlite://")
 SESSION = Session(engine)
-maker = sessionmaker(engine)
 
 
 def make_session():
@@ -25,7 +24,7 @@ def use_param(session: Session):
 
 
 def use_maker():
-    with maker() as s:
+    with sessionmaker(engine)() as s:
         s.add(MakerRow(id=1))
 
 
@@ -48,8 +47,9 @@ def use_orm(session: orm.Session):
     session.add(OrmSessionRow(id=1))
 
 
-s2 = Session(engine)
-s2.add(PlainRow(id=1))
+def use_plain():
+    s2 = Session(engine)
+    s2.add(PlainRow(id=1))
 
 
 if __name__ == "__main__":
@@ -59,4 +59,5 @@ if __name__ == "__main__":
     use_alias()
     use_helper()
     use_orm(None)
+    use_plain()
     Holder().write()
