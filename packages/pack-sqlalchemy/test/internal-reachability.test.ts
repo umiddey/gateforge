@@ -318,3 +318,29 @@ describe('version pin', () => {
     expect(src).toMatch(/VERSION\s*=\s*["']0\.2\.0["']/);
   });
 });
+
+describe('fixture 3: shadowed sqlalchemy names are not the import', () => {
+  const F3 = join(HERE, 'fixtures', 'reachability-shadow');
+
+  it('R77 a parameter named insert shadows the import: no signal', async () => {
+    const sigs = await discover(F3, { trustedInternalEntryPoints: ALL });
+    expect(hits(sigs, 'shadow_param_rows', 'ShadowParamRow')).toHaveLength(0);
+  });
+
+  it('R78 a module-level rebinding of insert overrides the import: no signal', async () => {
+    const sigs = await discover(F3, { trustedInternalEntryPoints: ALL });
+    expect(hits(sigs, 'shadow_def_rows', 'ShadowDefRow')).toHaveLength(0);
+  });
+
+  it('R79 a local def named insert shadows the import: no signal', async () => {
+    const sigs = await discover(F3, { trustedInternalEntryPoints: ALL });
+    expect(hits(sigs, 'shadow_local_rows', 'ShadowLocalRow')).toHaveLength(0);
+  });
+
+  it('R80 control: the unshadowed import still gives the migration signal', async () => {
+    const sigs = await discover(F3, { trustedInternalEntryPoints: ALL });
+    const found = hits(sigs, 'shadow_real_rows', 'ShadowRealRow');
+    expect(found).toHaveLength(1);
+    expect(found[0]?.assertion).toBe('migration');
+  });
+});

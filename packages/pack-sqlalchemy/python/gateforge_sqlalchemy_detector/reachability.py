@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ast
 import re
+from collections import Counter
 
 from . import PLUGIN_ID
 from .scan import _module_to_relpath, _signal, loc
@@ -139,19 +140,23 @@ def _param_nodes(fn):
     return nodes
 
 
+def _bound_names(own):
+    """Every name a scope binds, once per binding; parameters excluded."""
+    for node in own:
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            yield node.id
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            yield node.name
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                yield alias.asname or alias.name.split(".")[0]
+        elif isinstance(node, ast.ExceptHandler) and node.name is not None:
+            yield node.name
+
+
 def _bound_count(own, name):
     """How many times a scope binds ``name``, parameters excluded."""
-    count = 0
-    for node in own:
-        if isinstance(node, ast.Name) and node.id == name and isinstance(node.ctx, ast.Store):
-            count += 1
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            count += node.name == name
-        elif isinstance(node, (ast.Import, ast.ImportFrom)):
-            count += sum(1 for a in node.names if (a.asname or a.name.split(".")[0]) == name)
-        elif isinstance(node, ast.ExceptHandler):
-            count += node.name == name
-    return count
+    return sum(1 for bound in _bound_names(own) if bound == name)
 
 
 def _binding_source(own, name):
@@ -200,20 +205,31 @@ class _Walker:
             for rel, tree in trees.items()
         }
         self.celery_apps = {rel: _celery_bindings(tree) for rel, tree in trees.items()}
+        self.module_bound = {rel: Counter(_bound_names(_own_nodes(tree.body))) for rel, tree in trees.items()}
 
     # -- name resolution ------------------------------------------------
 
-    def _sa_symbol(self, rel, node):
-        """The sqlalchemy (or sqlalchemy.orm) name a node refers to, else None."""
+    def _rebound(self, rel, own, fn, name):
+        """True when ``name`` is bound other than by its one module-level import."""
+        if self.module_bound[rel][name] != 1:
+            return True
+        return _bound_count(own, name) > 0 or any(p.arg == name for p in _param_nodes(fn))
+
+    def _sa_symbol(self, rel, node, own=(), fn=None):
+        """The sqlalchemy (or sqlalchemy.orm) name a node refers to, else None.
+
+        ``own`` and ``fn`` are the calling scope: a name rebound there, or
+        passed as one of its parameters, is not the import.
+        """
         imports = self.indexes[rel].imports
         if isinstance(node, ast.Name):
             ref = imports.get(node.id)
             if ref is not None and ref.level == 0 and ref.name is not None and ref.module in SA_MODULES:
-                return ref.name
+                return None if self._rebound(rel, own, fn, node.id) else ref.name
             return None
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
             ref = imports.get(node.value.id)
-            if ref is None or ref.level != 0:
+            if ref is None or ref.level != 0 or self._rebound(rel, own, fn, node.value.id):
                 return None
             if ref.name is None and ref.module in SA_MODULES:
                 return node.attr
@@ -320,7 +336,7 @@ class _Walker:
 
     def _writes(self, rel, own, fn, call):
         """The tables one call writes, as a list of table tuples."""
-        symbol = self._sa_symbol(rel, call.func)
+        symbol = self._sa_symbol(rel, call.func, own, fn)
         if symbol is not None:
             return self._sa_writes(rel, symbol, call)
         if isinstance(call.func, ast.Attribute):
