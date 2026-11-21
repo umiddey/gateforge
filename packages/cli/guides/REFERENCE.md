@@ -1853,7 +1853,7 @@ pin before strict gates run.
 
 | Key | What it decides | Shape |
 | --- | --- | --- |
-| `trustedInternalEntryPoints` | which entry-point categories certify internality | category + patterns + detector |
+| `trustedInternalEntryPoints` | which entry-point categories the bundled detector may derive internality for, from code (see [below](#internal-entry-points-the-trustedinternalentrypoints-section)) | `category` + `detector` (+ optional `patterns`) |
 | `internalRules` | organization rules for internal resources | `resourceName` / `resourceKind` patterns |
 | `hiddenRules` | resources users write but no route ever serves back (see [below](#hidden-resources-the-hiddenrules-section)) | `match` + `reason`, same shape as `internalRules` |
 | `lifecycleRules` | operations that structurally do not exist, for one EXACT resource | exact `<plane>.<resource>` + `disable` |
@@ -1873,6 +1873,101 @@ Since 0.11.0 this document holds ONLY answers. The four scanner settings
 Unknown keys, an unknown value, and two rules answering the same target
 are refused (exit 2, fail closed) — the document is an input, never a
 place to smuggle intent past the schema.
+
+## Internal entry points (the `trustedInternalEntryPoints:` section)
+
+A table is internal only when the scan finds a static path that reaches it
+from an entry point of a trusted category. The bundled
+`gateforge.pack-sqlalchemy` detector derives that path from code. A
+declaration alone never produces internality, and reachability is necessary
+but not sufficient: the other certificate conditions below still apply.
+
+```yaml
+trustedInternalEntryPoints:
+  - category: migration
+    detector: gateforge.pack-sqlalchemy
+  - category: maintenance-command
+    detector: gateforge.pack-sqlalchemy
+  - category: worker
+    detector: gateforge.pack-sqlalchemy
+    patterns: ['app/tasks/**']
+```
+
+Each entry is a grant. `category` names the entry-point shape; `detector`
+names the one bundled detector allowed to assert that category. A category
+with no grant, or a grant without `detector`, emits nothing: no plugin may
+assert internality for it. An unknown category bound to this detector is a
+usage error, and so is a malformed section (the whole section is rejected).
+A grant for a different detector is dropped.
+
+The three categories the detector recognises:
+
+- `migration`: a module-level `def upgrade` in a file that binds `revision`
+  to a string literal (an Alembic revision file). Everything the upgrade
+  reaches is internal.
+- `maintenance-command`: a module-level `if __name__ == "__main__":` block.
+  It gives no signal when anything it reaches calls `run`, `serve` or
+  `serve_forever`, under any receiver (so `asyncio.run(...)` and
+  `uvicorn.run(...)` also suppress it).
+- `worker`: a module-level function decorated with `shared_task` (imported
+  from `celery`), or with `@<app>.task` where `<app>` is a module-level
+  `Celery(...)` binding.
+
+From an entry body the detector follows module-level functions reached by
+a plain call: a same-file name, an imported name, or `module.func` for a
+plain module import. Methods are not followed.
+
+A table is written when the reached code does one of these:
+
+- `insert(X)`, `update(X)` or `delete(X)` from `sqlalchemy`, where `X` is a
+  model class, `Model.__table__`, or `table("name")`;
+- `X.__table__.insert()`, `.update()` or `.delete()`;
+- `text("INSERT ...")`, `text("UPDATE ...")` or `text("DELETE FROM ...")`
+  with a string literal;
+- `op.bulk_insert(X, ...)` or `op.execute("<literal>")` under `from alembic import op`;
+- `session.add(M(...))`, or `session.add_all([M(...), ...])` with a list
+  literal, where `session` is a name bound exactly once in its scope to a
+  `Session(...)`, a `sessionmaker(...)()`, or a parameter annotated `Session`.
+
+A literal table name counts only when exactly one table resource in the
+scan has that name; an ambiguous name gives no signal.
+
+What gives no signal (the table is not proven internal):
+
+- method calls (`repo.save()`), and calls through helpers the detector does
+  not follow;
+- dynamic SQL (a non-literal `text(...)`) and schema changes such as
+  `op.create_table`;
+- a `Session` that is passed in unannotated, returned from a helper, aliased
+  at module level, or imported from a module outside `sqlalchemy`;
+- click, typer and other command frameworks (only the `__main__` guard form
+  is recognised), `__main__.py` packages, and dramatiq, rq or arq workers
+  (only the Celery forms above);
+- test directories (`test/` and `tests/` path segments are not scanned);
+- a `__main__` block that starts a server (see the maintenance rule above).
+
+Binding requirements. The pipeline refuses a binding whose detector is not
+a bundled Gateforge detector, or whose detector runs over subprocess
+transport: completeness is accepted only from the bundled in-process
+wrapper (`packages/cli/src/pipeline.ts:426-430`,
+`packages/cli/src/detector-trust.ts:308-317`).
+
+`patterns` only narrows a category. A reachability signal whose file does not
+match the category's `patterns` is untrusted and blocks the certificate
+(`packages/core/src/classifier/classify.ts:1446-1450`).
+
+The internal certificate also needs these, from the same classifier:
+
+- a complete scan (`classify.ts:1454`) and exhaustive exposure over the
+  requested detector-eligible files (`classify.ts:1468`);
+- no positive lifecycle mutation (`classify.ts:1500`);
+- no `http.endpoint` that links the resource
+  (`classify.ts:1522-1539`). A linked endpoint means the table is reachable
+  from a route, so it is user-facing.
+
+Changing `trustedInternalEntryPoints` changes the trusted-policy digest, so
+approved pins must be re-approved (see the owner-answers section above).
+
 
 ## Hidden resources (the `hiddenRules:` section)
 

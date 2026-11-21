@@ -365,6 +365,29 @@ never silently suppresses obligations. `NO_PLANE_MAPPING` remains available for
 tests that intentionally disable plane attribution (programmatic or
 config-driven).
 
+## Internal reachability
+
+The detector can prove a table internal, but only when the owner binds an
+entry-point category to it in `.gateforge/classification-policy.yml`:
+
+```yaml
+trustedInternalEntryPoints:
+  - category: migration
+    detector: gateforge.pack-sqlalchemy
+  - category: worker
+    detector: gateforge.pack-sqlalchemy
+```
+
+With no binding, the detector emits no reachability signal and no table is
+derived internal from code. A binding makes the detector report the tables
+written by that category's entry points (Alembic `upgrade`, a
+`__main__` maintenance block, or a Celery task). The rules, the writer
+list, and what gives no signal are in `packages/cli/guides/REFERENCE.md`,
+section "Internal entry points (the `trustedInternalEntryPoints:` section)".
+
+Reachability is one input to the certificate, not the whole proof. A
+linked `http.endpoint` or an incomplete scan still blocks it.
+
 ## Classification workflow (example app)
 
 1. **Discover** — the detector finds `accounts` and emits normalized
