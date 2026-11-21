@@ -142,6 +142,7 @@ export async function collectRoutePlaneFacts(cwd: string): Promise<RoutePlaneFac
       httpClients: config.scan.httpClients,
       fastapi: config.scan.fastapi,
       pages: config.pages,
+      trustedInternalEntryPoints: answers.trustedInternalEntryPoints,
     }),
   );
   return routePlaneFactsOf(contributions, sections);

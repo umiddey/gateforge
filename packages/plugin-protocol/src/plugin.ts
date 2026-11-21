@@ -55,6 +55,12 @@ export interface DiscoverSections {
   endpoints?: unknown;
   /** `pages:` of `.gateforge.yml`. */
   pages?: unknown;
+  /**
+   * `trustedInternalEntryPoints:` of the trusted classification policy: the
+   * internal entry-point grants a detector may derive claims from. The host
+   * passes the parsed list; the owning detector validates the grants it reads.
+   */
+  trustedInternalEntryPoints?: unknown;
 }
 
 /**

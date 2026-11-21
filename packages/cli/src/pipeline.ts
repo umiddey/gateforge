@@ -408,6 +408,7 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
       httpClients: config.scan.httpClients,
       fastapi: config.scan.fastapi,
       pages: config.pages,
+      trustedInternalEntryPoints: policyDoc.trustedInternalEntryPoints,
     }),
     options.pluginCache,
   );
