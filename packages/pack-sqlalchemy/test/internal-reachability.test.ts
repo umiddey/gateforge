@@ -372,3 +372,47 @@ describe('literal sql and celery names', () => {
     expect(found[0]?.assertion).toBe('worker');
   });
 });
+
+describe('session and table names are scope-checked', () => {
+  const F3 = join(HERE, 'fixtures', 'reachability-shadow');
+
+  it('R85 a parameter named Session is not the sqlalchemy Session', async () => {
+    const sigs = await discover(F3, { trustedInternalEntryPoints: ALL });
+    expect(hits(sigs, 'shadow_param_session_rows', 'ShadowParamSessionRow')).toHaveLength(0);
+  });
+
+  it('R86 a local Session assignment is not the sqlalchemy Session', async () => {
+    const sigs = await discover(F3, { trustedInternalEntryPoints: ALL });
+    expect(hits(sigs, 'shadow_local_session_rows', 'ShadowLocalSessionRow')).toHaveLength(0);
+  });
+
+  it('R87 a parameter named sessionmaker is not the sqlalchemy sessionmaker', async () => {
+    const sigs = await discover(F3, { trustedInternalEntryPoints: ALL });
+    expect(hits(sigs, 'shadow_sessionmaker_rows', 'ShadowSessionmakerRow')).toHaveLength(0);
+  });
+
+  it('R88 a parameter named table is not the sqlalchemy table', async () => {
+    const sigs = await discover(F3, { trustedInternalEntryPoints: ALL });
+    expect(hits(sigs, 'shadow_literal_rows', 'ShadowLiteralRow')).toHaveLength(0);
+  });
+
+  it('R89 a module-level Session rebinding is not the sqlalchemy Session', async () => {
+    const sigs = await discover(F3, { trustedInternalEntryPoints: ALL });
+    expect(hits(sigs, 'shadow_module_session_rows', 'ShadowModuleSessionRow')).toHaveLength(0);
+  });
+
+  it('R90 control: the real sqlalchemy.orm Session still makes a write signal', async () => {
+    const sigs = await discover(F3, { trustedInternalEntryPoints: ALL });
+    expect(hits(sigs, 'shadow_real_session_rows', 'ShadowRealSessionRow')).toHaveLength(1);
+  });
+
+  it('R91 control: the real sqlalchemy table still makes a literal write signal', async () => {
+    const sigs = await discover(F3, { trustedInternalEntryPoints: ALL });
+    expect(hits(sigs, 'shadow_real_literal_rows', 'ShadowRealLiteralRow')).toHaveLength(1);
+  });
+
+  it('R92 control: the real sqlalchemy.orm sessionmaker still makes a write signal', async () => {
+    const sigs = await discover(F3, { trustedInternalEntryPoints: ALL });
+    expect(hits(sigs, 'shadow_real_sessionmaker_rows', 'ShadowRealSessionmakerRow')).toHaveLength(1);
+  });
+});

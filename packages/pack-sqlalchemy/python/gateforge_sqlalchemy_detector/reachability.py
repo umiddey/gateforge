@@ -292,13 +292,13 @@ class _Walker:
         hits = [t for t in self.tables if t[2] == name]
         return hits[0] if len(hits) == 1 else None
 
-    def _table_of(self, rel, node):
+    def _table_of(self, rel, own, fn, node):
         """The table an expression denotes: a model, ``M.__table__``, or ``table("lit")``."""
         if isinstance(node, ast.Name):
             return self._class_table(rel, node.id)
         if isinstance(node, ast.Attribute) and node.attr == "__table__" and isinstance(node.value, ast.Name):
             return self._class_table(rel, node.value.id)
-        if isinstance(node, ast.Call) and self._sa_symbol(rel, node.func) == "table" and node.args:
+        if isinstance(node, ast.Call) and self._sa_symbol(rel, node.func, own, fn) == "table" and node.args:
             literal = _str_const(node.args[0])
             if literal is not None:
                 return self._literal_table(literal)
@@ -326,14 +326,14 @@ class _Walker:
 
     # -- writers --------------------------------------------------------
 
-    def _is_session_ctor(self, rel, node):
+    def _is_session_ctor(self, rel, own, fn, node):
         if not isinstance(node, ast.Call):
             return False
-        if self._sa_symbol(rel, node.func) == "Session":
+        if self._sa_symbol(rel, node.func, own, fn) == "Session":
             return True
         return (
             isinstance(node.func, ast.Call)
-            and self._sa_symbol(rel, node.func.func) == "sessionmaker"
+            and self._sa_symbol(rel, node.func.func, own, fn) == "sessionmaker"
         )
 
     def _is_session_receiver(self, rel, own, fn, name):
@@ -343,23 +343,23 @@ class _Walker:
             return False
         if params:
             annotation = params[0].annotation
-            return annotation is not None and self._sa_symbol(rel, annotation) == "Session"
+            return annotation is not None and self._sa_symbol(rel, annotation, own, fn) == "Session"
         source = _binding_source(own, name)
-        return source is not None and self._is_session_ctor(rel, source)
+        return source is not None and self._is_session_ctor(rel, own, fn, source)
 
     def _writes(self, rel, own, fn, call):
         """The tables one call writes, as a list of table tuples."""
         symbol = self._sa_symbol(rel, call.func, own, fn)
         if symbol is not None:
-            return self._sa_writes(rel, symbol, call)
+            return self._sa_writes(rel, own, fn, symbol, call)
         if isinstance(call.func, ast.Attribute):
             return self._method_writes(rel, own, fn, call)
         return []
 
-    def _sa_writes(self, rel, symbol, call):
+    def _sa_writes(self, rel, own, fn, symbol, call):
         """Writes made by a sqlalchemy-imported call: ``insert(X)`` and ``text(S)``."""
         if symbol in WRITE_CALLS and call.args:
-            return _listed(self._table_of(rel, call.args[0]))
+            return _listed(self._table_of(rel, own, fn, call.args[0]))
         if symbol == "text" and call.args:
             return self._literal_write(_str_const(call.args[0]))
         return []
@@ -368,11 +368,11 @@ class _Walker:
         """Writes made by a method call: ``X.__table__.insert()``, alembic ops and session adds."""
         func = call.func
         if func.attr in WRITE_CALLS and isinstance(func.value, ast.Attribute) and func.value.attr == "__table__":
-            return _listed(self._table_of(rel, func.value))
+            return _listed(self._table_of(rel, own, fn, func.value))
         if not call.args:
             return []
         if func.attr == "bulk_insert" and self._is_alembic_op(rel, func.value):
-            return _listed(self._table_of(rel, call.args[0]))
+            return _listed(self._table_of(rel, own, fn, call.args[0]))
         if func.attr == "execute" and self._is_alembic_op(rel, func.value):
             return self._literal_write(_str_const(call.args[0]))
         if (
