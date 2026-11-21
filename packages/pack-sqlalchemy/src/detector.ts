@@ -51,6 +51,9 @@ const PROTOCOL_PYTHON_DIR = fileURLToPath(
 /** The subprocess command the in-process transport spawns (G4 surface). */
 export const DEFAULT_COMMAND = ['python3', '-m', 'gateforge_sqlalchemy_detector'];
 
+/** Discover request watchdog: a large repository (about 1,500 tables) needs minutes, not 30 s. */
+const DISCOVER_REQUEST_MS = 600_000;
+
 /**
  * Builds the environment the python detector runs under: the host env
  * plus a `PYTHONPATH` that makes both this pack's detector and the
@@ -372,7 +375,7 @@ export function createSqlalchemyDetector(options: SqlalchemyDetectorOptions = {}
         pluginVersion,
         cwd: process.cwd(),
         env,
-        timeouts: { handshakeMs: 10_000, requestMs: 30_000, shutdownMs: 10_000 },
+        timeouts: { handshakeMs: 10_000, requestMs: DISCOVER_REQUEST_MS, shutdownMs: 10_000 },
       });
       try {
         await session.start();
