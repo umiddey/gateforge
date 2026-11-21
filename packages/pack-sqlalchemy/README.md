@@ -387,6 +387,9 @@ section "Internal entry points (the `trustedInternalEntryPoints:` section)".
 
 Reachability is one input to the certificate, not the whole proof. A
 linked `http.endpoint` or an incomplete scan still blocks it.
+A route that writes a table through a helper, or enqueues a worker with
+`.delay()`, is not linked to that endpoint, so the endpoint check does not
+block that table; narrow the category with `patterns`.
 
 ## Classification workflow (example app)
 

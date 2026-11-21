@@ -1911,7 +1911,7 @@ The three categories the detector recognises:
   `uvicorn.run(...)` also suppress it).
 - `worker`: a module-level function decorated with `shared_task` (imported
   from `celery`), or with `@<app>.task` where `<app>` is a module-level
-  `Celery(...)` binding.
+  binding to `Celery(...)` imported from `celery`.
 
 From an entry body the detector follows module-level functions reached by
 a plain call: a same-file name, an imported name, or `module.func` for a
@@ -1931,6 +1931,13 @@ A table is written when the reached code does one of these:
 
 A literal table name counts only when exactly one table resource in the
 scan has that name; an ambiguous name gives no signal.
+
+A literal table name is the identifier itself: `"route rows"` names
+`route rows`, not `route`, and an optional `ONLY` before the table name is
+skipped. A `table(...)` argument is checked against module-level bindings
+only. The `insert`, `update` and `delete` name must be the `sqlalchemy`
+import: a name bound more than once in the module, or rebound in the calling
+function or passed to it as a parameter, gives no signal.
 
 What gives no signal (the table is not proven internal):
 
@@ -1964,6 +1971,10 @@ The internal certificate also needs these, from the same classifier:
 - no `http.endpoint` that links the resource
   (`classify.ts:1522-1539`). A linked endpoint means the table is reachable
   from a route, so it is user-facing.
+
+A route that writes a table through a helper, or enqueues a worker with
+`.delay()`, is not linked to that endpoint, so this check does not block
+that table. Narrow the category with `patterns` in that case.
 
 Changing `trustedInternalEntryPoints` changes the trusted-policy digest, so
 approved pins must be re-approved (see the owner-answers section above).
