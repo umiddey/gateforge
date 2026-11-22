@@ -1034,6 +1034,39 @@ An unreadable receipt, an unreadable tree listing, or any difference falls
 back to the previous, stricter test: the receipt's candidate tree id must
 equal the frozen index tree.
 
+**Three scopes, three different file sets.** They do not contradict each
+other; each names its own scope. This documents the existing contract and
+changes nothing about what counts as proof; the maintainer approved it.
+
+1. The CANDIDATE TREE binds every regular file in the workspace, gitignored
+   bytes included (the paragraph above).
+2. The INPUT DIGEST binds tracked files, non-ignored untracked files and the
+   configured scan inputs.
+3. The DETECTOR-INPUT walk skips gitignored files.
+
+Because scope 1 includes gitignored bytes, a suite that writes into the tree
+during a run changes the candidate tree. `test-gates` takes a result snapshot
+after the run and fails closed with "the workspace changed during the run"
+when the tree differs. Test-tool caches are the usual cause: pytest writes
+`.pytest_cache`, and Python writes `__pycache__`. They are NOT excluded from
+the candidate tree, because excluding them would change the bytes every
+sealed receipt binds.
+
+To keep a Python suite from writing them, set two variables on the one
+`test-gates` command line only (not in project config, not in the
+repository):
+
+```sh
+PYTEST_ADDOPTS='-p no:cacheprovider' PYTHONDONTWRITEBYTECODE=1 gateforge test-gates ...
+```
+
+If `PYTEST_ADDOPTS` is already set, prepend `-p no:cacheprovider` to its
+value. `-p no:cacheprovider` alone still leaves `__pycache__`, so both
+variables are needed. `test-gates` passes the ambient environment to the
+suite, so both reach pytest. The recipe covers pytest and Python bytecode
+only; other tool caches (`.mypy_cache`, `.ruff_cache`) are bound the same
+way and are not covered.
+
 **Receipts (the strict saved-state gate).** `check --require-e2e` accepts
 only an authenticated gate receipt sealed by a COMPLETE supervised run for
 the current input digest and trusted policy digest:
