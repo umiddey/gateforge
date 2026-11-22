@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.21.1
 
 - **Fixed: pack-sqlalchemy discover waits up to 10 minutes before the plugin is killed.**
 
