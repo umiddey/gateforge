@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.22.1
+
+- **Fixed: `test-gates --scope changed` refuses with exit 2 when the change
+  set maps to no runnable slice.** Nothing is executed, no receipt is
+  sealed, and the previous receipt is invalidated; the run no longer exits 0
+  on a parent's carried counts. A docs-only changed set still seals the
+  zero-record docs-only receipt.
+- **Fixed: the capability reference no longer marks `crud:*` fail-closed.**
+  The namespace grades through the engine-owned browser drive (an
+  engine-observed `ui.action` plus the witnessed session exchange, a
+  session-bound visible result, and a persistence echo); a suite-posted
+  `ui.action` never earns browser credit, and the reference says so.
+- **Fixed: the reference states the three file scopes a run reads (candidate
+  tree, input digest, detector input) and the fail-closed drift rule, with a
+  run-scoped recipe (`PYTEST_ADDOPTS='-p no:cacheprovider'
+  PYTHONDONTWRITEBYTECODE=1`) that keeps pytest cache and bytecode files out
+  of the candidate tree.**
+
 ## 0.22.0
 
 - **Added: wrapper verb from a call-site `method` option.**
