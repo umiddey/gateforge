@@ -53,7 +53,7 @@
  * EVIDENCE_SCOPE_INCOMPLETE block, and an empty slice seals nothing.
  * Without the flag the mode stays `full` — byte-identical behavior.
  */
-import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -202,7 +202,7 @@ import {
   SUPERVISED_INVOCATION,
   type PlannedRow,
 } from '../execution.js';
-import { evaluateRun, scopeBlocking, splitBlockingByBaseline, type EvaluateInput } from '../evaluate.js';
+import { evaluateRun, scopeBlocking, type EvaluateInput } from '../evaluate.js';
 import {
   businessRuleInventory,
   businessRuleReportEntries,
@@ -227,15 +227,7 @@ import {
 import { findRunnerConfigPath, mappingBlocking, mappedCoverageFrom, nativeInventoryBlocking, nativeInventoryProblem, observeObligationIds, resolveRepositoryMappings, serverE2eObligationIds, TEST_MAP_RELATIVE } from '../mapping.js';
 import { runPipeline, sourcesByResourceId } from '../pipeline.js';
 import { loadReceiptFor, receiptScope, tryReuseReceipt, type ReceiptLoad } from '../receipts.js';
-import {
-  carryDiffIsWithinScope,
-  classifyResealChange,
-  parentCommitAcceptance,
-  resealDisregardNotice,
-  RESEAL_REFUSAL_SUFFIX,
-  resealRefusal,
-  type ResealChangeClassification,
-} from '../reseal.js';
+import { classifyResealChange, parentCommitAcceptance, resealDisregardNotice, RESEAL_REFUSAL_SUFFIX, resealRefusal, type ResealChangeClassification } from '../reseal.js';
 import {
   authenticateContributingEvidence,
   carriedEvidenceDigestOf,
@@ -259,7 +251,7 @@ import {
 } from '../reseal-chain.js';
 import { obligationFingerprint } from '../evaluate.js';
 import { computeEvaluationScope } from '../scope.js';
-import { candidateTreeCoversCommit, computeCandidateTreeSnapshot, listTrackedPaths, resolveGitDir, sanitizedAuthorityEnv, type CandidateTreeSnapshot } from '../candidate-tree.js';
+import { candidateTreeCoversCommit, computeCandidateTreeSnapshot, listTrackedPaths, resolveGitDir, type CandidateTreeSnapshot } from '../candidate-tree.js';
 import {
   acceptedFreezeRequest,
   classifyGeneratedTargets,
@@ -273,7 +265,7 @@ import {
 } from '../native-freeze.js';
 import type { RuntimeReuseMount } from '../runtime-reuse.js';
 import { loadRuntimeConfigAt, resolveRuntimeReuseDigest } from '../runtime.js';
-import { mergeRequestScopePreflight, resolveGithubBaseCommit, resolveProvider } from '../providers.js';
+import { mergeRequestScopePreflight, resolveProvider } from '../providers.js';
 import { engineIdentity, reportEngineLine } from '../engine-identity.js';
 import { assertReceiptApprovedPolicy, evaluateApprovedPolicy, resolveApprovedPolicyDigest } from '../trusted-policy.js';
 import { resolveAdditionalAppOrigins } from '../additional-app-origins.js';
@@ -1428,43 +1420,10 @@ interface VerifiedCarryForwardParent {
 }
 
 /**
- * Resolves the exact merge-base commit from a supported CI diff provider.
- *
- * Args:
- *   io: process context with CI provider environment.
- *   provider: configured changed-file provider identity.
- *
- * Returns:
- *   string | null: verified 40-character base commit, or null when unavailable.
- */
-export function resolveCarryForwardBaseSha(
-  io: Io,
-  provider: 'github-pr' | 'gitlab-mr' | 'local-staged' | 'all-files',
-): string | null {
-  if (provider === 'gitlab-mr') {
-    const sha = io.env['CI_MERGE_REQUEST_DIFF_BASE_SHA']?.trim() ?? '';
-    return /^[0-9a-f]{40}$/.test(sha) ? sha : null;
-  }
-  if (provider !== 'github-pr') return null;
-  const authorityEnv = sanitizedAuthorityEnv(io.env);
-  const baseCommit = resolveGithubBaseCommit(io.cwd, io.env['GITHUB_BASE_REF'] ?? '', authorityEnv);
-  if (baseCommit === null) return null;
-  const result = spawnSync('git', ['--no-replace-objects', 'merge-base', 'HEAD', baseCommit], {
-    cwd: io.cwd,
-    env: authorityEnv,
-    encoding: 'utf8',
-  });
-  const sha = (result.stdout ?? '').trim();
-  return result.error === undefined && result.status === 0 && /^[0-9a-f]{40}$/.test(sha) ? sha : null;
-}
-
-/**
  * The outcome of verifying one parent document: the verified parent, or
  * the FIRST binding that failed, named in plain words.
  *
- * A refused re-seal must be visible, so every verifier reports why. The
- * null-returning shape the plain carry-forward path uses is derived from
- * it and never sees a reason.
+ * A refused re-seal must be visible, so every verifier reports why.
  */
 type ParentVerification<T> = { parent: T; reason: null } | { parent: null; reason: string };
 
@@ -1721,18 +1680,6 @@ function receiptLoadRefusal(status: ReceiptLoad['status']): string {
   return 'it does not describe a whole-suite run of this repository';
 }
 
-/**
- * Authenticates a clean full-scope receipt for the exact merge-base commit.
- *
- * Args:
- *   input: candidate policy, external pin, key ring, state directory, and merge base.
- *
- * Returns:
- *   VerifiedCarryForwardParent | null: verified uncarried root receipt, or null to keep current behavior.
- */
-function verifiedCarryForwardParent(input: CarryForwardParentInput): VerifiedCarryForwardParent | null {
-  return verifyCarryForwardParent(input).parent;
-}
 
 /** The sealed parent a re-seal carries from, and what it proved. */
 export interface ResealParent {
@@ -3636,35 +3583,14 @@ async function runSupervisedTestGatesInner(
     return gateCode;
   }
 
-  // 3.5 Scoped empty-slice fast-fail (Goal 2): when the changed set maps
+  // 3.5 Scoped empty-slice refusal (Goal 2): when the changed set maps
   // to no testable slice there is nothing to run and nothing to seal —
   // and launching the runner with an empty planned set would execute the
   // WHOLE suite (the trusted config's file filter is omitted for empty
   // selections). Fail closed here, before any witness/runner spawn: no
   // slice receipt over nothing is ever minted, and the previous receipt
-  // is invalidated (E07 discipline).
+  // is invalidated (E07 discipline); this refusal exits 2.
   if (options.scope === 'changed' && plannedRows.length === 0) {
-    const baseSha = resolveCarryForwardBaseSha(io, providerIdentity);
-    const carryParent =
-      !options.resultOnly &&
-      expectedDigest !== null &&
-      frozenTreeId !== null &&
-      approvedPolicyDigest !== null &&
-      baseSha !== null
-        ? verifiedCarryForwardParent({
-            io,
-            config,
-            stateDir,
-            verifierKeyring,
-            baseSha,
-            gitDir: freezeGitDir,
-            docsExclusions,
-            cacheExclusions,
-            trustedPolicyDigest: trustedPolicy,
-            approvedPolicyDigest,
-            executionBoundaryDigest,
-          })
-        : null;
     const playwrightConfig = findRunnerConfigPath(io.cwd, runnerName);
     const scopeDecision =
       catalog === null
@@ -3679,151 +3605,6 @@ async function runSupervisedTestGatesInner(
             strictE2E: false,
           });
     const behaviorBindings = behaviorReceiptBindings(pipeline.behaviorCatalog);
-    const scannedEveryChangedFile =
-      providerChangedFiles.length > 0 &&
-      config.plugins.length > 0 &&
-      pipeline.contributions.length === config.plugins.length &&
-      providerChangedFiles.every((path) =>
-        pipeline.contributions.every((contribution) => contribution.scannedPaths?.includes(path) === true),
-      );
-    // A sealed candidate tree carries gitignored and untracked bytes,
-    // so a verified parent proves the outcomes for ITS bytes. The
-    // plain carry-forward evaluates only the provider's changed files,
-    // so it may reuse the parent's outcomes exclusively when the two
-    // sealed trees differ in nothing else — a gitignored dependency or
-    // an untracked file would be a proof nobody produced. (The re-seal
-    // path needs no such test: it classifies the whole difference.)
-    const carryDiffWithinScope =
-      carryParent !== null &&
-      frozenTreeId !== null &&
-      freezeGitDir !== null &&
-      scopeDecision !== null &&
-      carryDiffIsWithinScope({
-        gitDir: freezeGitDir,
-        env: io.env,
-        parentTreeId: carryParent.treeId,
-        currentTreeId: frozenTreeId,
-        evaluatedPaths: scopeDecision.changedFiles,
-      });
-    // The policy-debt term reads the ADOPTED-baseline view, not the raw
-    // one. What a carry-forward must never seal over is NEW debt, and the
-    // raw list cannot express that: in a repository that ran `gateforge
-    // adopt` it holds the adopted classification, finding, unclassified
-    // and unresolved entries forever, so the term denied the carry there
-    // altogether. The split keeps the protection and drops only what
-    // adoption forgave — an entry adoption never recorded still blocks —
-    // and it is the same split `applyBaseline` grades through, so the guard
-    // and the grading cannot disagree about what debt is forgiven.
-    const unadoptedPolicyBlocking = splitBlockingByBaseline(
-      adoptedBaseline,
-      pipeline.policy.blocking,
-    ).kept;
-    // A planned re-seal is never a carry-forward: it re-runs the
-    // affected tests and seals its own receipt. `affectedTestCount`
-    // is the CHANGED-SCOPE plan's count, which a test-only change
-    // leaves at zero — exactly the case this path would swallow.
-    const carryIsSafe =
-      reSealPlan === null &&
-      carryParent !== null &&
-      expectedDigest !== null &&
-      frozenTreeId !== null &&
-      pipeline.manifest.gitSha !== null &&
-      catalog?.inventoryComplete === true &&
-      discoveryError === null &&
-      scopeDecision?.mode === 'changed' &&
-      scopeDecision.expandedBecause.length === 0 &&
-      scopeDecision.unmappedFiles.length === 0 &&
-      carryDiffWithinScope &&
-      coveredFingerprints.length === 0 &&
-      affectedTestCount === 0 &&
-      scopeBlockers.length === 0 &&
-      mappingBlockers.length === 0 &&
-      inventoryBlocking.length === 0 &&
-      unadoptedPolicyBlocking.length === 0 &&
-      (config.diagnostics?.suites.length ?? 0) === 0 &&
-      pipeline.policy.obligations.length === carryParent.receipt.verdictSummary.total &&
-      carryParent.receipt.behaviorCatalogDigest === behaviorBindings.behaviorCatalogDigest &&
-      carryParent.receipt.requiredCaseSetDigest === behaviorBindings.requiredCaseSetDigest &&
-      scannedEveryChangedFile;
-    const activeVerifierKeyring = verifierKeyring;
-    if (
-      carryIsSafe &&
-      activeVerifierKeyring !== null &&
-      baseSha !== null &&
-      pipeline.manifest.gitSha !== null &&
-      freezeGitDir !== null &&
-      carryParent !== null &&
-      expectedDigest !== null &&
-      frozenTreeId !== null
-    ) {
-      const candidateSnapshot = computeCandidateTreeSnapshot(
-        freezeGitDir,
-        io.cwd,
-        io.env,
-        stateDir,
-        'record',
-        runtimeReuseMounts,
-        docsExclusions,
-        cacheExclusions,
-      );
-      if (candidateSnapshot.treeId === frozenTreeId) {
-        const carried = issueGateReceipt({
-          verifierKey: activeVerifierKeyring.active.key,
-          verifierKeyId: activeVerifierKeyring.active.keyId,
-          runId: carryParent.receipt.runId,
-          invocationId: carryParent.receipt.invocationId,
-          inputDigest: expectedDigest,
-          gitSha: pipeline.manifest.gitSha,
-          parentSha: baseSha,
-          trustedPolicyDigest: trustedPolicy,
-          approvedPolicyDigest,
-          receiptStage: config.enforcement?.receiptStage,
-          engine: engineIdentity(),
-          carriedFrom: baseSha,
-          parentReceiptDigest: carryParent.receiptDigest,
-          invocation: carryParent.receipt.invocation,
-          selectionDigest: carryParent.receipt.selectionDigest,
-          catalogDigest: carryParent.receipt.catalogDigest,
-          executionResultDigest: carryParent.receipt.executionResultDigest,
-          evidenceAttestationDigest: carryParent.receipt.evidenceAttestationDigest,
-          candidateTreeId: frozenTreeId,
-          behaviorCatalogDigest: behaviorBindings.behaviorCatalogDigest,
-          requiredCaseSetDigest: behaviorBindings.requiredCaseSetDigest,
-          caseExecutionDigest: carryParent.receipt.caseExecutionDigest,
-          engineBundleDigest: engineBundleDigestOf(VERSION, trustedPolicy),
-          executionBoundaryDigest,
-          targetArtifactDigest: targetArtifactDigestOf(frozenTreeId),
-          verdictSummary: carryParent.receipt.verdictSummary,
-          issuedAt: pipeline.now,
-        });
-        const carryReport = canonicalJson({
-          schemaVersion: 1,
-          carriedForward: true,
-          carriedFrom: baseSha,
-          parentReceiptDigest: carryParent.receiptDigest,
-          receiptId: carried.receiptId,
-          candidateTreeId: frozenTreeId,
-          inputDigest: expectedDigest,
-          scope: 'changed',
-          changedFiles: [...providerChangedFiles],
-          testsPerformedThisInvocation: 0,
-          summary: carryParent.receipt.verdictSummary,
-          evidenceState: 'receipt-carried-forward',
-          engine: { ...engineIdentity() },
-        });
-        writeGateReceipt(stateDir, carried);
-        writeCandidateTreeEntries(stateDir, candidateSnapshot.entries);
-        writeReport(stateDir, carryReport);
-        writeLine(
-          io.stdout,
-          format === 'json'
-            ? carryReport
-            : `receipt ${carried.receiptId} carried forward from ${baseSha}; 0 tests run; full parent receipt and complete changed-file scan verified`,
-        );
-        writeLine(io.stderr, `receipt ${carried.receiptId} carried forward; 0 tests performed this invocation`);
-        return 0;
-      }
-    }
     if (!options.resultOnly) clearGateReceipt(stateDir);
     // 0.10.2 — the docs-only slice seals a receipt over ZERO records.
     //
@@ -4091,7 +3872,7 @@ async function runSupervisedTestGatesInner(
       io.stderr,
       'test-gates: --scope changed produced no runnable slice — nothing was executed and no receipt was sealed',
     );
-    return 1;
+    return 2;
   }
 
   // 4. Prepare the observer: spawn the loopback witness (unless the

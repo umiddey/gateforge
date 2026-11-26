@@ -4,20 +4,15 @@
  * `actions/checkout` of the PR head SHA leaves the base branch existing only
  * as `refs/remotes/origin/<base>` — there is no local `<base>` ref (proven in
  * CI runs 38683243458 / 38685125557: `git merge-base HEAD main` exits 128
- * with `fatal: Not a valid object name main`). Both consumers of
  * `GITHUB_BASE_REF` must therefore resolve the base through the fetched
  * remote-tracking ref:
  *
- * - the changed-file provider (`providers.ts` `githubPrProvider`),
- * - the `test-gates` carry-forward base resolver
- *   (`commands/test-gates.ts` `resolveCarryForwardBaseSha`).
+ * - the changed-file provider (`providers.ts` `githubPrProvider`).
  */
 import { describe, expect, it } from 'vitest';
 import { withTempRepo, type TempRepo } from '@gate-forge/core';
 import { githubPrProvider } from '../src/providers.js';
 import { UsageError } from '../src/errors.js';
-import { resolveCarryForwardBaseSha } from '../src/commands/test-gates.js';
-import type { Io } from '../src/io.js';
 
 /**
  * Builds the detached-checkout fixture: a base commit on `main`, a PR branch
@@ -64,9 +59,6 @@ function makeShadowedCheckout(repo: TempRepo): void {
   repo.git(['checkout', 'feature/pr']);
 }
 
-function io(repo: TempRepo, baseRef: string): Io {
-  return { cwd: repo.root, env: { GITHUB_BASE_REF: baseRef }, stdout: process.stdout, stderr: process.stderr };
-}
 
 describe('github-pr base ref in a detached PR checkout', () => {
   it('provider diffs the PR change via refs/remotes/origin/<base>', () => {
@@ -96,31 +88,6 @@ describe('github-pr base ref in a detached PR checkout', () => {
     });
   });
 
-  it('carry-forward resolver resolves the base sha via refs/remotes/origin/<base>', () => {
-    withTempRepo({}, (repo) => {
-      makeDetachedCheckout(repo);
-      expectNoLocalMain(repo);
-      const sha = resolveCarryForwardBaseSha(io(repo, 'main'), 'github-pr');
-      expect(sha).toMatch(/^[0-9a-f]{40}$/);
-      expect(repo.git(['rev-parse', 'refs/remotes/origin/main']).stdout.trim()).toBe(sha);
-    });
-  });
-
-  it('carry-forward resolver returns null when the base resolves nowhere', () => {
-    withTempRepo({}, (repo) => {
-      makeDetachedCheckout(repo);
-      expect(resolveCarryForwardBaseSha(io(repo, 'nope'), 'github-pr')).toBeNull();
-    });
-  });
-
-  it('carry-forward resolver rejects a base ref with a leading dash', () => {
-    withTempRepo({}, (repo) => {
-      makeDetachedCheckout(repo);
-      expect(resolveCarryForwardBaseSha(io(repo, '-main'), 'github-pr')).toBeNull();
-      expect(resolveCarryForwardBaseSha(io(repo, 'has space'), 'github-pr')).toBeNull();
-    });
-  });
-
   it('provider prefers refs/remotes/origin/<base> over a stale local <base>', () => {
     withTempRepo({}, (repo) => {
       makeShadowedCheckout(repo);
@@ -133,13 +100,6 @@ describe('github-pr base ref in a detached PR checkout', () => {
     });
   });
 
-  it('carry-forward resolver prefers refs/remotes/origin/<base> over a stale local <base>', () => {
-    withTempRepo({}, (repo) => {
-      makeShadowedCheckout(repo);
-      const sha = resolveCarryForwardBaseSha(io(repo, 'main'), 'github-pr');
-      expect(sha).toBe(repo.git(['rev-parse', 'refs/remotes/origin/main']).stdout.trim());
-    });
-  });
 
   it('provider rejects revision syntax such as HEAD or a ref expression', () => {
     withTempRepo({}, (repo) => {
@@ -150,7 +110,6 @@ describe('github-pr base ref in a detached PR checkout', () => {
       expect(() =>
         githubPrProvider(repo.root, { GITHUB_BASE_REF: 'main~1' }).changedFiles(),
       ).toThrow(UsageError);
-      expect(resolveCarryForwardBaseSha(io(repo, 'main@{1}'), 'github-pr')).toBeNull();
     });
   });
 
@@ -160,7 +119,6 @@ describe('github-pr base ref in a detached PR checkout', () => {
       expect(() =>
         githubPrProvider(repo.root, { GITHUB_BASE_REF: ' main ' }).changedFiles(),
       ).toThrow(UsageError);
-      expect(resolveCarryForwardBaseSha(io(repo, ' main'), 'github-pr')).toBeNull();
     });
   });
 
@@ -183,7 +141,6 @@ describe('github-pr base ref in a detached PR checkout', () => {
       repo.git(['replace', baseSha, graft]);
       const files = githubPrProvider(repo.root, { GITHUB_BASE_REF: 'main' }).changedFiles();
       expect(files).toEqual(['src/pr-change.txt']);
-      expect(resolveCarryForwardBaseSha(io(repo, 'main'), 'github-pr')).toBe(baseSha);
     });
   });
 });
