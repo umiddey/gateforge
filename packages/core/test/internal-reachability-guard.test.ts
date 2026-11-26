@@ -134,4 +134,30 @@ describe('internal reachability guard', () => {
     expect(text).toContain(ENDPOINT);
     expect(text).not.toContain('EXPOSURE_INTERNAL_CERTIFICATE');
   });
+
+  it('untrusted reachability names the out-of-pattern file and locates only it', () => {
+    const seed = { file: 'scripts/seed.py', line: 4, col: 1 };
+    const outOfPattern = signal(
+      'internality' as ClassificationSignal['dimension'],
+      'migration' as SignalAssertion,
+      { resourceName: TABLE },
+      SQL_DETECTOR,
+      seed,
+    );
+    const paths = [MIGRATION, seed.file];
+    const result = classifyResources({
+      ...input(false, [reachability, outOfPattern, primaryKey, hardDelete]),
+      policy: {
+        ...policy,
+        trustedInternalEntryPoints: [{ category: 'migration', detector: SQL_DETECTOR, patterns: ['migrations/**'] }],
+      },
+      scan: { ...scan(), requestedPaths: paths, eligiblePaths: paths, coverage: [{ detector: SQL_DETECTOR, scannedPaths: paths }] },
+    } as unknown as ClassifyResourcesInput);
+    const block = result.decisions.find((d) => d.name === TABLE)?.blocks.find((b) => b.code === 'INCOMPLETE_PROOF_SCOPE');
+    expect(block).toBeDefined();
+    expect(block?.detail).toContain('migration at scripts/seed.py:4');
+    expect(block?.detail).toContain('trusted migration patterns: migrations/**');
+    expect(block?.detail).not.toContain('(trusted: migration)');
+    expect(block?.locations).toEqual([seed]);
+  });
 });

@@ -165,7 +165,8 @@ describe('internal reachability end-to-end (classify --json)', () => {
       const result = await runCli(repo, ['classify', '--json']);
       const text = decision(result, 'export_logs');
       expect(text).toContain('INCOMPLETE_PROOF_SCOPE');
-      expect(text).toContain('untrusted entry-point category');
+      expect(text).toContain('worker at app/tasks.py:');
+      expect(text).toContain('trusted worker patterns: **/jobs/**');
     });
   });
 

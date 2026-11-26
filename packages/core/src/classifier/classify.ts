@@ -1440,17 +1440,11 @@ function classifyOne(
       const category = internalityCategory(signal);
       if (category !== null) categories.push(category);
     }
-    const untrusted = [
-      ...new Set(
-        reachability
-          .filter((signal) => {
-            const category = internalityCategory(signal);
-            const entry = ctx.trustedEntries.find((candidate) => candidate.category === category);
-            return entry === undefined || (entry.patterns !== undefined && !entry.patterns.some((pattern) => globMatch(signal.location.file, pattern)));
-          })
-          .map((signal) => internalityCategory(signal) ?? '<unknown>'),
-      ),
-    ];
+    const untrustedSignals = reachability.filter((signal) => {
+      const category = internalityCategory(signal);
+      const entry = ctx.trustedEntries.find((candidate) => candidate.category === category);
+      return entry === undefined || (entry.patterns !== undefined && !entry.patterns.some((pattern) => globMatch(signal.location.file, pattern)));
+    });
     if (!ctx.scanComplete) {
       exposure = 'user-facing';
       rules.push(RULES.exposureDefault);
@@ -1482,7 +1476,15 @@ function classifyOne(
           'parser is declared and covers it; decision: user-facing (conservative)',
         locations: [resource.location],
       });
-    } else if (untrusted.length > 0) {
+    } else if (untrustedSignals.length > 0) {
+      const causes = [...untrustedSignals]
+        .sort((a, b) => compareLocations(a.location, b.location))
+        .map((signal) => {
+          const category = internalityCategory(signal) ?? '<unknown>';
+          const patterns = ctx.trustedEntries.find((candidate) => candidate.category === category)?.patterns;
+          const why = patterns === undefined ? 'category not trusted' : `trusted ${category} patterns: ${patterns.join(', ')}`;
+          return `${category} at ${locationText(signal.location)} (${why})`;
+        });
       exposure = 'user-facing';
       rules.push(RULES.exposureDefault);
       defaultsApplied.push(RULES.exposureDefault);
@@ -1491,11 +1493,10 @@ function classifyOne(
         resourceId: `${plane}.${resource.name}`,
         name: resource.name,
         detail:
-          `internal intent cannot be certified: reachability signal(s) assert untrusted ` +
-          `entry-point category(es) ${untrusted.sort(compareStrings).join(', ')} ` +
-          `(trusted: ${[...ctx.trustedCategories].sort(compareStrings).join(', ') || '<none declared>'}); ` +
+          'internal intent cannot be certified: reachability signal(s) come from entry points ' +
+          `the policy does not trust: ${[...new Set(causes)].join('; ')}; ` +
           'decision: user-facing (conservative)',
-        locations: sortLocations(reachability.map((s) => s.location)),
+        locations: sortLocations(untrustedSignals.map((s) => s.location)),
       });
     } else if (categories.length === 0 || positiveLifecycle.length > 0) {
       exposure = 'user-facing';
