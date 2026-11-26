@@ -915,7 +915,7 @@ type UrlFunction = ts.FunctionDeclaration | ts.ArrowFunction | ts.FunctionExpres
 /** One parsed file's contribution to the bounded dataflow. */
 interface FileModel {
   source: ts.SourceFile;
-  /** Module-scope constant name → value expression node. */
+  /** Module-scope `const` name → value expression node. */
   constants: Map<string, ts.Expression>;
   /** Module-scope function-likes whose bodies contain a client call. */
   clientFunctions: Set<string>;
@@ -1012,7 +1012,11 @@ function modelFile(source: ts.SourceFile, config: ClientScanConfig, file: string
     ) {
       for (const declaration of node.declarationList.declarations) {
         if (!ts.isIdentifier(declaration.name) || declaration.initializer === undefined) continue;
-        constants.set(declaration.name.text, declaration.initializer);
+        // Const-only: a module `let`/`var` can be reassigned, so its
+        // initializer never proves a value.
+        if ((node.declarationList.flags & ts.NodeFlags.Const) !== 0) {
+          constants.set(declaration.name.text, declaration.initializer);
+        }
         // One-declaration wrapper: `const apiGet = (path) => fetch(...)`.
         const init = declaration.initializer;
         if (ts.isArrowFunction(init) || ts.isFunctionExpression(init)) {
@@ -1847,6 +1851,8 @@ class ValueTable {
   private readonly models = new Map<string, FileModel>();
   private readonly evaluating = new Set<string>();
   private readonly baseMemo = new Map<string, string | undefined>();
+  /** Renderings that kept an unproven hole (`${}`/`?` slot, dropped host). */
+  private unprovenHoles = 0;
 
   constructor(
     private readonly config: ClientScanConfig,
@@ -1884,6 +1890,7 @@ class ValueTable {
           // which renders as `?` so normalization strips the query instead
           // of gluing a positional segment.
           if (!rooted) return UNRESOLVED_VALUE;
+          this.unprovenHoles += 1;
           text += this.trailingQuerySuffix(node, span, span.expression, file) ? '?' : '${}';
         } else {
           text += hole.text;
@@ -2051,36 +2058,95 @@ class ValueTable {
     let scope: ts.Node | undefined = use.parent;
     while (scope !== undefined) {
       if (ts.isFunctionLike(scope) || ts.isSourceFile(scope)) {
-        const declaration = this.nearestDeclarationBefore(use, scope);
-        if (declaration !== undefined) {
-          return (declaration.parent.flags & ts.NodeFlags.Const) !== 0 &&
-            declaration.initializer !== undefined
-            ? { state: 'found', initializer: declaration.initializer }
+        const { nearest, binds } = this.scopeBinding(use, scope);
+        if (nearest !== undefined) {
+          // A `const` resolves only when its declaring block (Block,
+          // case clause, module block, source file, or the `for`
+          // statement that declares a loop header) contains the use —
+          // an `if`-block or loop-header `const` is invisible after
+          // its block, and then every same-named binding here is
+          // shadowed, never an outer one behind it.
+          return (
+            (nearest.parent.flags & ts.NodeFlags.Const) !== 0 &&
+            nearest.initializer !== undefined &&
+            this.declaringBlockContains(nearest, use)
+          )
+            ? { state: 'found', initializer: nearest.initializer }
             : { state: 'shadowed' };
         }
+        // Any function, class, `var`/`let`/`const`, destructuring or
+        // parameter binding of the name inside a function scope —
+        // before or after the use, a hoisted `var` included — shadows
+        // an outer constant (module scope is different: a later
+        // declaration cannot shadow an earlier use of an import path).
+        if (binds && !ts.isSourceFile(scope)) return { state: 'shadowed' };
       }
       scope = scope.parent;
     }
     return { state: 'absent' };
   }
 
-  /** Nearest same-named declaration textually before `use` in `scope`. */
-  private nearestDeclarationBefore(use: ts.Identifier, scope: ts.Node): ts.VariableDeclaration | undefined {
-    let best: ts.VariableDeclaration | undefined;
+  /**
+   * One walk of `scope` for `use`'s name. `nearest` is the nearest
+   * same-named identifier `VariableDeclaration` textually before the
+   * use (nested function-likes skipped); `binds` is true when the
+   * scope's own parameters or any function, class, `var`, `let`,
+   * `const` or destructuring declaration anywhere in its body — before
+   * or after the use — binds the name. Nested function and class
+   * bodies are skipped, their own names counted.
+   */
+  private scopeBinding(
+    use: ts.Identifier,
+    scope: ts.Node,
+  ): { nearest: ts.VariableDeclaration | undefined; binds: boolean } {
+    let nearest: ts.VariableDeclaration | undefined;
+    let binds = false;
     const visit = (node: ts.Node): void => {
-      if (node !== scope && ts.isFunctionLike(node)) return;
-      if (
-        ts.isVariableDeclaration(node) &&
-        ts.isIdentifier(node.name) &&
-        node.name.text === use.text &&
-        node.name.getEnd() <= use.getStart()
-      ) {
-        if (best === undefined || node.name.getStart() > best.name.getStart()) best = node;
+      if (node !== scope && (ts.isFunctionLike(node) || ts.isClassLike(node))) {
+        const own = ts.getNameOfDeclaration(node);
+        if (own !== undefined && ts.isIdentifier(own) && own.text === use.text) binds = true;
+        return;
+      }
+      if (ts.isVariableDeclaration(node)) {
+        if (ts.isIdentifier(node.name)) {
+          if (node.name.text === use.text) {
+            binds = true;
+            if (
+              node.name.getEnd() <= use.getStart() &&
+              (nearest === undefined || node.name.getStart() > nearest.name.getStart())
+            ) {
+              nearest = node;
+            }
+          }
+        } else if (bindingNames(node.name).includes(use.text)) binds = true;
+      } else if (ts.isParameter(node) && bindingNames(node.name).includes(use.text)) {
+        binds = true;
       }
       ts.forEachChild(node, visit);
     };
     visit(scope);
-    return best;
+    return { nearest, binds };
+  }
+
+  /** True when the block that scopes the declaration's list contains the use. */
+  private declaringBlockContains(declaration: ts.VariableDeclaration, use: ts.Identifier): boolean {
+    let current: ts.Node | undefined = declaration.parent;
+    while (current !== undefined) {
+      if (
+        ts.isBlock(current) ||
+        ts.isCaseClause(current) ||
+        ts.isDefaultClause(current) ||
+        ts.isModuleBlock(current) ||
+        ts.isSourceFile(current) ||
+        ts.isForStatement(current) ||
+        ts.isForInStatement(current) ||
+        ts.isForOfStatement(current)
+      ) {
+        return current.getStart() <= use.getStart() && use.getEnd() <= current.getEnd();
+      }
+      current = current.parent;
+    }
+    return false;
   }
 
   /**
@@ -2699,6 +2765,17 @@ class ValueTable {
     if (ts.isPrefixUnaryExpression(expr) && expr.operator === ts.SyntaxKind.MinusToken && ts.isNumericLiteral(expr.operand)) {
       return -Number(expr.operand.text);
     }
+    if (ts.isTypeOfExpression(expr)) {
+      // `typeof x === 'function' ? x(args) : x` proves the else arm
+      // only when every value of the guarded name is a proven string
+      // target with no unproven hole; an arrow, an unresolvable name
+      // or a template hole keeps the guard unproven (fail closed).
+      const before = this.unprovenHoles;
+      const targets = this.callTargets(expr.expression, file, bindings, seen);
+      return targets !== undefined && targets.length > 0 && this.unprovenHoles === before
+        ? 'string'
+        : 'unknown';
+    }
     if (!ts.isIdentifier(expr)) return 'unknown';
     if (expr.text === 'undefined') {
       return this.localConstBinding(expr).state === 'found' ? 'unknown' : undefined;
@@ -2770,6 +2847,7 @@ class ValueTable {
             // The hole is a runtime base URL (env/config host): the
             // request's addressable path starts at the static literal
             // that follows it, so the host is dropped, not invented.
+            this.unprovenHoles += 1;
             for (const piece of pieces) {
               next.push({ text: piece.text + span.literal.text, rooted: true });
             }
@@ -2777,6 +2855,7 @@ class ValueTable {
             if (pieces.some((piece) => !piece.rooted)) return undefined;
             const suffix = this.trailingQuerySuffix(node, span, holeExpr, holeFile);
             const slot = suffix ? '?' : '${}';
+            this.unprovenHoles += 1;
             for (const piece of pieces) next.push({ text: piece.text + slot + span.literal.text, rooted: true });
           }
         } else {

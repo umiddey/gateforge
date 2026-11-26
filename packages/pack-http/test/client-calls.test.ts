@@ -599,3 +599,219 @@ describe('client scan: wrapper verb from a call-site method option', () => {
     )).toThrow(/methodOption/);
   });
 });
+
+const guardConfig = parseClientScanConfigDocument(
+  {
+    clientSymbols: ['client'],
+    wrapperFunctions: [{ name: 'usePut', method: 'PUT', parameter: 'endpoint' }],
+  },
+  'test:client-typeof-guard',
+);
+
+const putHook = `
+  export function usePut(endpoint) {
+    return async (payload) => {
+      const path = typeof endpoint === 'function' ? endpoint(payload) : endpoint;
+      const res = await client.put(path, payload);
+      return res.data;
+    };
+  }
+`;
+
+function scanPut(page: string) {
+  return scanWith(guardConfig, 'src/Page.jsx', { 'src/usePut.js': putHook, 'src/Page.jsx': page });
+}
+
+describe('client scan: typeof function URL guard', () => {
+  it('a guard over a literal wrapper argument folds to the literal URL', () => {
+    const result = scanPut(`
+      import { usePut } from './usePut';
+
+      export function Page() {
+        return usePut('/api/items');
+      }
+    `);
+    expect(result.unresolved).toEqual([]);
+    expect(result.calls).toEqual([expect.objectContaining({ method: 'PUT', rawPath: '/api/items' })]);
+  });
+
+  it('a guard over a constant-built wrapper argument folds to the built URL', () => {
+    const result = scanPut(`
+      import { usePut } from './usePut';
+
+      const BASE = '/api/items';
+
+      export function Page() {
+        return usePut(\`\${BASE}/archive\`);
+      }
+    `);
+    expect(result.unresolved).toEqual([]);
+    expect(result.calls).toEqual([expect.objectContaining({ method: 'PUT', rawPath: '/api/items/archive' })]);
+  });
+
+  it('a guard over a wrapper argument with an unproven hole stays unresolved', () => {
+    const result = scanPut(`
+      import { usePut } from './usePut';
+
+      export function Page({ id }) {
+        return usePut(\`/api/items/\${id}\`);
+      }
+    `);
+    expect(result.calls).toEqual([]);
+    expect(result.unresolved).toEqual([
+      expect.objectContaining({ code: FRONTEND_CALL_TARGET_UNRESOLVED }),
+    ]);
+  });
+
+  it('a guard over an arrow wrapper argument stays unresolved', () => {
+    const result = scanPut(`
+      import { usePut } from './usePut';
+
+      export function Page() {
+        return usePut((p) => \`/api/items/\${p.id}\`);
+      }
+    `);
+    expect(result.calls).toEqual([]);
+    expect(result.unresolved).toEqual([
+      expect.objectContaining({ code: FRONTEND_CALL_TARGET_UNRESOLVED }),
+    ]);
+  });
+
+  it('a guard over an unresolvable wrapper argument stays unresolved', () => {
+    const result = scanPut(`
+      import { usePut } from './usePut';
+
+      export function Page({ target }) {
+        return usePut(target);
+      }
+    `);
+    expect(result.calls).toEqual([]);
+    expect(result.unresolved).toEqual([
+      expect.objectContaining({ code: FRONTEND_CALL_TARGET_UNRESOLVED }),
+    ]);
+  });
+
+  it('a guard over a module const folds to that const', () => {
+    const result = scanWith(verbConfig, 'src/load.js', {
+      'src/load.js': `
+        const URL = '/api/items';
+
+        export function load() {
+          return apiClient.get(typeof URL === 'function' ? URL() : URL);
+        }
+      `,
+    });
+    expect(result.unresolved).toEqual([]);
+    expect(result.calls).toEqual([expect.objectContaining({ method: 'GET', rawPath: '/api/items' })]);
+  });
+
+  it('a guard over a parameter of the same name stays unresolved', () => {
+    const result = scanWith(verbConfig, 'src/load.js', {
+      'src/load.js': `
+        const URL = '/api/items';
+
+        export function load(URL) {
+          return apiClient.get(typeof URL === 'function' ? URL() : URL);
+        }
+      `,
+    });
+    expect(result.calls).toEqual([]);
+    expect(result.unresolved).toEqual([
+      expect.objectContaining({ code: FRONTEND_CALL_TARGET_UNRESOLVED }),
+    ]);
+  });
+
+  it('a function declaration and a hoisted var of the same name shadow the module const', () => {
+    const result = scanWith(verbConfig, 'src/load.js', {
+      'src/load.js': `
+        const URL = '/api/items';
+
+        export function load() {
+          return apiClient.get(URL);
+          function URL() { return '/api/other'; }
+        }
+
+        export function reload() {
+          const res = apiClient.get(URL);
+          var URL = '/api/other';
+          return res;
+        }
+      `,
+    });
+    expect(result.calls).toEqual([]);
+    expect(result.unresolved).toEqual([
+      expect.objectContaining({ code: FRONTEND_CALL_TARGET_UNRESOLVED }),
+      expect.objectContaining({ code: FRONTEND_CALL_TARGET_UNRESOLVED }),
+    ]);
+  });
+
+  it('a block-local const is visible only inside its own block or loop', () => {
+    const result = scanWith(verbConfig, 'src/load.js', {
+      'src/load.js': `
+        const URL = '/api/items';
+
+        export function load(flag) {
+          if (flag) { const URL = '/api/other'; }
+          return apiClient.get(URL);
+        }
+
+        export function reload() {
+          for (const URL = '/api/other'; ;) { break; }
+          return apiClient.get(URL);
+        }
+
+        export function each() {
+          for (const PATH = '/api/items'; ;) { return apiClient.get(PATH); }
+        }
+      `,
+    });
+    expect(result.calls).toEqual([expect.objectContaining({ method: 'GET', rawPath: '/api/items' })]);
+    expect(result.unresolved).toEqual([
+      expect.objectContaining({ code: FRONTEND_CALL_TARGET_UNRESOLVED }),
+      expect.objectContaining({ code: FRONTEND_CALL_TARGET_UNRESOLVED }),
+    ]);
+  });
+
+  it('an imported reassigned module let never resolves, guarded or bare', () => {
+    const result = scanWith(verbConfig, 'src/load.js', {
+      'src/cfg.js': `
+        export let URL = '/api/items';
+
+        export function configure(next) { URL = next; }
+      `,
+      'src/load.js': `
+        import { URL } from './cfg';
+
+        export function load() {
+          return apiClient.get(typeof URL === 'function' ? URL() : URL);
+        }
+
+        export function reload() {
+          return apiClient.get(URL);
+        }
+      `,
+    });
+    expect(result.calls).toEqual([]);
+    expect(result.unresolved).toEqual([
+      expect.objectContaining({ code: FRONTEND_CALL_TARGET_UNRESOLVED }),
+      expect.objectContaining({ code: FRONTEND_CALL_TARGET_UNRESOLVED }),
+    ]);
+  });
+
+  it('an imported module const resolves under the guard', () => {
+    const result = scanWith(verbConfig, 'src/load.js', {
+      'src/cfg.js': `
+        export const URL = '/api/items';
+      `,
+      'src/load.js': `
+        import { URL } from './cfg';
+
+        export function load() {
+          return apiClient.get(typeof URL === 'function' ? URL() : URL);
+        }
+      `,
+    });
+    expect(result.unresolved).toEqual([]);
+    expect(result.calls).toEqual([expect.objectContaining({ method: 'GET', rawPath: '/api/items' })]);
+  });
+});
