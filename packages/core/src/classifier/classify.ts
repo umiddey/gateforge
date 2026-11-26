@@ -117,6 +117,11 @@ export interface ClassifyResourcesInput {
   adapters: readonly string[];
   /** Derive absent lifecycle operations only when the scan proves its scope complete. */
   deriveLifecycleDefaults?: boolean;
+  /**
+   * Final ids (`<plane>.<name>`) of the endpoints with an approved behavior
+   * declaration: the only proof a `hidden` resource's linked endpoint can carry.
+   */
+  behaviorDeclaredEndpoints?: readonly string[];
   /** Findings/unresolved entries the complete-scan attestation is judged against. */
   scan: ClassifierScanInput;
 }
@@ -942,6 +947,7 @@ export function classifyResources(input: ClassifyResourcesInput): Classification
     exposureComplete,
     trustedCategories,
     trustedEntries,
+    behaviorDeclared: new Set(input.behaviorDeclaredEndpoints),
     resources: input.resources,
     signals: [...pluginSignals, ...authoritySignals],
   };
@@ -953,6 +959,24 @@ export function classifyResources(input: ClassifyResourcesInput): Classification
     classifyOne(resource, pools[index] ?? { plugin: [], authority: [] }, ctx),
   );
   resolveEndpointPlanes(input.resources, decisions, pools, ctx);
+  // A hidden proof is keyed by the endpoint's FINAL id, which an endpoint
+  // without a detector plane only has now (the binding formula). One pass,
+  // never chained: a hidden resource's plane does not depend on its proof,
+  // so the planes resolved above stay valid.
+  const boundRefs = input.resources.map((ref, index) => {
+    const plane = decisions[index]?.classification?.plane;
+    if (ref.kind !== HTTP_ENDPOINT_RESOURCE_KIND || ref.id !== null || plane === undefined) return ref;
+    return { ...ref, id: `${plane}.${ref.name}` };
+  });
+  if (boundRefs.some((ref, index) => ref !== input.resources[index])) {
+    const boundCtx = { ...ctx, resources: boundRefs };
+    input.resources.forEach((resource, index) => {
+      // An endpoint's own pool lacks the plane derived above; its decision stays.
+      if (resource.kind === HTTP_ENDPOINT_RESOURCE_KIND) return;
+      if (decisions[index]?.classification?.exposure !== 'hidden') return;
+      decisions[index] = classifyOne(resource, pools[index] ?? { plugin: [], authority: [] }, boundCtx);
+    });
+  }
 
   return {
     schemaVersion: 1,
@@ -1110,6 +1134,8 @@ interface ClassifyContext {
   exposureComplete: boolean;
   trustedCategories: ReadonlySet<string>;
   trustedEntries: ClassifierPolicy['trustedInternalEntryPoints'];
+  /** Final endpoint ids with an approved behavior declaration (hidden proof). */
+  behaviorDeclared: ReadonlySet<string>;
   /**
    * The pass's full resource list and merged signal pool (plan
    * 20261028_1945 D): the hidden-resource completeness rule resolves
@@ -1379,7 +1405,7 @@ function classifyOne(
         });
       } else {
         const unproven = linked.filter(
-          (entry) => entry.endpoint.attributes['behaviorProof'] !== 'passing',
+          (entry) => entry.endpoint.id === null || !ctx.behaviorDeclared.has(entry.endpoint.id),
         );
         if (unproven.length > 0) {
           const ids = unproven
@@ -1946,9 +1972,9 @@ function classifyOne(
  * Endpoints the scan links to one hidden resource (plan 20261028_1945 D):
  * code-positive `adapter-binding` signals asserting the resource's id or
  * bare name (the bindAdapter predicate) whose target resolves to an
- * `http.endpoint` resource. The endpoint's pipeline-stamped `behaviorProof`
- * attribute carries the proof state — no stamp reads unproven, never
- * guessed. Sorted by endpoint identity; deterministic.
+ * `http.endpoint` resource. An endpoint proves the resource when its final
+ * id is in `ctx.behaviorDeclared` — an id-less endpoint reads unproven,
+ * never guessed. Sorted by endpoint identity; deterministic.
  */
 function hiddenLinkedEndpoints(
   resource: ClassifierResourceRef,

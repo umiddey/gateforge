@@ -11,12 +11,16 @@
  * (`adapter-binding` linking signal, endpoint-compiler detector identity).
  *
  * Cases (P1 line):
- * (a) hidden rule + one linked endpoint with passing ENDPOINT_BEHAVIOR
- *     proof → no ADAPTER_MISSING, no INCOMPLETE_PROOF_SCOPE, complete.
- * (b) same, behavior proof missing → blocked naming the endpoint.
+ * (a) hidden rule + one linked endpoint whose id is in
+ *     `behaviorDeclaredEndpoints` (an approved behavior declaration)
+ *     → no ADAPTER_MISSING, no INCOMPLETE_PROOF_SCOPE, complete.
+ * (b) same, endpoint not declared → blocked naming the endpoint.
  * (c) hidden rule, no linked endpoint → HIDDEN_RESOURCE_UNLINKED.
  * (d) hidden rule + positive read exposure → CLASSIFICATION_CONTRADICTION.
  * (e) no hiddenRules (empty list) → parses, byte-identical output.
+ * (f) declared endpoint that is id-less until the classifier resolves its
+ *     plane → proven through its final id.
+ * (g) same, not declared → blocked naming the final id.
  */
 import { describe, expect, it } from 'vitest';
 import {
@@ -63,11 +67,9 @@ function tableResource(): ClassifierResourceRef {
 
 /**
  * The writing endpoint, shaped like the endpoint compiler's graph record
- * (resourceName/method/canonicalPath/linkedResourceName attributes). The
- * `behaviorProof` stamp is the P2 pipeline's input channel per the design
- * note; `false` models a linked endpoint with no passing behavior proof.
+ * (resourceName/method/canonicalPath/linkedResourceName attributes).
  */
-function endpointResource(options?: { behaviorProof?: boolean }): ClassifierResourceRef {
+function endpointResource(): ClassifierResourceRef {
   return {
     name: ENDPOINT,
     id: `tenant.${ENDPOINT}`,
@@ -81,7 +83,6 @@ function endpointResource(options?: { behaviorProof?: boolean }): ClassifierReso
       method: 'POST',
       canonicalPath: '/api/v1/auth/password-reset-requests',
       linkedResourceName: TABLE,
-      ...(options?.behaviorProof ? { behaviorProof: 'passing' } : {}),
     },
   };
 }
@@ -171,14 +172,29 @@ function scan(): ClassifierScanInput {
 function classifyInput(
   policy: ClassifierPolicy,
   signals: ClassificationSignal[],
-  endpointOptions?: { behaviorProof?: boolean },
+  behaviorDeclaredEndpoints: string[] = [],
 ): ClassifyResourcesInput {
   return {
-    resources: [tableResource(), endpointResource(endpointOptions)],
+    resources: [tableResource(), endpointResource()],
     signals,
     policy,
     adapters: [],
     scan: scan(),
+    behaviorDeclaredEndpoints,
+  };
+}
+
+/**
+ * An endpoint as graph build leaves it without a detector plane: no id, no
+ * `plane` attribute. Its plane is inherited from the linked tenant table
+ * inside classification, so its final id is `tenant.${ENDPOINT}`.
+ */
+function idlessInput(behaviorDeclaredEndpoints: string[]): ClassifyResourcesInput {
+  const endpoint = endpointResource();
+  const attributes = Object.fromEntries(Object.entries(endpoint.attributes).filter(([key]) => key !== 'plane'));
+  return {
+    ...classifyInput(hiddenPolicy({ resourceName: TABLE }), signalsWithLink(true), behaviorDeclaredEndpoints),
+    resources: [tableResource(), { ...endpoint, id: null, attributes }],
   };
 }
 
@@ -194,7 +210,7 @@ describe('hidden resources (plan 20261028_1945, D)', () => {
       classifyInput(
         hiddenPolicy({ resourceName: TABLE }),
         signalsWithLink(true),
-        { behaviorProof: true },
+        [`tenant.${ENDPOINT}`],
       ),
     );
     expect(result.invalidSignals).toEqual([]);
@@ -218,6 +234,23 @@ describe('hidden resources (plan 20261028_1945, D)', () => {
     const endpointNamed = table.blocks.some((block) => block.detail.includes(ENDPOINT));
     expect(endpointNamed).toBe(true);
     expect(table.blocks.some((block) => block.code === 'ADAPTER_MISSING')).toBe(false);
+  });
+
+  it('(f) declared endpoint whose id is resolved by the classifier: proven through its final id', () => {
+    const result = classifyResources(idlessInput([`tenant.${ENDPOINT}`]));
+
+    const table = decisionFor(result, TABLE);
+    expect(table.classification?.exposure).toBe('hidden');
+    expect(table.blocks.some((block) => block.code === 'INCOMPLETE_PROOF_SCOPE')).toBe(false);
+    expect(table.classification?.hiddenProof?.provenThrough).toEqual([`tenant.${ENDPOINT}`]);
+  });
+
+  it('(g) undeclared endpoint whose id is resolved by the classifier: blocked, naming its final id', () => {
+    const result = classifyResources(idlessInput([]));
+
+    const table = decisionFor(result, TABLE);
+    const block = table.blocks.find((entry) => entry.code === 'INCOMPLETE_PROOF_SCOPE');
+    expect(block?.detail).toContain(`tenant.${ENDPOINT}`);
   });
 
   it('(c) hidden rule with no linked endpoint: HIDDEN_RESOURCE_UNLINKED', () => {
