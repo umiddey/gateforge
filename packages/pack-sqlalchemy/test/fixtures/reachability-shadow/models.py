@@ -97,3 +97,23 @@ class TwiceTableRow(Base):
 class LocalShadowRow(Base):
     __tablename__ = "local_shadow_rows"
     id = Column(Integer, primary_key=True)
+
+
+class CursorWithRow(Base):
+    __tablename__ = "cursor_with_rows"
+    id = Column(Integer, primary_key=True)
+
+
+class CursorAssignRow(Base):
+    __tablename__ = "cursor_assign_rows"
+    id = Column(Integer, primary_key=True)
+
+
+class CursorParamRow(Base):
+    __tablename__ = "cursor_param_rows"
+    id = Column(Integer, primary_key=True)
+
+
+class CursorConnRow(Base):
+    __tablename__ = "cursor_conn_rows"
+    id = Column(Integer, primary_key=True)

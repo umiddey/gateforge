@@ -188,6 +188,14 @@ def _binding_source(own, name):
     return None
 
 
+def _is_cursor(own, fn, name):
+    """True when ``name`` is bound exactly once in the scope, to ``X.cursor()``, and is no parameter."""
+    if _bound_count(own, name) != 1 or any(p.arg == name for p in _param_nodes(fn)):
+        return False
+    source = _binding_source(own, name)
+    return isinstance(source, ast.Call) and isinstance(source.func, ast.Attribute) and source.func.attr == "cursor"
+
+
 def _table_key(table):
     return (table[0], table[1] or "", table[2])
 
@@ -376,7 +384,7 @@ class _Walker:
         return []
 
     def _method_writes(self, rel, own, fn, call):
-        """Writes made by a method call: ``X.__table__.insert()``, alembic ops and session adds."""
+        """Writes made by a method call: ``X.__table__.insert()``, alembic ops, cursor literals and session adds."""
         func = call.func
         if func.attr in WRITE_CALLS and isinstance(func.value, ast.Attribute) and func.value.attr == "__table__":
             return _listed(self._table_of(rel, own, fn, func.value))
@@ -385,6 +393,8 @@ class _Walker:
         if func.attr == "bulk_insert" and self._is_alembic_op(rel, func.value):
             return _listed(self._table_of(rel, own, fn, call.args[0]))
         if func.attr == "execute" and self._is_alembic_op(rel, func.value):
+            return self._literal_write(_str_const(call.args[0]))
+        if func.attr == "execute" and isinstance(func.value, ast.Name) and _is_cursor(own, fn, func.value.id):
             return self._literal_write(_str_const(call.args[0]))
         if (
             func.attr in SESSION_ADD_CALLS
