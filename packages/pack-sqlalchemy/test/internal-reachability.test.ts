@@ -418,3 +418,25 @@ describe('session and table names are scope-checked', () => {
     expect(hits(sigs, 'shadow_real_sessionmaker_rows', 'ShadowRealSessionmakerRow')).toHaveLength(1);
   });
 });
+
+describe('local table bindings', () => {
+  const F3 = join(HERE, 'fixtures', 'reachability-shadow');
+
+  it('R93 bulk_insert of a name bound once to table("name") is a migration write', async () => {
+    const sigs = await discover(F3, { trustedInternalEntryPoints: ALL });
+    const found = hits(sigs, 'local_table_rows', 'LocalTableRow');
+    expect(found).toHaveLength(1);
+    expect(found[0]?.assertion).toBe('migration');
+    expect(JSON.stringify(found[0]?.location)).toContain('migrations/versions/0003_local_table.py');
+  });
+
+  it('R94 a name bound twice to table("name") is not resolved: no signal', async () => {
+    const sigs = await discover(F3, { trustedInternalEntryPoints: ALL });
+    expect(hits(sigs, 'twice_table_rows', 'TwiceTableRow')).toHaveLength(0);
+  });
+
+  it('R95 a local rebinding of an imported model name decides, not the import: no signal', async () => {
+    const sigs = await discover(F3, { trustedInternalEntryPoints: ALL });
+    expect(hits(sigs, 'local_shadow_rows', 'LocalShadowRow')).toHaveLength(0);
+  });
+});

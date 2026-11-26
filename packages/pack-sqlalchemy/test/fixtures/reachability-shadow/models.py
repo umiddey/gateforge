@@ -82,3 +82,18 @@ class ShadowRealSessionmakerRow(Base):
 class ShadowRealLiteralRow(Base):
     __tablename__ = "shadow_real_literal_rows"
     id = Column(Integer, primary_key=True)
+
+
+class LocalTableRow(Base):
+    __tablename__ = "local_table_rows"
+    id = Column(Integer, primary_key=True)
+
+
+class TwiceTableRow(Base):
+    __tablename__ = "twice_table_rows"
+    id = Column(Integer, primary_key=True)
+
+
+class LocalShadowRow(Base):
+    __tablename__ = "local_shadow_rows"
+    id = Column(Integer, primary_key=True)

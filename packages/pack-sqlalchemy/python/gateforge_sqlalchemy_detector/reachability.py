@@ -293,9 +293,20 @@ class _Walker:
         return hits[0] if len(hits) == 1 else None
 
     def _table_of(self, rel, own, fn, node):
-        """The table an expression denotes: a model, ``M.__table__``, or ``table("lit")``."""
+        """The table an expression denotes.
+
+        A model, ``M.__table__``, ``table("lit")``, or a name bound exactly
+        once in the function to ``table("lit")``.
+        """
         if isinstance(node, ast.Name):
-            return self._class_table(rel, node.id)
+            is_param = any(p.arg == node.id for p in _param_nodes(fn))
+            source = _binding_source(own, node.id)
+            if not is_param and source is None:
+                return self._class_table(rel, node.id)
+            # A parameter or a plain binding in this scope decides, not a model of that name.
+            if fn is None or is_param or _bound_count(own, node.id) != 1 or not isinstance(source, ast.Call):
+                return None
+            return self._table_of(rel, own, fn, source)
         if isinstance(node, ast.Attribute) and node.attr == "__table__" and isinstance(node.value, ast.Name):
             return self._class_table(rel, node.value.id)
         if isinstance(node, ast.Call) and self._sa_symbol(rel, node.func, own, fn) == "table" and node.args:
