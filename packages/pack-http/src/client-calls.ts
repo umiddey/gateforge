@@ -24,7 +24,9 @@
  * - **Configured client symbols** (`apiClient.get(...)`) and **pure URL
  *   builders** (`buildApiPath('/v1/x')` with an optional declared base)
  *   are configuration-declared resolvable APIs — never coverage
- *   exemptions: unresolved flows still block.
+ *   exemptions: unresolved flows still block. An element-access key
+ *   (`client[key](...)`) is the same verb when `key` is a literal or
+ *   proven constant; an unproven key is a typed block.
  * - **Instance baseURL joining**: when an instance symbol's creation is
  *   modeled — a module-scope `const apiClient = axios.create({...})`
  *   whose config carries a proven LITERAL `baseURL` (a direct property,
@@ -147,7 +149,10 @@ export interface ClientScanConfig {
    * Wrapper callables: `name` plus a verb source — the concrete method
    * the wrapper always issues, one verb per body call (`methodFromBody`),
    * or the call-site `method` option (`methodOption`, defaulting to
-   * `method`). Wrappers with computed methods stay unresolved.
+   * `method`). Wrappers with computed methods stay unresolved. A body
+   * `client[key](...)` counts like `client.<key>(...)`; `key` must be a
+   * literal or proven constant, or the `method` destructured from the
+   * `methodOption` parameter, else the body fails closed.
    */
   wrapperFunctions?: ReadonlyArray<WrapperFunctionConfig>;
   /** Pure URL builders with an optional literal base they prepend. */
@@ -1064,6 +1069,15 @@ function containsClientCall(node: ts.Node, config: ClientScanConfig, file: strin
         return;
       }
     }
+    if (ts.isElementAccessExpression(expression) && ts.isIdentifier(expression.expression)) {
+      // `client[key](...)` is the same client call as `client.<key>(...)`;
+      // fetch stays property-only (the window.fetch contract is a property).
+      const objectName = expression.expression.text;
+      if (objectName === 'axios' || clientSymbolActiveIn(config, objectName, file)) {
+        found = true;
+        return;
+      }
+    }
     ts.forEachChild(current, visit);
   };
   visit(node);
@@ -1218,11 +1232,12 @@ function extractCall(
     }
     return;
   }
-  // axios.get(url), apiClient.post(url), window.fetch(url)
-  if (ts.isPropertyAccessExpression(expression) && ts.isIdentifier(expression.expression)) {
-    const objectName = table.configuredClientName(expression.expression, file);
-    const verb = expression.name.text.toLowerCase();
-    const isFetchObject = objectName === 'window' && expression.name.text === 'fetch';
+  // axios.get(url), client['put'](url), apiClient.post(url), window.fetch(url)
+  const member = table.clientMember(expression, file);
+  if (member !== undefined) {
+    const objectName = table.configuredClientName(member.object, file);
+    const verb = member.name === undefined ? undefined : member.name.toLowerCase();
+    const isFetchObject = objectName === 'window' && member.name === 'fetch';
     if (isFetchObject) {
       extractClientCall(call, 'fetch', 'GET', false, file, config, table, calls, unresolved, location, undefined, reads);
       return;
@@ -1230,14 +1245,28 @@ function extractCall(
     // Per-symbol scoping (phase 3): the symbol counts only where its
     // include/exclude (and the top-level roots) admit this file.
     const configured = clientSymbolActiveIn(config, objectName, file);
-    if ((objectName === 'axios' || configured) && VERB_METHODS.has(verb)) {
-      const method = VERB_METHODS.get(verb) ?? 'GET';
-      // Instance baseURL joining: a modeled `axios.create` creation with a
-      // proven literal baseURL joins into the emitted path (fetch has no
-      // instance and never joins).
-      const baseURL = table.instanceBaseURL(objectName, file);
-      extractClientCall(call, objectName, method, true, file, config, table, calls, unresolved, location, baseURL, reads);
-      return;
+    if (objectName === 'axios' || configured) {
+      if (verb === undefined) {
+        // An element-access key the model cannot prove is never assumed
+        // to be any verb — a typed block, not a silent GET.
+        unresolved.push({
+          code: HTTP_METHOD_DYNAMIC,
+          detail: `'${member.object.text}[...]' call: the member key is not a proven verb; the verb is never assumed`,
+          location,
+        });
+        return;
+      }
+      if (VERB_METHODS.has(verb)) {
+        const method = VERB_METHODS.get(verb) ?? 'GET';
+        // Instance baseURL joining: a modeled `axios.create` creation with a
+        // proven literal baseURL joins into the emitted path (fetch has no
+        // instance and never joins).
+        const baseURL = table.instanceBaseURL(objectName, file);
+        extractClientCall(call, objectName, method, true, file, config, table, calls, unresolved, location, baseURL, reads);
+        return;
+      }
+      // A proven non-verb member (`.request`, `.interceptors`, ...) falls
+      // through exactly as a property access always has.
     }
   }
   // axios(url[, config]) / axios.request(config) / instance(config)
@@ -1247,14 +1276,13 @@ function extractCall(
     configCall = call;
     framework = expression.text;
   } else if (
-    ts.isPropertyAccessExpression(expression) &&
-    ts.isIdentifier(expression.expression) &&
-    expression.name.text === 'request' &&
-    (expression.expression.text === 'axios' ||
-      clientSymbolActiveIn(config, expression.expression.text, file))
+    member !== undefined &&
+    member.name === 'request' &&
+    (member.object.text === 'axios' ||
+      clientSymbolActiveIn(config, member.object.text, file))
   ) {
     configCall = call;
-    framework = expression.expression.text;
+    framework = member.object.text;
   }
   if (configCall !== null && framework !== null) {
     const baseURL = table.instanceBaseURL(framework, file);
@@ -2539,6 +2567,30 @@ class ValueTable {
     return alias?.kind === 'client' ? alias.name : use.text;
   }
 
+  /**
+   * The member a client call reads on an identifier receiver:
+   * `client.put` names the verb, and `client[key]` names it only when
+   * `key` is a proven string scalar other than the 'unknown' sentinel —
+   * an unproven key returns `undefined` so no verb is ever assumed. No
+   * prop bindings are passed, so a parameter key never resolves.
+   */
+  clientMember(
+    expression: ts.Expression,
+    file: string,
+  ): { object: ts.Identifier; name: string | undefined } | undefined {
+    if (ts.isPropertyAccessExpression(expression) && ts.isIdentifier(expression.expression)) {
+      return { object: expression.expression, name: expression.name.text };
+    }
+    if (ts.isElementAccessExpression(expression) && ts.isIdentifier(expression.expression)) {
+      const proven = this.provenScalar(expression.argumentExpression, file, undefined, new Set());
+      return {
+        object: expression.expression,
+        name: proven !== 'unknown' && typeof proven === 'string' ? proven : undefined,
+      };
+    }
+    return undefined;
+  }
+
   /** A function named `name` visible from `file`: same file, or a relative import including default. */
   findFunction(name: string, file: string): { fn: UrlFunction; file: string } | undefined {
     const own = this.modelOf(file)?.functions.get(name);
@@ -3400,6 +3452,91 @@ function resolveExtendedWrapper(
   }
 }
 
+/**
+ * True when `key` — the element-access verb key inside `fn`'s body — is
+ * bound ONLY by a `const` object-binding element reading the `method`
+ * property off `optionName`, an identifier parameter of `fn`. That is
+ * the one shape where the call-site verb provably flows into the key;
+ * a parameter, a computed initializer, a rest element as the binding,
+ * or any second binding of the name never does.
+ */
+function isMethodOptionKey(key: ts.Expression, fn: UrlFunction, optionName: string): boolean {
+  if (fn.body === undefined || !ts.isIdentifier(key)) return false;
+  const parameter = fn.parameters.find(
+    (candidate) => ts.isIdentifier(candidate.name) && candidate.name.text === optionName,
+  );
+  if (parameter === undefined) return false;
+  let proven = false;
+  let other = false;
+  const bindsKey = (name: ts.BindingName): boolean => {
+    if (ts.isIdentifier(name)) return name.text === key.text;
+    return name.elements.some((element) => ts.isBindingElement(element) && bindsKey(element.name));
+  };
+  const bindsTarget = (target: ts.Expression): boolean => {
+    if (ts.isIdentifier(target)) return target.text === key.text;
+    if (ts.isArrayBindingPattern(target) || ts.isObjectBindingPattern(target)) {
+      return target.elements.some((element) => ts.isBindingElement(element) && bindsKey(element.name));
+    }
+    return false;
+  };
+  const visit = (node: ts.Node): void => {
+    if (other) return;
+    if (ts.isVariableDeclaration(node) && bindsKey(node.name)) {
+      const element = ts.isObjectBindingPattern(node.name)
+        ? node.name.elements.find(
+            (candidate): candidate is ts.BindingElement =>
+              ts.isBindingElement(candidate) &&
+              !candidate.dotDotDotToken &&
+              ts.isIdentifier(candidate.name) &&
+              candidate.name.text === key.text &&
+              (candidate.propertyName === undefined
+                ? candidate.name.text === 'method'
+                : ts.isIdentifier(candidate.propertyName) && candidate.propertyName.text === 'method'),
+          )
+        : undefined;
+      const list = node.parent;
+      if (
+        !proven &&
+        element !== undefined &&
+        ts.isVariableDeclarationList(list) &&
+        (list.flags & ts.NodeFlags.Const) !== 0 &&
+        node.initializer !== undefined &&
+        ts.isIdentifier(node.initializer) &&
+        node.initializer.text === optionName
+      ) {
+        proven = true;
+        return;
+      }
+      other = true;
+      return;
+    }
+    if (ts.isParameter(node) && node !== parameter && bindsKey(node.name)) {
+      other = true;
+      return;
+    }
+    if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+      node.operatorToken.kind <= ts.SyntaxKind.LastAssignment &&
+      bindsTarget(node.left)
+    ) {
+      other = true;
+      return;
+    }
+    if (
+      (ts.isForOfStatement(node) || ts.isForInStatement(node)) &&
+      ts.isIdentifier(node.initializer) &&
+      node.initializer.text === key.text
+    ) {
+      other = true;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(fn.body);
+  return proven && !other;
+}
+
 function wrapperBodyTargets(
   fn: UrlFunction,
   fnFile: string,
@@ -3424,6 +3561,15 @@ function wrapperBodyTargets(
     const client = clientCallOf(node, config, fnFile, table, bindings);
     if (client !== undefined) {
       saw = true;
+      if (client.dynamicKey !== undefined) {
+        // An element-access verb key is proven only by the methodOption
+        // shape: the body destructures that option's `method` property
+        // into the key. Anything else fails the body — never a guess.
+        if (entry.methodOption === undefined || !isMethodOptionKey(client.dynamicKey, fn, entry.methodOption)) {
+          failed = true;
+          return;
+        }
+      }
       if (entry.methodOption !== undefined) {
         // The verb comes from the call site: the body's verbs are
         // branches of the dispatch on that option, not contradictions.
@@ -4384,7 +4530,7 @@ function clientCallOf(
   file: string,
   table: ValueTable,
   bindings?: ExprBinding,
-): { url: ts.Expression; method: HttpMethod | null } | undefined {
+): { url: ts.Expression; method: HttpMethod | null; dynamicKey?: ts.Expression } | undefined {
   const expression = call.expression;
   if (ts.isIdentifier(expression) && expression.text === 'fetch' && !table.shadowsGlobalFetch(expression)) {
     const url = call.arguments[0];
@@ -4406,14 +4552,20 @@ function clientCallOf(
     if (resolved.kind === 'unproven') return { url, method: null };
     return { url, method: resolved.kind === 'proven' ? resolved.method : 'GET' };
   }
-  if (!ts.isPropertyAccessExpression(expression) || !ts.isIdentifier(expression.expression)) return undefined;
-  const objectName = table.configuredClientName(expression.expression, file);
-  const verb = expression.name.text.toLowerCase();
-  if (!(objectName === 'axios' || clientSymbolActiveIn(config, objectName, file)) || !VERB_METHODS.has(verb)) {
-    return undefined;
-  }
+  const member = table.clientMember(expression, file);
+  if (member === undefined) return undefined;
+  const objectName = table.configuredClientName(member.object, file);
+  if (!(objectName === 'axios' || clientSymbolActiveIn(config, objectName, file))) return undefined;
   const url = call.arguments[0];
   if (url === undefined) return undefined;
+  if (member.name === undefined) {
+    // The element key is not a proven verb: the wrapper-body model may
+    // prove it through the call-site method option — never a guess.
+    const key = ts.isElementAccessExpression(expression) ? expression.argumentExpression : undefined;
+    return key !== undefined ? { url, method: null, dynamicKey: key } : undefined;
+  }
+  const verb = member.name.toLowerCase();
+  if (!VERB_METHODS.has(verb)) return undefined;
   return { url, method: VERB_METHODS.get(verb) ?? 'GET' };
 }
 
