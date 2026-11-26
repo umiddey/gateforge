@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.23.0
+
+- **Added: `typeof` URL guards fold.** A URL written
+  `typeof x === 'function' ? x(args) : x` resolves to `x` when the scan
+  proves every value of `x` is a string target with no unproven hole;
+  an arrow, an unresolvable name or an unproven hole keeps the guard
+  fail-closed as before.
+- **Changed: `client[key](...)` calls are scanned.** A parameter or any
+  declaration in the enclosing function (including a hoisted `var`) no
+  longer resolves to a same-named outer constant, a `const` no longer
+  resolves outside the block or loop that declares it, and a module
+  `let`/`var` (imported or same-file) no longer resolves to its
+  initializer. Repositories with such code can see new blocking
+  findings (fail closed).
+
 ## 0.22.1
 
 - **Fixed: `test-gates --scope changed` refuses with exit 2 when the change

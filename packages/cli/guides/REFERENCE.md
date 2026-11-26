@@ -2217,6 +2217,30 @@ direct call sites:
           method: POST
           methodOption: options
   ```
+- **`typeof` URL guards.** A URL written
+  `typeof x === 'function' ? x(args) : x` takes `x` as the target only
+  when the scan proves every value of `x` is a string target with no
+  unproven hole. An arrow function, an unresolvable name, a parameter,
+  or a template with an unproven hole keeps the guard unproven — fail
+  closed, exactly as before. The same shadowing rules the whole client
+  scan applies hold here: a parameter, or any declaration in the
+  enclosing function (a function, class, `var`, `let` or `const`, a
+  destructured local, a hoisted `var` after the use), never resolves to
+  an outer constant; a `const` resolves only inside the block or loop
+  that declares it; and a module `let`/`var`, imported or not, never
+  resolves to its initializer.
+- **Element-access client calls.** A call through `client[key](...)`
+  on an identifier receiver (a configured client symbol, or `axios`)
+  is read like the property call `client.<key>(...)`: a literal key, or
+  a constant the scan resolves to one — a parameter never resolves — is
+  the verb, and so is a declared `methodOption` wrapper's `method` when
+  the key is destructured from the option parameter and only the key's
+  own binding is a plain `const { method } = options` element (a
+  `...rest` sibling is allowed); the call-site verb then applies. Any
+  other key is a blocking finding: `HTTP_METHOD_DYNAMIC` on the direct
+  call, `FRONTEND_CALL_TARGET_UNRESOLVED` at the call site of a
+  declared wrapper. A function containing such a call counts as a
+  client wrapper.
 
 ## Migrating to 0.11
 
