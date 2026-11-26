@@ -67,7 +67,7 @@ first commands; the guides cover the walks:
 | `gateforge obligations [--json]` | Evaluate policies against the automatically classified graph and dump obligations, blocking entries, and claim assessments. | 0/1/2 |
 | `gateforge check [--changed] [--staged] [--candidate-commit <sha>] [--require-e2e] [--timing] [--no-cache] [--format text\|json\|sarif]` | The full gate: discover → classify → obligations → claims → verdicts → report. `--timing` appends per-step wall-clock timings (detectors, test collection, TS scan, planning, total) — an additive report key in json and one line in text, never an input to any verdict. Detector and pytest-collection results are cached under the excluded run-state dir. Detector keys include plugin config, the bytes of the module that will execute (for package specifiers the CLI's own installed copy — the one Node actually loads — never the repository's `node_modules` copy; an unresolvable or unreadable executed module leaves the detector uncacheable), Python import environment, inputs, interpreter packages, and Gateforge engine version; pytest keys include all Python/config file bytes, collector argv/environment, interpreter identity, and engine version. Unchanged successful pytest collections reuse their node ids; any changed Python byte recollects. Any uncertainty runs fresh. The report carries additive `cache: {hits, misses}` counts. `--no-cache` (or `GATEFORGE_NO_CACHE=1`, or a CI environment) disables cache reads and writes. | 0 clean/waived, 1 unresolved, 2 config/usage error |
 
-| `gateforge test-gates [--changed] [--scope full\|changed] [--progress stderr\|file:<path>\|off] [--result-only] [--suite <cmd>] [--out <dir>] [--format F] [--witness-url <url>] [--run-token <token>]` | The progress stream (additive, `--progress`, or the `run.progress` config key) prints the registered expected-set size, one line per finished test with exact `N/M` counters and the catalog title, an alive line per quiet minute, and the finish line before grading. It is built from witness-side facts only and never from runner output; a failing test's first error line passes a credential guard and is replaced whole when it matches, and the full guarded diagnosis lands in `.gateforge/test-gates/failures.json`. `auto` (the default) is stderr under `CI=true` and off locally. The stream is not evidence and no gate reads it. Supervised `--changed` plans and runs mapped Playwright tests through the trusted adapter, checks planned/executed completeness, and seals an authenticated receipt only after complete success. `--scope changed` limits a sealed slice to obligations affected by changed files; incomplete mappings block, and `check --require-e2e` accepts it only when it covers every currently changed obligation. `--result-only` requires `--changed --scope changed`, reports selected results plus repository debt, and has no gate authority: without an external witness it uses private temporary state; with `--witness-url` it requires `--out` + `--run-token` shared with the external witness in a separate state directory (not the configured authoritative state directory). It never creates or clears a receipt. `--suite` remains legacy and cannot combine with `--changed` or redefine strict expected cases. Verifier keys use `GATEFORGE_WITNESS_VERIFIER_KEY` or the external key ring selected by `GATEFORGE_WITNESS_VERIFIER_KEY_FILE`. | 0/1/2 (suite failure forces 1) |
+| `gateforge test-gates [--changed] [--scope full\|changed] [--progress stderr\|file:<path>\|off] [--result-only] [--suite <cmd>] [--out <dir>] [--format F] [--witness-url <url>] [--run-token <token>]` | The progress stream (additive, `--progress`, or the `run.progress` config key) prints the registered expected-set size, one line per finished test with exact `N/M` counters and the catalog title, an alive line per quiet minute, and the finish line before grading. It is built from witness-side facts only and never from runner output; a failing test's first error line passes a credential guard and is replaced whole when it matches, and the full guarded diagnosis lands in `.gateforge/test-gates/failures.json`. `auto` (the default) is stderr under `CI=true` and off locally. The stream is not evidence and no gate reads it. Supervised `--changed` plans and runs mapped Playwright tests through the trusted adapter, checks planned/executed completeness, and seals an authenticated receipt only after complete success. `--scope changed` limits a sealed slice to obligations affected by changed files; incomplete mappings block, and `check --require-e2e` accepts it only when it covers every currently changed obligation. `--scope changed` on a change set that maps to no runnable slice refuses with exit 2 — nothing was executed, no receipt was sealed, and the previous receipt is invalidated; a docs-only changed set still seals the zero-record docs-only receipt. `--result-only` requires `--changed --scope changed`, reports selected results plus repository debt, and has no gate authority: without an external witness it uses private temporary state; with `--witness-url` it requires `--out` + `--run-token` shared with the external witness in a separate state directory (not the configured authoritative state directory). It never creates or clears a receipt. `--suite` remains legacy and cannot combine with `--changed` or redefine strict expected cases. Verifier keys use `GATEFORGE_WITNESS_VERIFIER_KEY` or the external key ring selected by `GATEFORGE_WITNESS_VERIFIER_KEY_FILE`. | 0/1/2 (suite failure forces 1) |
 | `gateforge test-gates --chaos <seed> --result-only` | Timing chaos (additive, opt-in, E63): the witness observation proxy releases proxied app RESPONSES on a schedule derived from `<seed>` — a delay in `[0, maxDelayMs]` per response, and, for requests sharing a route key inside one test session, the option of releasing a later response before an earlier one. Only timing changes; bytes, status, headers and evidence semantics never do. The schedule is a pure function of (seed, session identity, route key, k), so the same seed replays it exactly, and the report plus the sealed execution result carry `chaos: { seed, maxDelayMs, reorder, schedule }` (route key = method + pathname, query stripped) with the text line `timing chaos: seed <n>`. Accepted only with `--result-only`: a chaos run finds races, it never seals a receipt. `run.chaos: { maxDelayMs, reorder }` tunes the bounds of a witness the run spawns itself (default 400 ms, reorder on) and never enables chaos by itself — without the flag every run, report and execution result is byte-identical to before. With `--witness-url` nothing is configured on the witness side: the plan travels with the supervisor-authenticated run-context binding (`options.chaos`), which the witness applies before the first session opens, so `run.chaos` tunes the bounds in both cases. A NORMAL run against a witness that was itself started with `GATEFORGE_CHAOS_SEED` exits 2 before any test runs, naming the variable to unset (a perturbed witness can never seal), and a witness too old to accept run options is refused for `--chaos` rather than reporting a schedule it never applied. A normal run against a witness with no plan — including one too old to have the route — is byte-identical to before. A seed that is not a non-negative integer exits 2 with one plain line. |
 | `enforcement.twinPaths` (with `enforcement.twinQueryKeys`) | Twin path coverage (additive, opt-in, E64): links a raw test and its witnessed twin — by `twinOf` in `.gateforge/test-map.yml` or by the title convention `X [witnessed]` next to `X raw` (or the one `X raw: <description>`) — and compares the REQUEST SHAPES each side exercised (method, route template, and the values of the allowlisted query keys; never a URL, a body or a non-allowlisted value). A pair that disagrees is reported as `TWIN_PATH_DIVERGENT`, naming both tests and the exact differing value; `advisory` reports it and leaves the exit code alone, `block` makes it a blocking entry (exit 1). The raw twin's session is marked OBSERVATION-ONLY engine-side, so every submission from it is refused with 403: it can issue no record, no attestation and satisfy nothing, and contributes only its shapes. Absent (or set with no pair linked), nothing is wired, no state file is written and the report is byte-identical. With `--witness-url` the shape plan travels with the run-context binding (`options.twinShapes`: the allowlist and the route inventory as templates), so a repository's own witness needs no twin environment; a witness too old to accept run options records nothing and the run says so in one line instead of reporting twins that agree because nobody looked. |
 | `gateforge broker commit --workspace <dir> --message <msg> [--receipt <path>] [--ref <ref>]` | Managed-mode commit broker (MECHANISM, not deployment): snapshots the workspace bytes into a throwaway index, recomputes the input + trusted-policy digests, verifies a valid non-stale gate receipt for EXACTLY those bytes, then creates the commit via compare-and-swap `git update-ref`. Typed rejections (`ENFORCEMENT_UNTRUSTED` / `EVIDENCE_STALE` / `RUN_INCOMPLETE` / `KEY_UNKNOWN` / `BROKER_CAS_MISMATCH` / `BROKER_UNSAFE_MESSAGE`); symlinks/submodules are typed rejections. Verifier keys use either supported environment source; the key file must be outside authority, workspace, and receipt artifact roots. | 0/2 |
@@ -1034,6 +1034,39 @@ An unreadable receipt, an unreadable tree listing, or any difference falls
 back to the previous, stricter test: the receipt's candidate tree id must
 equal the frozen index tree.
 
+**Three scopes, three different file sets.** They do not contradict each
+other; each names its own scope. This documents the existing contract and
+changes nothing about what counts as proof; the maintainer approved it.
+
+1. The CANDIDATE TREE binds every regular file in the workspace, gitignored
+   bytes included (the paragraph above).
+2. The INPUT DIGEST binds tracked files, non-ignored untracked files and the
+   configured scan inputs.
+3. The DETECTOR-INPUT walk skips gitignored files.
+
+Because scope 1 includes gitignored bytes, a suite that writes into the tree
+during a run changes the candidate tree. `test-gates` takes a result snapshot
+after the run and fails closed with "the workspace changed during the run"
+when the tree differs. Test-tool caches are the usual cause: pytest writes
+`.pytest_cache`, and Python writes `__pycache__`. They are NOT excluded from
+the candidate tree, because excluding them would change the bytes every
+sealed receipt binds.
+
+To keep a Python suite from writing them, set two variables on the one
+`test-gates` command line only (not in project config, not in the
+repository):
+
+```sh
+PYTEST_ADDOPTS='-p no:cacheprovider' PYTHONDONTWRITEBYTECODE=1 gateforge test-gates ...
+```
+
+If `PYTEST_ADDOPTS` is already set, prepend `-p no:cacheprovider` to its
+value. `-p no:cacheprovider` alone still leaves `__pycache__`, so both
+variables are needed. `test-gates` passes the ambient environment to the
+suite, so both reach pytest. The recipe covers pytest and Python bytecode
+only; other tool caches (`.mypy_cache`, `.ruff_cache`) are bound the same
+way and are not covered.
+
 **Receipts (the strict saved-state gate).** `check --require-e2e` accepts
 only an authenticated gate receipt sealed by a COMPLETE supervised run for
 the current input digest and trusted policy digest:
@@ -1201,7 +1234,7 @@ else):
 | `persistence:create\|read\|update\|delete` | AVAILABLE — engine-observed same-entity persistence reads with the exact-value echo requirement (`EVIDENCE_VALUE_MISMATCH` on a mismatched echo, even when the status was 2xx) |
 | `http:request-observed`, `http:response-status-ok` | AVAILABLE — engine browser, or the Observe channel for tests mapped `observed-e2e` (an exchange the witness proxied in the test's own session; test attribution is suite-claimed). The engine path grades FIRST and its verdict is final: a `satisfied` grade keeps its own record ids, and an `invalid` one (a witnessed exchange of a different endpoint, a non-2xx response) is an engine-found error no second channel may mask. The Observe channel is consulted only when the engine path found nothing. Route attribution over the compiled inventory resolves a literal-vs-parameter overlap by the framework's OWN registration order when the FastAPI detector proved it (one app, distinct orders, no typed `{n:int}`-style convertor ordered ahead of the field): the smallest order is the serving route, so the literal declared first satisfies its own claim and grades the parameter route's claim `invalid` (and vice versa). Every other overlap — routes of different apps, a position the detector could not prove, a typed convertor in front — stays the `ambiguous route attribution` blocker it always was |
 | `http:frontend-request-observed` | UNAVAILABLE — no independent browser/test attribution channel; explicit selection remains blocking `missing` with `VERIFIER_UNSUPPORTED` |
-| `crud:*` (UI-semantic) | FAIL-CLOSED — the tested suite owns the browser; use `persistence:*` |
+| `crud:*` (UI-semantic) | AVAILABLE — ENGINE BROWSER ONLY: graded from the engine-owned browser drive's engine-observed `ui.action` anchor plus the witnessed session exchange, session-bound visible result, and persistence echo; a suite-posted `ui.action` never earns browser credit (grades `invalid`, GF-23) |
 | `http:effect-verified`, `http:read-result-verified` | AVAILABLE (behavior-case channel) — graded across the approved required cases with witness-issued `behavior.case` records; needs a compiled `behaviorPolicy` requirement set |
 | `auth:*`, `validation:*`, `task:*`, `webhook:*`, `workflow:*` | AVAILABLE (behavior-case channel) — same required-case aggregation over engine-controlled requests with independent state scopes. A repository that declares no case for the obligation stays blocking `missing`: the grader never falls back to transport evidence |
 
@@ -2715,6 +2748,7 @@ hashed identity:
   happened — the suite owns the browser and holds the run token. These
   records are stamped `trust: 'claimed'` at issuance and only ANCHOR a
   claim (entity + operation).
+  A suite-posted `ui.action` therefore never satisfies anything by itself — the satisfaction weight is always the witnessed engine-observed record (the persistence read, the session exchange, or the witnessed page visit), and on UI-semantic `crud:*` a claimed-tier action cannot even anchor: it grades `invalid`.
 - `engine-observed` (`persistence.entity`, stamped by the witness from
   its own adapter read): the only `trust: 'witnessed'` origin. This is
   where `satisfied` is earned — the engine requires a witnessed
@@ -2738,11 +2772,12 @@ echo fails the obligation with `EVIDENCE_VALUE_MISMATCH` even when the
 status was 2xx. Primitive receipts are frozen and branded — hand-rolled
 forgeries fail closed (GF-22).
 
-**UI-semantic `crud:*` contracts fail closed (audit round 5).** The suite
-still owns the browser, so a claimed UI action cannot be verified at the
-DOM level; the namespace advertises no gradable contract. The gradable
-surface is the lifecycle-gated `persistence:*` namespace, graded on the
-witness's OWN engine-side observation
+**UI-semantic `crud:*` contracts grade through the engine-owned browser
+drive (audit round 5).** They require the engine-observed `ui.action`
+anchor, the witnessed session exchange, the session-bound visible result,
+and the persistence echo. Suite-submitted UI records never earn browser
+credit (GF-23). The `persistence:*` namespace is the lifecycle-gated
+surface, graded on the witness's OWN engine-side observation
 (`{resourceId, entityId, found, fields, before}`) with expectations that
 NEVER come from the tested suite:
 
