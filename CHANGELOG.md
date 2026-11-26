@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.24.0
+
+- **Fixed: an untrusted-reachability block names the file.** An
+  `INCOMPLETE_PROOF_SCOPE` caused by a reachability signal outside its
+  category's `patterns` lists each such signal as
+  `<category> at <file:line>` with the trusted patterns, and its
+  locations hold only those signals. It used to print the category, which
+  also read as trusted.
+- **Fixed: a `hidden` resource is proven through an endpoint whose id the
+  classifier resolves.** An approved behavior declaration now counts for
+  an endpoint that gets its plane (and so its id) only in classification;
+  before, its hidden table stayed `INCOMPLETE_PROOF_SCOPE`.
+- **Added: `op.bulk_insert(X, ...)` with a local `table("name")` binding
+  is a writer.** `X` (also in `insert(X)`, `update(X)`, `delete(X)`) may
+  be a name bound once in the same function to `table("name")`. A
+  parameter or local assignment that reuses a model's name no longer
+  resolves to that model.
+- **Added: a literal write on a DBAPI cursor is a writer.**
+  `cur.execute("<literal INSERT/UPDATE/DELETE>")` counts when `cur` is
+  bound exactly once in its scope to `X.cursor()` (assignment or
+  `with ... as cur`). `executemany`, a cursor passed in as a parameter and
+  `conn.execute(...)` give no signal. The two new writers can add
+  reachability signals, and so internal certificates, on existing code.
+
 ## 0.23.0
 
 - **Added: `typeof` URL guards fold.** A URL written
