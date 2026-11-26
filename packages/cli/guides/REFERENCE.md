@@ -1234,7 +1234,7 @@ else):
 | `persistence:create\|read\|update\|delete` | AVAILABLE — engine-observed same-entity persistence reads with the exact-value echo requirement (`EVIDENCE_VALUE_MISMATCH` on a mismatched echo, even when the status was 2xx) |
 | `http:request-observed`, `http:response-status-ok` | AVAILABLE — engine browser, or the Observe channel for tests mapped `observed-e2e` (an exchange the witness proxied in the test's own session; test attribution is suite-claimed). The engine path grades FIRST and its verdict is final: a `satisfied` grade keeps its own record ids, and an `invalid` one (a witnessed exchange of a different endpoint, a non-2xx response) is an engine-found error no second channel may mask. The Observe channel is consulted only when the engine path found nothing. Route attribution over the compiled inventory resolves a literal-vs-parameter overlap by the framework's OWN registration order when the FastAPI detector proved it (one app, distinct orders, no typed `{n:int}`-style convertor ordered ahead of the field): the smallest order is the serving route, so the literal declared first satisfies its own claim and grades the parameter route's claim `invalid` (and vice versa). Every other overlap — routes of different apps, a position the detector could not prove, a typed convertor in front — stays the `ambiguous route attribution` blocker it always was |
 | `http:frontend-request-observed` | UNAVAILABLE — no independent browser/test attribution channel; explicit selection remains blocking `missing` with `VERIFIER_UNSUPPORTED` |
-| `crud:*` (UI-semantic) | FAIL-CLOSED — the tested suite owns the browser; use `persistence:*` |
+| `crud:*` (UI-semantic) | AVAILABLE — ENGINE BROWSER ONLY: graded from the engine-owned browser drive's engine-observed `ui.action` anchor plus the witnessed session exchange, session-bound visible result, and persistence echo; a suite-posted `ui.action` never earns browser credit (grades `invalid`, GF-23) |
 | `http:effect-verified`, `http:read-result-verified` | AVAILABLE (behavior-case channel) — graded across the approved required cases with witness-issued `behavior.case` records; needs a compiled `behaviorPolicy` requirement set |
 | `auth:*`, `validation:*`, `task:*`, `webhook:*`, `workflow:*` | AVAILABLE (behavior-case channel) — same required-case aggregation over engine-controlled requests with independent state scopes. A repository that declares no case for the obligation stays blocking `missing`: the grader never falls back to transport evidence |
 
@@ -2748,6 +2748,7 @@ hashed identity:
   happened — the suite owns the browser and holds the run token. These
   records are stamped `trust: 'claimed'` at issuance and only ANCHOR a
   claim (entity + operation).
+  A suite-posted `ui.action` therefore never satisfies anything by itself — the satisfaction weight is always the witnessed engine-observed record (the persistence read, the session exchange, or the witnessed page visit), and on UI-semantic `crud:*` a claimed-tier action cannot even anchor: it grades `invalid`.
 - `engine-observed` (`persistence.entity`, stamped by the witness from
   its own adapter read): the only `trust: 'witnessed'` origin. This is
   where `satisfied` is earned — the engine requires a witnessed
@@ -2771,11 +2772,12 @@ echo fails the obligation with `EVIDENCE_VALUE_MISMATCH` even when the
 status was 2xx. Primitive receipts are frozen and branded — hand-rolled
 forgeries fail closed (GF-22).
 
-**UI-semantic `crud:*` contracts fail closed (audit round 5).** The suite
-still owns the browser, so a claimed UI action cannot be verified at the
-DOM level; the namespace advertises no gradable contract. The gradable
-surface is the lifecycle-gated `persistence:*` namespace, graded on the
-witness's OWN engine-side observation
+**UI-semantic `crud:*` contracts grade through the engine-owned browser
+drive (audit round 5).** They require the engine-observed `ui.action`
+anchor, the witnessed session exchange, the session-bound visible result,
+and the persistence echo. Suite-submitted UI records never earn browser
+credit (GF-23). The `persistence:*` namespace is the lifecycle-gated
+surface, graded on the witness's OWN engine-side observation
 (`{resourceId, entityId, found, fields, before}`) with expectations that
 NEVER come from the tested suite:
 
