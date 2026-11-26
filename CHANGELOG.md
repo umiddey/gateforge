@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.22.0
+
+- **Added: wrapper verb from a call-site `method` option.**
+  `scan.httpClients.wrapperFunctions[].methodOption` names the wrapper
+  parameter whose `method` property carries the verb. A literal is the
+  verb, a missing option is the entry's `method`, and anything else is
+  `HTTP_METHOD_DYNAMIC`. Existing entries are unaffected.
+
 ## 0.21.1
 
 - **Fixed: pack-sqlalchemy discover waits up to 10 minutes before the plugin is killed.**

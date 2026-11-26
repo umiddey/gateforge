@@ -2161,6 +2161,29 @@ direct call sites:
   exactly as before them. A JSX wrapper usage
   binds the wrapper's first parameter when no `parameter` is
   configured, the same contract the direct call path applies.
+- **Wrapper verb from a call-site option.** A `wrapperFunctions` entry
+  with `methodOption: <parameter>` takes its verb from the `method`
+  property of the object its caller passes for that parameter. A literal
+  verb (or a constant the scan resolves to one, spreads following
+  JavaScript's last-writer-wins order) is the call's verb. A call site
+  that passes no such object, or one provably without `method`, gets the
+  entry's `method`, which is required with `methodOption`. Anything
+  else, such as a prop, a parameter or a computed value, is
+  `HTTP_METHOD_DYNAMIC` with no call record. The wrapper body's own verb
+  branches (`x === 'delete' ? client.delete(...) : client[x](...)`) are
+  not read for the verb. A JSX usage, or a call from inside another
+  declared wrapper, has no modeled call-site option and fails closed.
+  `methodOption` and `methodFromBody` exclude each other:
+
+  ```yaml
+  scan:
+    httpClients:
+      wrapperFunctions:
+        - name: useSend
+          parameter: endpoint
+          method: POST
+          methodOption: options
+  ```
 
 ## Migrating to 0.11
 

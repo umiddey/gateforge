@@ -110,6 +110,12 @@ export interface WrapperFunctionConfig extends ClientSymbolScoping {
    * Required when one wrapper issues more than one verb.
    */
   methodFromBody?: boolean;
+  /**
+   * The wrapper parameter whose object carries the call-site `method`
+   * option; {@link method} is then the default verb for a call site
+   * that passes none. Excludes {@link methodFromBody}.
+   */
+  methodOption?: string;
 }
 
 /** A configured pure URL builder: `name` + optional base + scoping. */
@@ -138,8 +144,10 @@ export interface ClientScanConfig {
   /** Instance symbols exposing verb methods, e.g. `['apiClient']`. */
   clientSymbols?: ReadonlyArray<string | ClientSymbolConfig>;
   /**
-   * Wrapper callables: `name` plus the concrete method the wrapper
-   * always issues (wrappers with computed methods stay unresolved).
+   * Wrapper callables: `name` plus a verb source — the concrete method
+   * the wrapper always issues, one verb per body call (`methodFromBody`),
+   * or the call-site `method` option (`methodOption`, defaulting to
+   * `method`). Wrappers with computed methods stay unresolved.
    */
   wrapperFunctions?: ReadonlyArray<WrapperFunctionConfig>;
   /** Pure URL builders with an optional literal base they prepend. */
@@ -1254,8 +1262,26 @@ function extractCall(
   // with the callsite's first argument substituted for the parameter,
   // method from configuration. Anything else is typed unresolved — a
   // first-arg-only guess could join the wrong route.
-  const wrapperConfig = ts.isIdentifier(expression) ? activeWrapperIn(config, expression.text, file) : undefined;
+  let wrapperConfig = ts.isIdentifier(expression) ? activeWrapperIn(config, expression.text, file) : undefined;
   if (wrapperConfig !== undefined) {
+    if (wrapperConfig.methodOption !== undefined) {
+      const declared = table.findFunction(wrapperConfig.name, file);
+      const optionArgument = declared === undefined
+        ? undefined
+        : argumentForParameter(declared.fn, wrapperConfig.methodOption, call);
+      if (optionArgument !== undefined) {
+        const verdict = table.optionsMethod(optionArgument, file);
+        if (verdict.kind === 'unproven') {
+          unresolved.push({
+            code: HTTP_METHOD_DYNAMIC,
+            detail: `wrapper '${wrapperConfig.name}' call-site method option is not a literal verb; the verb is never assumed`,
+            location,
+          });
+          return;
+        }
+        if (verdict.kind === 'proven') wrapperConfig = { ...wrapperConfig, method: verdict.method };
+      }
+    }
     const wrapperModel = table.modelOf(file)?.wrappers.get(wrapperConfig.name);
     if (wrapperModel === undefined) {
       if (resolvesToDeclaredWrapper(table, wrapperConfig.name, file, config)) {
@@ -3193,6 +3219,18 @@ function extractJsxWrapper(
   if (!ts.isIdentifier(node.tagName)) return;
   const wrapperConfig = activeWrapperIn(config, node.tagName.text, file);
   if (wrapperConfig === undefined || !resolvesToDeclaredWrapper(table, wrapperConfig.name, file, config)) return;
+  if (wrapperConfig.methodOption !== undefined) {
+    // A JSX usage carries no modeled call-site option: fail closed,
+    // never the entry's default verb.
+    const dynamicSource = table.modelOf(file)?.source;
+    if (dynamicSource === undefined) return;
+    unresolved.push({
+      code: HTTP_METHOD_DYNAMIC,
+      detail: `wrapper '${wrapperConfig.name}' takes its verb from a call-site method option, which a JSX usage does not carry; the verb is never assumed`,
+      location: locationOf(file, dynamicSource, node),
+    });
+    return;
+  }
   const source = table.modelOf(file)?.source;
   if (source === undefined) return;
   const location = locationOf(file, source, node);
@@ -3307,7 +3345,10 @@ function wrapperBodyTargets(
     const client = clientCallOf(node, config, fnFile, table, bindings);
     if (client !== undefined) {
       saw = true;
-      if (entry.methodFromBody === true) {
+      if (entry.methodOption !== undefined) {
+        // The verb comes from the call site: the body's verbs are
+        // branches of the dispatch on that option, not contradictions.
+      } else if (entry.methodFromBody === true) {
         // The verb comes from the body: nothing provable means no call
         // fact — never an invented default.
         if (client.method === null) {
@@ -3328,14 +3369,21 @@ function wrapperBodyTargets(
       }
       // Surviving the checks above, a proven body verb equals the
       // declaration (or governs via methodFromBody); only an unproven
-      // body under a declared method reaches here as null.
-      const method: HttpMethod = client.method ?? entry.method;
+      // body under a declared method reaches here as null. With
+      // methodOption the call site governs, so the body verb is ignored.
+      const method: HttpMethod = entry.methodOption !== undefined ? entry.method : client.method ?? entry.method;
       for (const raw of targets) found.push({ method, raw });
       return;
     }
     const nestedName = ts.isIdentifier(node.expression) ? node.expression.text : undefined;
     const nested = nestedName === undefined ? undefined : activeWrapperIn(config, nestedName, fnFile);
     if (nested !== undefined && nested.name !== entry.name) {
+      if (nested.methodOption !== undefined) {
+        // A nested call site's option is not modeled: fail closed,
+        // never the entry's default verb.
+        failed = true;
+        return;
+      }
       saw = true;
       const innerFn = table.findFunction(nested.name, fnFile);
       if (innerFn === undefined) {
@@ -4328,8 +4376,12 @@ function parseEntryScoping(
  * Accepted shapes (phase 3 scan-scoping): `clientSymbols` entries are a
  * plain string (back-compat, unscoped) or `{ name, include?, exclude? }`;
  * `wrapperFunctions` / `urlBuilders` entries carry the same optional
- * include/exclude next to their existing `method` / `base` fields; the
- * top-level `clientScanRoots` / `serverScanRoots` arrays scope where
+ * include/exclude next to their existing `method` / `base` fields; a
+ * `wrapperFunctions` entry may also name a third verb source,
+ * `methodOption`: the verb comes from the call site's `method` option,
+ * `method` is the default for a call site that passes none, and
+ * `methodFromBody` is refused. The top-level `clientScanRoots` /
+ * `serverScanRoots` arrays scope where
  * client-call and server-route scanning apply at all. Consistent with the
  * pre-existing parser posture: unknown keys are ignored, non-array known
  * keys are ignored, but malformed ENTRY values throw (the wrapper verb
@@ -4382,11 +4434,16 @@ export function parseClientScanConfigDocument(section: unknown, at: string): Cli
         throw new Error(`invalid http client config: wrapper method must be a concrete verb at ${at}`);
       }
       const parameter = typeof record['parameter'] === 'string' ? record['parameter'] : undefined;
+      const methodOption = typeof record['methodOption'] === 'string' ? record['methodOption'] : undefined;
+      if (methodOption !== undefined && (record['method'] === undefined || methodFromBody)) {
+        throw new Error(`invalid http client config: wrapper '${String(record['name'])}' methodOption needs an explicit default method and excludes methodFromBody at ${at}`);
+      }
       return {
         name: String(record['name']),
         method,
         ...(methodFromBody ? { methodFromBody: true } : {}),
         ...(parameter === undefined ? {} : { parameter }),
+        ...(methodOption === undefined ? {} : { methodOption }),
         ...parseEntryScoping(record, 'wrapperFunctions', at),
       };
     });

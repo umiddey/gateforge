@@ -452,3 +452,150 @@ describe('client scan: runtime base-URL hosts in template URLs', () => {
     ]);
   });
 });
+
+const optionConfig = parseClientScanConfigDocument(
+  {
+    clientSymbols: ['client'],
+    wrapperFunctions: [
+      { name: 'useSend', method: 'POST', parameter: 'endpoint', methodOption: 'options' },
+      { name: 'useSendTwice', method: 'POST', parameter: 'endpoint' },
+      { name: 'SendButton', method: 'POST', parameter: 'endpoint', methodOption: 'options' },
+    ],
+  },
+  'test:client-method-option',
+);
+
+const sendHook = `
+  export function useSend(endpoint, options = {}) {
+    const { method = 'post', ...rest } = options;
+    return async (payload) => {
+      const path = endpoint;
+      const res = method === 'delete'
+        ? await client.delete(\`/api\${path}\`, { data: payload })
+        : await client[method](\`/api\${path}\`, payload);
+      return res.data;
+    };
+  }
+`;
+
+function scanSend(page: string) {
+  return scanWith(optionConfig, 'src/Page.jsx', { 'src/useSend.js': sendHook, 'src/Page.jsx': page });
+}
+
+describe('client scan: wrapper verb from a call-site method option', () => {
+  it('a literal method option at the call site is the verb', () => {
+    const result = scanSend(`
+      import { useSend } from './useSend';
+      export function Page() {
+        return useSend('/items', { method: 'put', onDone: () => {} });
+      }
+    `);
+    expect(result.unresolved).toEqual([]);
+    expect(result.calls).toEqual([expect.objectContaining({ method: 'PUT', rawPath: '/api/items' })]);
+  });
+
+  it('a constant method option resolves like a literal', () => {
+    const result = scanSend(`
+      import { useSend } from './useSend';
+      const VERB = 'patch';
+      export function Page() {
+        return useSend('/items', { method: VERB });
+      }
+    `);
+    expect(result.unresolved).toEqual([]);
+    expect(result.calls).toEqual([expect.objectContaining({ method: 'PATCH', rawPath: '/api/items' })]);
+  });
+
+  it('no method option takes the configured default verb', () => {
+    const result = scanSend(`
+      import { useSend } from './useSend';
+      export function Page() {
+        useSend('/items');
+        return useSend('/items', { onDone: () => {} });
+      }
+    `);
+    expect(result.unresolved).toEqual([]);
+    expect(result.calls).toEqual([
+      expect.objectContaining({ method: 'POST', rawPath: '/api/items' }),
+      expect.objectContaining({ method: 'POST', rawPath: '/api/items' }),
+    ]);
+  });
+
+  it('a body branch verb never adds a second call: delete at the call site is one DELETE', () => {
+    const result = scanSend(`
+      import { useSend } from './useSend';
+      export function Page() {
+        return useSend('/items', { method: 'delete' });
+      }
+    `);
+    expect(result.unresolved).toEqual([]);
+    expect(result.calls).toEqual([expect.objectContaining({ method: 'DELETE', rawPath: '/api/items' })]);
+  });
+
+  it('a non-literal method option is HTTP_METHOD_DYNAMIC and records no call', () => {
+    const result = scanSend(`
+      import { useSend } from './useSend';
+      export function Page({ kind, opts }) {
+        useSend('/items', { method: kind });
+        return useSend('/items', opts);
+      }
+    `);
+    expect(result.calls).toEqual([]);
+    expect(result.unresolved).toEqual([
+      expect.objectContaining({ code: HTTP_METHOD_DYNAMIC }),
+      expect.objectContaining({ code: HTTP_METHOD_DYNAMIC }),
+    ]);
+  });
+
+  it('a method-option wrapper called from another wrapper body fails closed, never the default', () => {
+    const result = scanWith(optionConfig, 'src/Page.jsx', {
+      'src/useSend.js': sendHook,
+      'src/useSendTwice.js': `
+        import { useSend } from './useSend';
+        export function useSendTwice(endpoint) {
+          return useSend(endpoint, { method: 'put' });
+        }
+      `,
+      'src/Page.jsx': `
+        import { useSendTwice } from './useSendTwice';
+        export function Page() {
+          return useSendTwice('/items');
+        }
+      `,
+    });
+    expect(result.calls).toEqual([]);
+    expect(result.unresolved).toEqual([expect.objectContaining({ code: FRONTEND_CALL_TARGET_UNRESOLVED })]);
+  });
+
+  it('a JSX usage of a method-option wrapper is HTTP_METHOD_DYNAMIC, never the default', () => {
+    const result = scanWith(optionConfig, 'src/Page.jsx', {
+      'src/SendButton.jsx': `
+        export function SendButton({ endpoint, options = {} }) {
+          const { method = 'post' } = options;
+          return <button onClick={() => method === 'delete'
+            ? client.delete(\`/api\${endpoint}\`)
+            : client[method](\`/api\${endpoint}\`)}>send</button>;
+        }
+      `,
+      'src/Page.jsx': `
+        import { SendButton } from './SendButton';
+        export function Page() {
+          return <SendButton endpoint="/items" options={{ method: 'put' }} />;
+        }
+      `,
+    });
+    expect(result.calls).toEqual([]);
+    expect(result.unresolved).toEqual([expect.objectContaining({ code: HTTP_METHOD_DYNAMIC })]);
+  });
+
+  it('methodOption needs an explicit default method and excludes methodFromBody', () => {
+    expect(() => parseClientScanConfigDocument(
+      { wrapperFunctions: [{ name: 'useSend', methodOption: 'options' }] },
+      'test:bad',
+    )).toThrow(/methodOption/);
+    expect(() => parseClientScanConfigDocument(
+      { wrapperFunctions: [{ name: 'useSend', method: 'POST', methodOption: 'options', methodFromBody: true }] },
+      'test:bad',
+    )).toThrow(/methodOption/);
+  });
+});

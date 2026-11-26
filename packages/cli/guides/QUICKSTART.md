@@ -24,11 +24,11 @@ Example for a React frontend, FastAPI backend, and SQLAlchemy data layer:
 
 ```sh
 npm i -D \
-  @gate-forge/cli@0.21.1 \
-  @gate-forge/pack-playwright@0.21.1 \
-  @gate-forge/pack-http@0.21.1 \
-  @gate-forge/pack-fastapi@0.21.1 \
-  @gate-forge/pack-sqlalchemy@0.21.1
+  @gate-forge/cli@0.22.0 \
+  @gate-forge/pack-playwright@0.22.0 \
+  @gate-forge/pack-http@0.22.0 \
+  @gate-forge/pack-fastapi@0.22.0 \
+  @gate-forge/pack-sqlalchemy@0.22.0
 ```
 
 Use the project-local `gateforge` binary from your npm script or add `node_modules/.bin` to your shell `PATH`. If the scan recommends other packs, add only the ones your code uses, at the same version. A mismatched Gateforge package contract can stop the CLI with exit code 2 and `GATEFORGE_PACKAGE_INCOMPATIBLE`.
