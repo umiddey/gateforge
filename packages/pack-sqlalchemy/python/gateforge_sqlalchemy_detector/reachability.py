@@ -441,6 +441,59 @@ class _Walker:
                 return True
         return False
 
+    def _is_functools_wraps(self, rel, dec):
+        """True for a ``functools.wraps(...)`` or ``wraps(...)`` decorator call, functools being the import."""
+        if not isinstance(dec, ast.Call):
+            return False
+        func = dec.func
+        if isinstance(func, ast.Attribute) and func.attr == "wraps" and isinstance(func.value, ast.Name):
+            ref = self.indexes[rel].imports.get(func.value.id)
+            return ref is not None and ref.level == 0 and ref.module == "functools" and ref.name is None
+        if isinstance(func, ast.Name):
+            ref = self.indexes[rel].imports.get(func.id)
+            return ref is not None and ref.level == 0 and ref.module == "functools" and ref.name == "wraps"
+        return False
+
+    def _decorator_bodies(self, rel, fdef, seen):
+        """Wrapper bodies that module-level decorators of ``fdef`` return and ``seen`` has not yet met.
+
+        ``@F(...)`` follows two nested returns (F returns D, D returns the wrapper); ``@F`` and
+        ``@mod.F`` follow one (F returns the wrapper). Each returning body is a single
+        ``return <name>`` of a def bound once in its own scope; each returned def may carry
+        only ``functools.wraps`` decorators. Anything else yields no edge.
+        """
+        bodies = []
+        for dec in fdef.decorator_list:
+            factory = isinstance(dec, ast.Call)
+            callee = self._callee(rel, dec if factory else ast.Call(func=dec, args=[], keywords=[]))
+            if callee is None:
+                continue
+            frel, fname = callee
+            outer, scope = None, self.funcs[frel][fname]
+            for _ in range(2 if factory else 1):
+                own = list(_own_nodes(scope.body))
+                returns = [node for node in own if isinstance(node, ast.Return)]
+                if len(returns) != 1 or not isinstance(returns[0].value, ast.Name):
+                    break
+                name = returns[0].value.id
+                defs = [
+                    node
+                    for node in own
+                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name
+                ]
+                if _bound_count(own, name) != 1 or len(defs) != 1:
+                    break
+                nested = defs[0]
+                if not all(self._is_functools_wraps(frel, d) for d in nested.decorator_list):
+                    break
+                outer, scope = scope, nested
+            else:
+                key = (frel, f"{outer.name}.<wrapper>@{scope.lineno}")
+                if key not in seen:
+                    seen.add(key)
+                    bodies.append((frel, list(_own_nodes(scope.body)), scope))
+        return bodies
+
     def _closure(self, rel, stmts, fn):
         """The entry body plus every module-level body it reaches, in BFS order.
 
@@ -450,6 +503,7 @@ class _Walker:
         seen = set()
         if fn is not None:
             seen.add((rel, fn.name))
+            bodies.extend(self._decorator_bodies(rel, fn, seen))
         index = 0
         while index < len(bodies):
             cur_rel, own, _ = bodies[index]
@@ -464,6 +518,7 @@ class _Walker:
                 crel, cname = callee
                 cfn = self.funcs[crel][cname]
                 bodies.append((crel, list(_own_nodes(cfn.body)), cfn))
+                bodies.extend(self._decorator_bodies(crel, cfn, seen))
         return bodies
 
     def _starts_server(self, bodies):

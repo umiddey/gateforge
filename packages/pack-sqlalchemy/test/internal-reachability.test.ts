@@ -470,3 +470,43 @@ describe('DBAPI cursor literal writes', () => {
     expect(hits(sigs, 'cursor_conn_rows', 'CursorConnRow')).toHaveLength(0);
   });
 });
+
+describe('decorator-factory wrapper edges', () => {
+  const F4 = join(HERE, 'fixtures', 'reachability-decorators');
+
+  it('R100 a write in the wrapper of a @factory(...) decorator is a worker write', async () => {
+    const sigs = await discover(F4, { trustedInternalEntryPoints: ALL });
+    const found = hits(sigs, 'job_locks', 'JobLock');
+    expect(found).toHaveLength(1);
+    expect(found[0]?.assertion).toBe('worker');
+    expect(JSON.stringify(found[0]?.location)).toContain('tasks.py');
+  });
+
+  it('R101 a write in the wrapper of a bare @decorator is a worker write', async () => {
+    const sigs = await discover(F4, { trustedInternalEntryPoints: ALL });
+    const found = hits(sigs, 'audit_marks', 'AuditMark');
+    expect(found).toHaveLength(1);
+    expect(found[0]?.assertion).toBe('worker');
+    expect(JSON.stringify(found[0]?.location)).toContain('tasks.py');
+  });
+
+  it('R102 a factory that returns functools.partial is not followed: no signal', async () => {
+    const sigs = await discover(F4, { trustedInternalEntryPoints: ALL });
+    expect(hits(sigs, 'partial_rows', 'PartialRow')).toHaveLength(0);
+  });
+
+  it('R103 a decorator with two returns is not followed: no signal', async () => {
+    const sigs = await discover(F4, { trustedInternalEntryPoints: ALL });
+    expect(hits(sigs, 'branch_rows', 'BranchRow')).toHaveLength(0);
+  });
+
+  it('R104 a decorator that returns its argument, not the wrapper, is not followed: no signal', async () => {
+    const sigs = await discover(F4, { trustedInternalEntryPoints: ALL });
+    expect(hits(sigs, 'unreturned_rows', 'UnreturnedRow')).toHaveLength(0);
+  });
+
+  it('R105 a class decorator (__call__) is not followed: no signal', async () => {
+    const sigs = await discover(F4, { trustedInternalEntryPoints: ALL });
+    expect(hits(sigs, 'class_rows', 'ClassRow')).toHaveLength(0);
+  });
+});
