@@ -4,6 +4,10 @@ A table is internal for an entry-point category when an entry point of that
 category reaches a writer of the table. Every list below is closed: a shape
 that is not named gives no edge and no writer, and so no signal.
 
+The ``unreferenced`` category is no entry-point category. It is derived from a
+whole-scan reference check (``_References``): a table that no serving module
+names can be written by no request.
+
 The walk works on ``ast`` only. Nothing here imports or runs the scanned code.
 """
 
@@ -29,10 +33,30 @@ LITERAL_WRITE = re.compile(
     re.IGNORECASE,
 )
 SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+# Decorators that hand a method to no other code. Any other decorator inside a
+# table class counts as a reference to that class.
+INERT_DECORATORS = frozenset({
+    "property", "classmethod", "staticmethod", "hybrid_property", "hybrid_method",
+    "validates", "declared_attr", "reconstructor",
+})
+INERT_ACCESSORS = frozenset({"setter", "expression", "deleter"})
+# Attributes that walk the mapper or metadata registry: a table reached that way is named nowhere.
+REGISTRY_ATTRS = frozenset({"sorted_tables", "mappers", "_class_registry", "__subclasses__"})
+WORD = re.compile(r"[A-Za-z0-9_]+")
+DOTTED_HEAD = re.compile(r"[A-Za-z0-9_.]+")
+FORMAT_FIELD = re.compile(r"\{[^{}]*\}|%(?:\(\w*\))?[A-Za-z]")
+# An inserting statement whose target holds an interpolation (``\0`` in a
+# ``_template`` text), anchored like LITERAL_WRITE. A computed schema before a
+# literal table is no match: the literal names the table.
+COMPUTED_WRITE = re.compile(
+    r'^\s*(?:INSERT\s+INTO|MERGE\s+INTO|\\?COPY)\s+'
+    r'(?:[\w"\0]+\s*\.\s*)*[\w"]*\0[\w"\0]*(?![\w"\0]|\s*\.)',
+    re.IGNORECASE,
+)
 
 
-def reachability_signals(indexes, trees, tables, categories):
-    """Derives one ``internality`` signal per (table, entry category) reached.
+def reachability_signals(indexes, trees, tables, categories, others, root):
+    """Derives one ``internality`` signal per (table, category) that holds.
 
     Args:
         indexes: ``{relpath: FileIndex}`` for every scanned, non-test file.
@@ -40,13 +64,21 @@ def reachability_signals(indexes, trees, tables, categories):
         tables: ``[(relpath, class_qname_or_None, table_name)]`` for every
             table resource: a declarative class (qname set) or a ``Table()``
             call (qname None).
-        categories: The entry-point categories to derive, a subset of
-            ``migration``, ``maintenance-command`` and ``worker``.
+        categories: The categories to derive, a subset of ``migration``,
+            ``maintenance-command``, ``worker`` and ``unreferenced``. The
+            first three give a signal at each entry point that reaches a
+            writer of the table. ``unreferenced`` gives a signal at the
+            definition of each table that no serving module names; granting
+            it trusts revision modules and standalone scripts as operator
+            code (see ``_References``).
+        others: Relpaths of the non-test inputs that are not in ``indexes``.
+            Read as bytes, and only for ``unreferenced``.
+        root: The scan root ``others`` resolve under.
 
     Returns:
         list[dict]: ``ClassificationSignal`` documents (unsorted).
     """
-    return _Walker(indexes, trees, tables).signals(categories)
+    return _Walker(indexes, trees, tables).signals(categories, others, root)
 
 
 def _own_nodes(stmts):
@@ -208,6 +240,92 @@ def _table_signal(table, category, location):
         # name would bind the signal to every same-named table in the scan.
         del signal["target"]["resourceName"]
     return signal
+
+
+def _inert_decorator(dec):
+    target = dec.func if isinstance(dec, ast.Call) else dec
+    if isinstance(target, ast.Name):
+        return target.id in INERT_DECORATORS
+    return isinstance(target, ast.Attribute) and target.attr in INERT_ACCESSORS
+
+
+def _binds_all(stmt):
+    """True for a statement that binds ``__all__``."""
+    if isinstance(stmt, ast.Assign):
+        targets = stmt.targets
+    elif isinstance(stmt, (ast.AnnAssign, ast.AugAssign)):
+        targets = [stmt.target]
+    else:
+        return False
+    return any(isinstance(t, ast.Name) and t.id == "__all__" for t in targets)
+
+
+def _template(node):
+    """The text of a string expression, with ``\\0`` for each part that is computed.
+
+    F-strings and ``+`` chains are flattened left to right. A ``{...}`` or
+    ``%s`` field in a literal part is computed too: ``.format`` or ``%`` fills
+    it later, wherever that happens.
+    """
+    parts, stack = [], [node]
+    while stack:
+        cur = stack.pop()
+        text = _str_const(cur)
+        if text is not None:
+            parts.append(FORMAT_FIELD.sub("\0", text))
+        elif isinstance(cur, ast.JoinedStr):
+            stack.extend(reversed(cur.values))
+        elif isinstance(cur, ast.BinOp) and isinstance(cur.op, ast.Add):
+            stack.extend((cur.right, cur.left))
+        else:
+            parts.append("\0")
+    return "".join(parts)
+
+
+def _dotted_suffixes(rel):
+    """Every dotted name a scanned file can be imported under.
+
+    The relation of ``_module_to_relpath``, without its one-match rule: for an
+    exemption or a guard, an ambiguous name has to count for every file.
+    """
+    parts = rel[: -len(".py")].split("/")
+    if parts[-1] == "__init__":
+        parts.pop()
+    return [".".join(parts[i:]) for i in range(len(parts))]
+
+
+def _importable(node):
+    """Dotted names a node may import: an import's modules, or the dotted head of a string.
+
+    A string counts for its head when it ends there or goes on with ``:``
+    (``"pkg.mod:app"``), and for every shorter prefix that ends before a ``.``.
+    """
+    if isinstance(node, ast.Import):
+        texts = [alias.name for alias in node.names]
+    elif isinstance(node, ast.ImportFrom):
+        base = node.module or ""
+        texts = [f"{base}.{alias.name}".lstrip(".") for alias in node.names]
+        if node.level:
+            # The package a relative import resolves under is unknown: every name it mentions counts.
+            texts += [*base.split("."), *(alias.name for alias in node.names)]
+    else:
+        text = _str_const(node)
+        texts = [] if text is None else [text]
+    for text in texts:
+        match = DOTTED_HEAD.match(text)
+        if match is None:
+            continue
+        head = match.group()
+        yield from (head[:i] for i, char in enumerate(head) if char == ".")
+        if match.end() == len(text) or text[match.end()] == ":":
+            yield head
+
+
+def _note(index, token, where):
+    """Adds ``where`` to the entry of ``token``; an index holds only the tokens asked for."""
+    entry = index.get(token)
+    if entry is not None:
+        entry.add(where)
 
 
 class _Walker:
@@ -555,9 +673,12 @@ class _Walker:
         found.sort(key=lambda e: (e[0], e[1].lineno, e[1].col_offset))
         return found
 
-    def signals(self, categories):
+    def signals(self, categories, others, root):
         out = []
         for category in sorted(set(categories)):
+            if category == "unreferenced":
+                out.extend(_References(self, others, root).signals())
+                continue
             emitted = set()
             for rel, node, bodies in self._entries(category):
                 tables = set()
@@ -568,4 +689,168 @@ class _Walker:
                 for table in sorted(tables - emitted, key=_table_key):
                     emitted.add(table)
                     out.append(_table_signal(table, category, loc(rel, node)))
+        return out
+
+
+class _References:
+    """Finds the tables no serving module names (the ``unreferenced`` category).
+
+    A statement that creates a row names its table where it is built: by class
+    symbol, by ``Table`` variable or by table-name text. A table that no
+    serving module names is therefore written by no request.
+
+    A reference to a target is a ``Name`` or attribute equal to its symbol, an
+    import of the symbol under another name, or a string that holds the symbol
+    or the table name as a word (any letter case). A non-Python input counts
+    for the table name as a word. Not references: the nodes of the target's
+    own class, the ``Table(...)`` call's own name, docstrings and other bare
+    strings, and the ``__all__`` value.
+
+    Operator-only modules are skipped, for references and for the guard:
+    revision modules and standalone scripts (a ``__main__`` block that starts
+    no server) that no other scanned module imports or names in a string.
+
+    The guard: one construct that can reach a table without naming it (see
+    ``_visit``) voids every signal of the run.
+    """
+
+    def __init__(self, walker, others, root):
+        self.walker = walker
+        self.void = False
+        self.classes = {}  # a target's ClassDef -> its symbol
+        self.own = set()  # ids of a Table() target's own binding name and name argument
+        self.targets = self._targets()
+        # token -> where it is named: a target's ClassDef, or None for anywhere else.
+        self.idents = {symbol: set() for _, symbol, _ in self.targets}
+        self.words = {word.lower(): set() for table, symbol, _ in self.targets for word in (symbol, table[2])}
+        self.modules = {name for rel in walker.trees for name in _dotted_suffixes(rel)}
+        operator_only = self._operator_only()
+        for rel, tree in walker.trees.items():
+            if rel not in operator_only:
+                self._read(rel, tree)
+        names = {table[2].lower() for table, _, _ in self.targets}
+        for rel in others:
+            # latin-1 maps every byte to one character, so ASCII words survive any encoding.
+            text = (root / rel).read_bytes().decode("latin-1").lower()
+            for name in names.intersection(WORD.findall(text)):
+                self.words[name].add(None)
+
+    def _targets(self):
+        """``(table, symbol, definition)`` for each table a signal can name, in table order.
+
+        A declarative class goes by its simple name. A ``Table()`` call goes by
+        the one module-level name bound to it, and only when no other table
+        shares its table name: its signal carries the bare name. A symbol or
+        table name that is not a plain ASCII word is left out.
+        """
+        walker = self.walker
+        named = Counter(table[2] for table in walker.tables)
+        found = []
+        for table in sorted(set(walker.tables), key=_table_key):
+            rel, qname, name = table
+            if qname is not None:
+                node = next(rec.node for rec in walker.indexes[rel].classes if rec.qname == qname)
+                symbol, own = qname.rsplit(".", 1)[-1], ()
+            elif named[name] == 1:
+                node = next(call["node"] for call in walker.indexes[rel].table_calls if call["table_name"] == name)
+                bound = [
+                    stmt.targets[0]
+                    for stmt in walker.trees[rel].body
+                    if isinstance(stmt, ast.Assign)
+                    and stmt.value is node
+                    and len(stmt.targets) == 1
+                    and isinstance(stmt.targets[0], ast.Name)
+                ]
+                if not bound or walker.module_bound[rel][bound[0].id] != 1:
+                    continue
+                symbol, own = bound[0].id, (id(bound[0]), id(node.args[0]))
+            else:
+                continue
+            if WORD.fullmatch(symbol) is None or WORD.fullmatch(name) is None:
+                continue
+            if qname is not None:
+                self.classes[node] = symbol
+            self.own.update(own)
+            found.append((table, symbol, node))
+        return found
+
+    def _operator_only(self):
+        """Revision modules and standalone scripts that no other module imports or names in a string."""
+        walker = self.walker
+        candidates = {
+            rel: _dotted_suffixes(rel)
+            for rel, tree in walker.trees.items()
+            if _has_revision(tree)
+            or any(walker._entry_bodies("maintenance-command", rel, tree, stmt) is not None for stmt in tree.body)
+        }
+        namers = {name: set() for names in candidates.values() for name in names}
+        for rel, tree in walker.trees.items():
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.Import, ast.ImportFrom, ast.Constant)):
+                    for name in _importable(node):
+                        _note(namers, name, rel)
+        return {rel for rel, names in candidates.items() if not any(namers[name] - {rel} for name in names)}
+
+    def _read(self, rel, tree):
+        """Notes one serving module's names and string words, each with the target class it sits in."""
+        stack = [(stmt, None) for stmt in tree.body if not _binds_all(stmt)]
+        while stack:
+            node, region = stack.pop()
+            if id(node) in self.own or (isinstance(node, ast.Expr) and _str_const(node.value) is not None):
+                continue
+            decorators = getattr(node, "decorator_list", [])
+            if region is None and node in self.classes:
+                # A decorator hands the class to other code, which then holds it unnamed.
+                if decorators:
+                    self.idents[self.classes[node]].add(None)
+                stack.extend((child, None if child in decorators else node) for child in ast.iter_child_nodes(node))
+                continue
+            if region is not None and not all(_inert_decorator(dec) for dec in decorators):
+                # The same for a method: its body may build the class's rows without a name.
+                self.idents[self.classes[region]].add(None)
+            self._visit(rel, node, region)
+            stack.extend((child, region) for child in ast.iter_child_nodes(node))
+
+    def _visit(self, rel, node, region):
+        """Notes the reference one node makes; sets ``void`` when it can reach a table unnamed."""
+        text = _str_const(node)
+        if isinstance(node, ast.Name):
+            _note(self.idents, node.id, region)
+        elif isinstance(node, ast.Attribute):
+            _note(self.idents, node.attr, region)
+            if node.attr in REGISTRY_ATTRS or (node.attr == "tables" and _final_name(node.value) == "metadata"):
+                self.void = True
+        elif isinstance(node, ast.alias) and node.asname is not None:
+            # ``from models import Row as R``: the uses then say ``R``, never ``Row``.
+            _note(self.idents, node.name, region)
+        elif isinstance(node, ast.Call) and self._computed_lookup(rel, node):
+            self.void = True
+        elif text is not None:
+            for word in WORD.findall(text.lower()):
+                _note(self.words, word, region)
+        if isinstance(node, (ast.Constant, ast.JoinedStr, ast.BinOp)) and COMPUTED_WRITE.match(_template(node)):
+            self.void = True
+
+    def _computed_lookup(self, rel, call):
+        """True for ``table(<non-literal>)``, ``Table(<non-literal>, ...)`` and ``getattr(<scanned module>, <non-literal>)``."""
+        func, args = call.func, call.args
+        if _final_name(func) in ("table", "Table"):
+            return bool(args) and _str_const(args[0]) is None
+        if not (isinstance(func, ast.Name) and func.id == "getattr" and len(args) >= 2 and isinstance(args[0], ast.Name)):
+            return False
+        ref = self.walker.indexes[rel].imports.get(args[0].id)
+        if ref is None or _str_const(args[1]) is not None:
+            return False
+        module = ref.module if ref.name is None else f"{ref.module}.{ref.name}".lstrip(".")
+        return module in self.modules
+
+    def signals(self):
+        """One signal per target nothing names, at its definition; none when the run is void."""
+        if self.void:
+            return []
+        out = []
+        for table, symbol, node in self.targets:
+            named = self.idents[symbol] | self.words[symbol.lower()] | self.words[table[2].lower()]
+            if not named - {node}:
+                out.append(_table_signal(table, "unreferenced", loc(table[0], node)))
         return out

@@ -16,8 +16,9 @@ Usage:
     # root: scan root (default: process cwd, which the CLI sets to the
     #       repo root); every discover path resolves under it.
     # --internal-entry-categories=LIST: comma list of migration,
-    #       maintenance-command, worker; the host passes the trusted internal
-    #       entry points it grants. Absent: no internal claims are derived.
+    #       maintenance-command, worker, unreferenced; the host passes the
+    #       trusted internal categories it grants. Absent: no internal claims
+    #       are derived.
 """
 
 from __future__ import annotations
@@ -35,7 +36,7 @@ except ImportError:  # monorepo bootstrap: ../plugin-protocol/python
 from gateforge_sqlalchemy_detector import PLUGIN_ID, VERSION
 
 
-_ENTRY_CATEGORIES = ("migration", "maintenance-command", "worker")
+_ENTRY_CATEGORIES = ("migration", "maintenance-command", "worker", "unreferenced")
 _CATEGORY_FLAG = "--internal-entry-categories="
 _scan_root: Path | None = None
 _categories: tuple[str, ...] = ()

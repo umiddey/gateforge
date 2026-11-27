@@ -175,4 +175,35 @@ describe('internal reachability guard', () => {
     expect(text).toContain(ENDPOINT);
     expect(text).not.toContain('EXPOSURE_INTERNAL_CERTIFICATE');
   });
+
+  it('G5 an unreferenced signal certifies internal inside its granted patterns and is untrusted outside them', () => {
+    const models = { file: 'app/models.py', line: 1, col: 1 };
+    const unreferenced = signal(
+      'internality' as ClassificationSignal['dimension'],
+      'unreferenced' as SignalAssertion,
+      { resourceName: TABLE },
+      SQL_DETECTOR,
+      models,
+    );
+    const paths = [MIGRATION, models.file];
+    const classify = (patterns: string[]) =>
+      classifyResources({
+        ...input(false, [unreferenced, primaryKey, hardDelete]),
+        policy: {
+          ...policy,
+          trustedInternalEntryPoints: [{ category: 'unreferenced', detector: SQL_DETECTOR, patterns }],
+        },
+        scan: { ...scan(), requestedPaths: paths, eligiblePaths: paths, coverage: [{ detector: SQL_DETECTOR, scannedPaths: paths }] },
+      } as unknown as ClassifyResourcesInput);
+    const inside = decisionText(classify(['app/**']), TABLE);
+    expect(inside).toContain('"exposure":"internal"');
+    expect(inside).toContain('EXPOSURE_INTERNAL_CERTIFICATE');
+    const block = classify(['migrations/**'])
+      .decisions.find((d) => d.name === TABLE)
+      ?.blocks.find((b) => b.code === 'INCOMPLETE_PROOF_SCOPE');
+    expect(block).toBeDefined();
+    expect(block?.detail).toContain('unreferenced at app/models.py:1');
+    expect(block?.detail).toContain('trusted unreferenced patterns: migrations/**');
+    expect(block?.locations).toEqual([models]);
+  });
 });
