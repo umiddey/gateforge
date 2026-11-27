@@ -45,6 +45,8 @@ export interface RunClassificationInput {
   adapters: readonly string[];
   /** Enable host-derived lifecycle defaults for complete detector scans. */
   deriveLifecycleDefaults?: boolean;
+  /** Final endpoint ids with an approved behavior declaration (hidden-resource proof). */
+  behaviorDeclaredEndpoints?: readonly string[];
   scan?: {
     requestedPaths: string[];
     /**
@@ -178,6 +180,7 @@ export function runClassification(input: RunClassificationInput): GraphClassific
     policy: input.policy,
     adapters: input.adapters,
     deriveLifecycleDefaults: input.deriveLifecycleDefaults,
+    behaviorDeclaredEndpoints: input.behaviorDeclaredEndpoints,
     scan: {
       requestedPaths: input.scan?.requestedPaths ?? [],
       eligiblePaths: input.scan?.eligiblePaths,

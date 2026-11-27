@@ -1957,7 +1957,11 @@ A table is written when the reached code does one of these:
 - `X.__table__.insert()`, `.update()` or `.delete()`;
 - `text("INSERT ...")`, `text("UPDATE ...")` or `text("DELETE FROM ...")`
   with a string literal;
-- `op.bulk_insert(X, ...)` or `op.execute("<literal>")` under `from alembic import op`;
+- `op.bulk_insert(X, ...)` or `op.execute("<literal>")` under `from alembic import op`.
+  Here and in `insert(X)`, `update(X)` and `delete(X)`, `X` may also be a name
+  bound once in the same function to `table("name")`;
+- `cur.execute("<literal INSERT/UPDATE/DELETE>")` where `cur` is a name bound
+  exactly once in its scope to `X.cursor()` (assignment or `with ... as cur`);
 - `session.add(M(...))`, or `session.add_all([M(...), ...])` with a list
   literal, where `session` is a name bound exactly once in its scope to a
   `Session(...)`, a `sessionmaker(...)()`, or a parameter annotated `Session`.
@@ -1980,6 +1984,11 @@ What gives no signal (the table is not proven internal):
   `op.create_table`;
 - a `Session` that is passed in unannotated, returned from a helper, aliased
   at module level, or imported from a module outside `sqlalchemy`;
+- `executemany`, a cursor passed in as a parameter, and `conn.execute(...)`
+  on a name that is not such a cursor binding;
+- a `table(...)` binding at module level, bound more than once, or passed in
+  as a parameter; a parameter or local assignment that reuses a model's name
+  is not that model;
 - click, typer and other command frameworks (only the `__main__` guard form
   is recognised), `__main__.py` packages, and dramatiq, rq or arq workers
   (only the Celery forms above);
@@ -1989,20 +1998,23 @@ What gives no signal (the table is not proven internal):
 Binding requirements. The pipeline refuses a binding whose detector is not
 a bundled Gateforge detector, or whose detector runs over subprocess
 transport: completeness is accepted only from the bundled in-process
-wrapper (`packages/cli/src/pipeline.ts:426-430`,
+wrapper (`packages/cli/src/pipeline.ts:425-429`,
 `packages/cli/src/detector-trust.ts:308-317`).
 
 `patterns` only narrows a category. A reachability signal whose file does not
 match the category's `patterns` is untrusted and blocks the certificate
-(`packages/core/src/classifier/classify.ts:1446-1450`).
+(`packages/core/src/classifier/classify.ts:1469-1473`). The
+`INCOMPLETE_PROOF_SCOPE` block names each such signal as
+`<category> at <file:line>` with the category's trusted patterns, and its
+locations hold only those signals.
 
 The internal certificate also needs these, from the same classifier:
 
-- a complete scan (`classify.ts:1454`) and exhaustive exposure over the
-  requested detector-eligible files (`classify.ts:1468`);
-- no positive lifecycle mutation (`classify.ts:1500`);
+- a complete scan (`classify.ts:1474`) and exhaustive exposure over the
+  requested detector-eligible files (`classify.ts:1488`);
+- no positive lifecycle mutation (`classify.ts:1527`);
 - no `http.endpoint` that links the resource
-  (`classify.ts:1522-1539`). A linked endpoint means the table is reachable
+  (`classify.ts:1549-1566`). A linked endpoint means the table is reachable
   from a route, so it is user-facing.
 
 A route that writes a table through a helper, or enqueues a worker with
@@ -2038,8 +2050,8 @@ hiddenRules:
 ever returns them. The `reason` must say why the rows must never be
 shown — it is rendered verbatim in the decision trace
 (`ORGANIZATION_HIDDEN_RULE(<reason>)`). A repository without a
-`hiddenRules:` key, or with an empty one, is off byte for byte: nothing
-is stamped, no exposure changes, no new block appears.
+`hiddenRules:` key, or with an empty one, is off byte for byte: no exposure
+changes, no new block appears.
 
 **What proves it.** The hidden row itself is never observed — there is
 no read to prove. The proof is the behavior of the endpoints the scan
@@ -2048,11 +2060,11 @@ links to the table (the `resource:` declaration in the
 the same adapter-binding link the classifier already consumes): every
 linked endpoint needs an approved behavioral declaration
 (`.gateforge/behavior.yml`; `gateforge behavior draft` scaffolds one),
-and at least one linked endpoint must exist. The endpoint's
-`behaviorProof: passing` stamp means the approved declaration exists —
-it is not "a passing test": the declaration's own behavior obligations
-still have to pass WITNESSED, and they block the scan on their own
-until they do.
+and at least one linked endpoint must exist. An endpoint counts when an
+approved declaration exists for the endpoint's final id (`<plane>.<name>`,
+after the classifier resolves its plane) — that is not "a passing test":
+the declaration's own behavior obligations still have to pass WITNESSED,
+and they block the scan on their own until they do.
 
 Fail-closed outcomes, so a hidden declaration can never wave a proof
 through:

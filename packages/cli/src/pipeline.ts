@@ -20,7 +20,6 @@ import {
   ClaimSchema,
   ClassificationSignalSchema,
   DISPOSITION_MAX_DAYS,
-  HTTP_ENDPOINT_RESOURCE_KIND,
   PolicyFileSchema,
   PolicyEvaluationError,
   RunManifestSchema,
@@ -510,9 +509,10 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
     compareStrings,
   );
   // Behavior policy parse (needed BEFORE classification, plan
-  // 20261028_1945 D): the hidden-resource proof stamps derive from the
-  // approved behavioral declarations below. Same parse, same errors —
-  // only earlier, so the stamp sees it.
+  // 20261028_1945 D): the classifier proves a `hidden` exposure through
+  // the approved behavioral declarations of the linked writing endpoints
+  // (the negation of ENDPOINT_BEHAVIOR_MISSING), keyed by each endpoint's
+  // final id. Same parse, same errors — only earlier.
   let parsedBehavior: BehaviorPolicy | undefined;
   if (config.behaviorPolicy !== undefined) {
     try {
@@ -522,25 +522,6 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
     } catch (error) {
       if (error instanceof PolicyEvaluationError) throw new UsageError(error.message);
       throw error;
-    }
-  }
-  // Hidden resources (plan 20261028_1945 D): the classifier proves a
-  // `hidden` exposure through the behavior proofs of the linked writing
-  // endpoints, so the pipeline stamps each declared endpoint's proof
-  // state into its attributes before classification ('passing' = the
-  // endpoint has an approved behavioral declaration — the negation of
-  // ENDPOINT_BEHAVIOR_MISSING; no stamp reads unproven, never guessed).
-  // Without `hiddenRules:` nothing is stamped: byte-identical output.
-  if ((classifierPolicy.hiddenRules ?? []).length > 0) {
-    const behaviorDeclared = new Set(
-      (parsedBehavior?.endpoints ?? []).map((endpoint) => endpoint.resourceId),
-    );
-    for (const resource of built.resources) {
-      if (resource.kind !== HTTP_ENDPOINT_RESOURCE_KIND) continue;
-      if (resource.id === null) continue;
-      if (behaviorDeclared.has(resource.id)) {
-        resource.attributes['behaviorProof'] = 'passing';
-      }
     }
   }
   // Automatic conservative classification (plan phase 5, ADR 0003 D2/D5):
@@ -556,6 +537,7 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
     policy: classifierPolicy,
     adapters,
     deriveLifecycleDefaults: true,
+    behaviorDeclaredEndpoints: (parsedBehavior?.endpoints ?? []).map((endpoint) => endpoint.resourceId),
     scan: {
       // The proof request must describe the same repository scope that
       // detector discovery scans. Project exclusions remove files from the

@@ -82,3 +82,38 @@ class ShadowRealSessionmakerRow(Base):
 class ShadowRealLiteralRow(Base):
     __tablename__ = "shadow_real_literal_rows"
     id = Column(Integer, primary_key=True)
+
+
+class LocalTableRow(Base):
+    __tablename__ = "local_table_rows"
+    id = Column(Integer, primary_key=True)
+
+
+class TwiceTableRow(Base):
+    __tablename__ = "twice_table_rows"
+    id = Column(Integer, primary_key=True)
+
+
+class LocalShadowRow(Base):
+    __tablename__ = "local_shadow_rows"
+    id = Column(Integer, primary_key=True)
+
+
+class CursorWithRow(Base):
+    __tablename__ = "cursor_with_rows"
+    id = Column(Integer, primary_key=True)
+
+
+class CursorAssignRow(Base):
+    __tablename__ = "cursor_assign_rows"
+    id = Column(Integer, primary_key=True)
+
+
+class CursorParamRow(Base):
+    __tablename__ = "cursor_param_rows"
+    id = Column(Integer, primary_key=True)
+
+
+class CursorConnRow(Base):
+    __tablename__ = "cursor_conn_rows"
+    id = Column(Integer, primary_key=True)

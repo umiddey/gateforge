@@ -188,6 +188,14 @@ def _binding_source(own, name):
     return None
 
 
+def _is_cursor(own, fn, name):
+    """True when ``name`` is bound exactly once in the scope, to ``X.cursor()``, and is no parameter."""
+    if _bound_count(own, name) != 1 or any(p.arg == name for p in _param_nodes(fn)):
+        return False
+    source = _binding_source(own, name)
+    return isinstance(source, ast.Call) and isinstance(source.func, ast.Attribute) and source.func.attr == "cursor"
+
+
 def _table_key(table):
     return (table[0], table[1] or "", table[2])
 
@@ -293,9 +301,20 @@ class _Walker:
         return hits[0] if len(hits) == 1 else None
 
     def _table_of(self, rel, own, fn, node):
-        """The table an expression denotes: a model, ``M.__table__``, or ``table("lit")``."""
+        """The table an expression denotes.
+
+        A model, ``M.__table__``, ``table("lit")``, or a name bound exactly
+        once in the function to ``table("lit")``.
+        """
         if isinstance(node, ast.Name):
-            return self._class_table(rel, node.id)
+            is_param = any(p.arg == node.id for p in _param_nodes(fn))
+            source = _binding_source(own, node.id)
+            if not is_param and source is None:
+                return self._class_table(rel, node.id)
+            # A parameter or a plain binding in this scope decides, not a model of that name.
+            if fn is None or is_param or _bound_count(own, node.id) != 1 or not isinstance(source, ast.Call):
+                return None
+            return self._table_of(rel, own, fn, source)
         if isinstance(node, ast.Attribute) and node.attr == "__table__" and isinstance(node.value, ast.Name):
             return self._class_table(rel, node.value.id)
         if isinstance(node, ast.Call) and self._sa_symbol(rel, node.func, own, fn) == "table" and node.args:
@@ -365,7 +384,7 @@ class _Walker:
         return []
 
     def _method_writes(self, rel, own, fn, call):
-        """Writes made by a method call: ``X.__table__.insert()``, alembic ops and session adds."""
+        """Writes made by a method call: ``X.__table__.insert()``, alembic ops, cursor literals and session adds."""
         func = call.func
         if func.attr in WRITE_CALLS and isinstance(func.value, ast.Attribute) and func.value.attr == "__table__":
             return _listed(self._table_of(rel, own, fn, func.value))
@@ -374,6 +393,8 @@ class _Walker:
         if func.attr == "bulk_insert" and self._is_alembic_op(rel, func.value):
             return _listed(self._table_of(rel, own, fn, call.args[0]))
         if func.attr == "execute" and self._is_alembic_op(rel, func.value):
+            return self._literal_write(_str_const(call.args[0]))
+        if func.attr == "execute" and isinstance(func.value, ast.Name) and _is_cursor(own, fn, func.value.id):
             return self._literal_write(_str_const(call.args[0]))
         if (
             func.attr in SESSION_ADD_CALLS
