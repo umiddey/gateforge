@@ -525,6 +525,17 @@ describe('unreferenced tables', () => {
   const run = (root = F5) => discover(root, GRANT, undefined, filesUnder(root, ''));
   const modelsLine = (start: string) =>
     readFileSync(join(F5, 'models.py'), 'utf8').split('\n').findIndex((l) => l.startsWith(start)) + 1;
+  // The fixture plus one extra module, built outside the repo.
+  const runWith = async (rel: string, source: string) => {
+    const copy = mkdtempSync(join(tmpdir(), 'gf-unreferenced-'));
+    try {
+      cpSync(F5, copy, { recursive: true });
+      writeFileSync(join(copy, rel), source);
+      return await run(copy);
+    } finally {
+      rmSync(copy, { recursive: true, force: true });
+    }
+  };
 
   it('R106 orphan_ledger and loose_rows are unreferenced at their definitions', async () => {
     const sigs = await run();
@@ -554,29 +565,20 @@ describe('unreferenced tables', () => {
     expect(hits(await discover(F5, GRANT), 'js_named', 'JsNamed')).toHaveLength(1);
   });
 
-  it('R110 a table only a standalone script names is unreferenced', async () => {
-    const found = hits(await run(), 'script_only', 'ScriptOnly');
-    expect(found).toHaveLength(1);
-    expect(found[0]?.assertion).toBe('unreferenced');
+  it('R110 a table only a standalone script names is referenced: no signal', async () => {
+    expect(hits(await run(), 'script_only', 'ScriptOnly')).toHaveLength(0);
   });
 
-  it('R111 a script a serving module imports is serving code: no signal', async () => {
+  it('R111 a script is serving code: no signal', async () => {
     expect(hits(await run(), 'imported_script_only', 'ImportedScriptOnly')).toHaveLength(0);
   });
 
   it('R112 a computed INSERT target in a serving module voids every unreferenced signal', async () => {
-    // The fixture plus one loader module, built outside the repo.
-    const copy = mkdtempSync(join(tmpdir(), 'gf-unreferenced-void-'));
-    try {
-      cpSync(F5, copy, { recursive: true });
-      writeFileSync(
-        join(copy, 'app', 'loader.py'),
-        'def load(cur, name):\n    cur.execute(f"INSERT INTO {name} (a) VALUES (1)")\n',
-      );
-      expect(unreferenced(await run(copy))).toHaveLength(0);
-    } finally {
-      rmSync(copy, { recursive: true, force: true });
-    }
+    const sigs = await runWith(
+      'app/loader.py',
+      'def load(cur, name):\n    cur.execute(f"INSERT INTO {name} (a) VALUES (1)")\n',
+    );
+    expect(unreferenced(sigs)).toHaveLength(0);
   });
 
   it('R113 without the unreferenced grant the output equals the no-grant output', async () => {
@@ -605,8 +607,8 @@ describe('unreferenced tables', () => {
 
   it('R115 the unreferenced grant is accepted for this detector only', async () => {
     const sigs = await run();
-    expect(unreferenced(sigs)).toHaveLength(3);
-    expect(internality(sigs)).toHaveLength(3);
+    expect(unreferenced(sigs)).toHaveLength(2);
+    expect(internality(sigs)).toHaveLength(2);
     const foreign = await discover(
       F5,
       { trustedInternalEntryPoints: [{ category: 'unreferenced', detector: 'other.detector' }] },
@@ -614,5 +616,44 @@ describe('unreferenced tables', () => {
       filesUnder(F5, ''),
     );
     expect(internality(foreign)).toHaveLength(0);
+  });
+
+  it('R116 a revision-marked module with no alembic import is serving code: the model it uses gets no signal', async () => {
+    const sigs = await runWith(
+      'migrations/0002_probe.py',
+      [
+        'from models import OrphanLedger',
+        '',
+        'revision = "x"',
+        'down_revision = "0001"',
+        '',
+        '',
+        'def upgrade(session):',
+        '    session.add(OrphanLedger())',
+        '',
+      ].join('\n'),
+    );
+    expect(hits(sigs, 'orphan_ledger', 'OrphanLedger')).toHaveLength(0);
+    // Control: the run is not void, only the one table is named.
+    expect(hits(sigs, 'loose_rows')).toHaveLength(1);
+  });
+
+  it('R117 a computed INSERT target in a standalone script voids every unreferenced signal', async () => {
+    const sigs = await runWith(
+      'scripts/loader.py',
+      [
+        'import sys',
+        '',
+        '',
+        'def load(cur, name):',
+        '    cur.execute(f"INSERT INTO {name} (id) VALUES (1)")',
+        '',
+        '',
+        'if __name__ == "__main__":',
+        '    load(None, sys.argv[1])',
+        '',
+      ].join('\n'),
+    );
+    expect(unreferenced(sigs)).toHaveLength(0);
   });
 });

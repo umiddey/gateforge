@@ -69,8 +69,8 @@ def reachability_signals(indexes, trees, tables, categories, others, root):
             first three give a signal at each entry point that reaches a
             writer of the table. ``unreferenced`` gives a signal at the
             definition of each table that no serving module names; granting
-            it trusts revision modules and standalone scripts as operator
-            code (see ``_References``).
+            it trusts only alembic-shaped revision modules as operator code,
+            and scripts are serving code (see ``_References``).
         others: Relpaths of the non-test inputs that are not in ``indexes``.
             Read as bytes, and only for ``unreferenced``.
         root: The scan root ``others`` resolve under.
@@ -146,6 +146,26 @@ def _has_revision(tree):
         if bound and _str_const(stmt.value) is not None:
             return True
     return False
+
+
+def _is_alembic_revision(tree):
+    """True for an alembic-shaped revision module.
+
+    Four module-level facts: a string ``revision``, a ``down_revision``
+    binding, ``def upgrade``, and ``import alembic`` or ``from alembic import ...``.
+    """
+    down = upgrade = imported = False
+    for stmt in tree.body:
+        if isinstance(stmt, (ast.Assign, ast.AnnAssign)) and stmt.value is not None:
+            targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+            down = down or any(isinstance(t, ast.Name) and t.id == "down_revision" for t in targets)
+        elif isinstance(stmt, ast.FunctionDef):
+            upgrade = upgrade or stmt.name == "upgrade"
+        elif isinstance(stmt, ast.Import):
+            imported = imported or any(alias.name == "alembic" for alias in stmt.names)
+        elif isinstance(stmt, ast.ImportFrom):
+            imported = imported or (stmt.level == 0 and stmt.module == "alembic")
+    return down and upgrade and imported and _has_revision(tree)
 
 
 def _is_celery_class_call(node, imports):
@@ -707,8 +727,9 @@ class _References:
     strings, and the ``__all__`` value.
 
     Operator-only modules are skipped, for references and for the guard:
-    revision modules and standalone scripts (a ``__main__`` block that starts
-    no server) that no other scanned module imports or names in a string.
+    alembic-shaped revision modules (``_is_alembic_revision``) that no other
+    scanned module imports or names in a string. Every other module is
+    serving code, scripts included: nothing in the scan shows what launches one.
 
     The guard: one construct that can reach a table without naming it (see
     ``_visit``) voids every signal of the run.
@@ -729,7 +750,8 @@ class _References:
             if rel not in operator_only:
                 self._read(rel, tree)
         names = {table[2].lower() for table, _, _ in self.targets}
-        for rel in others:
+        # Without a target there is no signal to withhold: the other inputs stay unread.
+        for rel in others if names else ():
             # latin-1 maps every byte to one character, so ASCII words survive any encoding.
             text = (root / rel).read_bytes().decode("latin-1").lower()
             for name in names.intersection(WORD.findall(text)):
@@ -775,14 +797,9 @@ class _References:
         return found
 
     def _operator_only(self):
-        """Revision modules and standalone scripts that no other module imports or names in a string."""
+        """Alembic-shaped revision modules that no other module imports or names in a string."""
         walker = self.walker
-        candidates = {
-            rel: _dotted_suffixes(rel)
-            for rel, tree in walker.trees.items()
-            if _has_revision(tree)
-            or any(walker._entry_bodies("maintenance-command", rel, tree, stmt) is not None for stmt in tree.body)
-        }
+        candidates = {rel: _dotted_suffixes(rel) for rel, tree in walker.trees.items() if _is_alembic_revision(tree)}
         namers = {name: set() for names in candidates.values() for name in names}
         for rel, tree in walker.trees.items():
             for node in ast.walk(tree):
