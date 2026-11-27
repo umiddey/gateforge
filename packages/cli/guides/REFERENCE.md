@@ -1910,9 +1910,10 @@ place to smuggle intent past the schema.
 ## Internal entry points (the `trustedInternalEntryPoints:` section)
 
 A table is internal only when the scan finds a static path that reaches it
-from an entry point of a trusted category. The bundled
-`gateforge.pack-sqlalchemy` detector derives that path from code. A
-declaration alone never produces internality, and reachability is necessary
+from an entry point of a trusted category, or, under the `unreferenced`
+category, finds that no serving code names it. The bundled
+`gateforge.pack-sqlalchemy` detector derives both from code. A
+declaration alone never produces internality, and a signal is necessary
 but not sufficient: the other certificate conditions below still apply.
 
 ```yaml
@@ -1933,7 +1934,8 @@ assert internality for it. An unknown category bound to this detector is a
 usage error, and so is a malformed section (the whole section is rejected).
 A grant for a different detector is dropped.
 
-The three categories the detector recognises:
+The three entry-point categories the detector recognises (the fourth
+category, [`unreferenced`](#the-unreferenced-category), is no entry point):
 
 - `migration`: a module-level `def upgrade` in a file that binds `revision`
   to a string literal (an Alembic revision file). Everything the upgrade
@@ -1949,6 +1951,16 @@ The three categories the detector recognises:
 From an entry body the detector follows module-level functions reached by
 a plain call: a same-file name, an imported name, or `module.func` for a
 plain module import. Methods are not followed.
+
+A decorator is followed too, on the entry function and on every function
+reached from it. `@deco` and `@module.deco` are followed when `deco` resolves
+to a module-level function in that same way and its body has exactly one
+`return`, which returns a nested `def` bound once in that body.
+`@factory(...)` is followed when `factory` returns a nested decorator in
+that same way, and that decorator
+returns the wrapper. Each returned `def` may itself carry only
+`functools.wraps(...)` decorators. The wrapper's body is then read like any
+reached function, so a write it reaches belongs to the entry.
 
 A table is written when the reached code does one of these:
 
@@ -1980,6 +1992,9 @@ What gives no signal (the table is not proven internal):
 
 - method calls (`repo.save()`), and calls through helpers the detector does
   not follow;
+- a decorator that is a class, returns `functools.partial(...)` or an
+  attribute, has more than one `return`, or returns anything but its one
+  nested `def`: its wrapper is not followed;
 - dynamic SQL (a non-literal `text(...)`) and schema changes such as
   `op.create_table`;
 - a `Session` that is passed in unannotated, returned from a helper, aliased
@@ -2015,14 +2030,109 @@ The internal certificate also needs these, from the same classifier:
 - no positive lifecycle mutation (`classify.ts:1527`);
 - no `http.endpoint` that links the resource
   (`classify.ts:1549-1566`). A linked endpoint means the table is reachable
-  from a route, so it is user-facing.
+  from a route, so it is user-facing. A `resource:` or `writes:` declaration
+  in the `endpoints:` section is such a link.
 
 A route that writes a table through a helper, or enqueues a worker with
 `.delay()`, is not linked to that endpoint, so this check does not block
-that table. Narrow the category with `patterns` in that case.
+that table. Declare the write on that route with `writes:` (see
+[Declaring a side-effect write](#declaring-a-side-effect-write-writes)), or
+narrow the category with `patterns`.
 
 Changing `trustedInternalEntryPoints` changes the trusted-policy digest, so
 approved pins must be re-approved (see the owner-answers section above).
+
+### The `unreferenced` category
+
+`unreferenced` is no entry point. It certifies a table that no serving code
+names. A statement that creates a row names its table where it is built: by
+the model class, by the `Table` variable, or by the table name in SQL text.
+So no request writes a table that no serving code names.
+
+```yaml
+trustedInternalEntryPoints:
+  - category: unreferenced
+    detector: gateforge.pack-sqlalchemy
+```
+
+With the grant, each such table gets one signal at its definition (the
+model class or the `Table(...)` call), so `patterns` on this grant match the
+file that defines the table. Without the grant nothing changes. The signal
+goes through the same certificate as the other categories: every condition
+above still applies.
+
+**What the grant trusts.** Granting `unreferenced` trusts only
+alembic-shaped revision modules as operator code: they are not read. A
+module has that shape when it has all four of these at module level:
+`revision` bound to a string literal, a `down_revision` assignment,
+`def upgrade`, and `import alembic` or `from alembic import ...`. Such a
+module is still read as serving code when another scanned module imports
+it, or holds a string constant that is its dotted name (equal to it, or
+followed by `:` or `.`). The dotted name is any trailing part of its path,
+down to the bare file name: `migrations.versions.rev_a`, `versions.rev_a`
+and `rev_a`. Every other module is serving code. Scripts are
+serving code wherever they are launched: a script that names the table, or
+builds an INSERT with a computed target, counts, and a launch line in a
+non-Python file changes nothing.
+
+**Which tables can get the signal.** A declarative model goes by its class
+name and its table name. A `Table(...)` call goes by the one module-level
+name bound to it and its table name. These get no signal: a `Table(...)`
+not bound to exactly one module-level name, a `Table(...)` whose table name
+another table shares, and a class, variable or table name that is not a
+plain ASCII word (`[A-Za-z0-9_]+`).
+
+**What counts as a reference.** In a Python module:
+
+- a name or attribute equal to the class or `Table` variable name (`Row`,
+  `models.Row`);
+- `from m import Row as R`. A plain `from m import Row` is no reference;
+  the use that follows it is;
+- a string, or a literal part of an f-string, that holds the class name, the
+  variable name or the table name as a whole word, in any letter case;
+- any decorator on the table's own class, and any decorator on a member of
+  that class other than `property`, `classmethod`, `staticmethod`,
+  `hybrid_property`, `hybrid_method`, `validates`, `declared_attr`,
+  `reconstructor`, `<x>.setter`, `<x>.expression` and `<x>.deleter`.
+
+In any other scanned file (a template, a `.sql` or `.js` file): the table
+name as a whole word, in any letter case.
+
+Not a reference: the rest of the table's own class, the `Table(...)` call's
+own variable and name argument, docstrings and other bare string
+statements, and the module-level `__all__` value. Test directories are not
+scanned.
+
+**The guard.** Some code reaches a table without naming it. One such
+construct in any serving module voids every `unreferenced` signal of the
+run:
+
+- a string that starts with `INSERT INTO`, `MERGE INTO`, `COPY` or `\COPY`
+  and has a computed target (an f-string, a `+` chain, or a `{...}` or `%s`
+  field);
+- `.sorted_tables`, `.mappers`, `._class_registry`, `.__subclasses__`, or
+  `.tables` on `metadata`;
+- `getattr(<module>, <non-literal>)`, where `<module>` is a name imported
+  from the scanned code;
+- `table(<non-literal>)` or `Table(<non-literal>, ...)`.
+
+The guard matches by shape, so it can void a run for code that touches no
+table: any function named `table` or `Table` called with a non-literal
+first argument, and any string that starts like `COPY {x}`.
+
+**Limits.** These can reach a table without naming it, and the detector does
+not see them:
+
+- `globals()`, `vars()`, `eval`, `exec`, and a non-literal
+  `importlib.import_module(...)` or `__import__(...)`;
+- a computed attribute lookup on a module that is not scanned;
+- a computed target that is not at the start of the string
+  (`WITH ... INSERT INTO {x}`), a t-string, and a table name built at run
+  time in any other way;
+- rows an ORM backref or association proxy creates;
+- a database trigger, rule or function created in a revision module (these
+  are not read) or outside the scanned files;
+- code outside the detector's input paths.
 
 
 ## Hidden resources (the `hiddenRules:` section)
@@ -2055,9 +2165,11 @@ changes, no new block appears.
 
 **What proves it.** The hidden row itself is never observed — there is
 no read to prove. The proof is the behavior of the endpoints the scan
-links to the table (the `resource:` declaration in the
-[`endpoints:` section](#endpoint-capability-rules-the-endpoints-section),
-the same adapter-binding link the classifier already consumes): every
+links to the table. A link is a `resource:` declaration in the
+[`endpoints:` section](#endpoint-capability-rules-the-endpoints-section)
+(the same adapter-binding link the classifier already consumes), or a
+[`writes:` declaration](#declaring-a-side-effect-write-writes) there, for
+a route that serves another resource and writes this one. Every
 linked endpoint needs an approved behavioral declaration
 (`.gateforge/behavior.yml`; `gateforge behavior draft` scaffolds one),
 and at least one linked endpoint must exist. An endpoint counts when an
@@ -2072,7 +2184,8 @@ through:
 - a link whose endpoint has no approved declaration →
   `INCOMPLETE_PROOF_SCOPE`, naming the unproven endpoint ids;
 - no link at all → `HIDDEN_RESOURCE_UNLINKED` (declare the resource on
-  the writing endpoint so the link exists);
+  the writing endpoint so the link exists: `resource:` when the endpoint
+  serves it, `writes:` when it only writes it);
 - a route that RETURNS the rows is never silenced: the positive read
   exposure contradicts the hidden intent and the resource resolves
   user-facing with `CLASSIFICATION_CONTRADICTION`, exactly as it
@@ -2620,9 +2733,9 @@ that name DIFFERENT resources are a blocking
 first-rule-wins. A valid declaration clears THIS entry for the declared
 route (a declared route never falls back to the candidate channel), so it
 stops failing a run-wide complete-scan proof. A rule may carry
-`capability:` as well; `capability` is optional when `resource:` or
-`noResource: true` is present, and every rule carries at least one of the
-three plus a non-empty `reason`. With no `resource:` anywhere the compiled output is
+`capability:` as well; `capability` is optional when `resource:`,
+`noResource: true` or `writes:` is present, and every rule carries at least
+one of the four plus a non-empty `reason`. With no `resource:` anywhere the compiled output is
 unchanged. If none of the candidates is right, the route genuinely serves
 something the resource graph does not model. A route that links, a route
 with nothing near it, and any collection route are unaffected.
@@ -2662,6 +2775,45 @@ start failing commits over a finding it never chose. `warn` says the same
 thing with the "you have not chosen" sentence gone; `block` makes the entry
 a blocking entry like any other. `gateforge init` asks once in a terminal
 and takes `--unmatched-routes block|warn`.
+
+### Declaring a side-effect write (`writes:`)
+
+A route can serve one resource and also write rows of another that no route
+serves back: the reset-password POST serves the account and writes
+`password_reset_tokens`. `resource:` holds one name and means "this route
+serves it", so it cannot carry the second table. `writes:` does:
+
+```yaml
+endpoints:
+  rules:
+    - match: backend/routes/auth.py
+      handlers: [request_password_reset]
+      writes: [password_reset_tokens]   # EXACT discovered resource names
+      reason: the reset request stores a single-use token row
+```
+
+`writes` is a non-empty list of non-empty resource names, with no name
+twice; anything else fails the run closed at startup (exit 2). A rule may
+carry `writes` alone or beside `capability`, `resource:` or
+`noResource: true`, and still needs a selector and a `reason`. Each name
+must equal a discovered business resource EXACTLY: an unknown name is a
+blocking `ENDPOINT_RESOURCE_DECLARATION_UNMATCHED` entry naming the
+endpoint, the rule (`rules[i]`) and the name. When several rules match one
+endpoint, their `writes` lists are joined; they never contradict.
+
+What the link does:
+
+- a [`hidden` resource](#hidden-resources-the-hiddenrules-section) is linked
+  to every endpoint that `writes` it, as it is by `resource:`. It is proven
+  only through an approved behavior declaration for that endpoint; until
+  one exists it is `INCOMPLETE_PROOF_SCOPE`, naming the endpoint;
+- a resource an endpoint `writes` is never certified `internal`: the
+  linked endpoint means a route reaches the table.
+
+What it does not do: it does not change the endpoint's linked resource,
+bind an adapter, answer the DELETE archive-vs-hard question or add a
+behavior effect. With no `writes` key anywhere the compiled output is
+unchanged.
 
 ## Proposing planes at init (`gateforge init --planes`)
 

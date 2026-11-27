@@ -407,8 +407,8 @@ export function createSqlalchemyDetector(options: SqlalchemyDetectorOptions = {}
 /**
  * Categories this detector derives internal claims for. The first three are
  * entry points that reach a writer of the table. `unreferenced` is a table
- * that no serving module names; granting it trusts revision modules and
- * standalone scripts as operator code, because they are not read for it.
+ * that no serving module names; granting it trusts only alembic-shaped
+ * revision modules as operator code, because they are not read for it.
  */
 const INTERNAL_ENTRY_CATEGORIES: Record<string, true> = {
   migration: true,
