@@ -84,6 +84,7 @@ const RULE_KEYS: readonly string[] = [
   'capability',
   'resource',
   'noResource',
+  'writes',
   'reason',
 ];
 
@@ -131,6 +132,13 @@ export interface EndpointCapabilityRule {
    * route's path names one or more discovered resources (name-only check).
    */
   readonly noResource?: true;
+  /**
+   * The business resources this route WRITES as a side effect (Gap 1, plan
+   * 20261127_1305): EXACT discovered resource names. A side-effect link never
+   * sets the endpoint's linked resource, adapter binding, or DELETE semantics;
+   * it only lets the hidden-resource proof see this route as a writer.
+   */
+  readonly writes?: readonly string[];
   /** Required non-empty human rationale; rides contradiction diagnostics. */
   readonly reason: string;
 }
@@ -231,6 +239,7 @@ function parseEndpointCapabilityRule(value: unknown, index: number): EndpointCap
   const capability = record['capability'];
   const resource = record['resource'];
   const noResource = record['noResource'];
+  const writes = record['writes'];
   if (noResource !== undefined && noResource !== true) {
     throw new Error(
       `invalid endpoints config: ${at}.noResource must be the literal true (omit the key otherwise)`,
@@ -242,10 +251,15 @@ function parseEndpointCapabilityRule(value: unknown, index: number): EndpointCap
         '(a route serves the declared resource or none)',
     );
   }
-  if (capability === undefined && resource === undefined && noResource === undefined) {
+  if (
+    capability === undefined &&
+    resource === undefined &&
+    writes === undefined &&
+    noResource === undefined
+  ) {
     throw new Error(
       `invalid endpoints config: ${at} must carry at least one of 'capability' or 'resource', ` +
-        `or 'noResource: true'`,
+        `or 'noResource: true', or 'writes' (a route that only writes a resource)`,
     );
   }
   let declaredCapability: EndpointCapability | undefined;
@@ -271,6 +285,26 @@ function parseEndpointCapabilityRule(value: unknown, index: number): EndpointCap
     }
     declaredResource = resource;
   }
+  let declaredWrites: string[] | undefined;
+  if (writes !== undefined) {
+    if (!Array.isArray(writes) || writes.length === 0) {
+      throw new Error(
+        `invalid endpoints config: ${at}.writes must be a non-empty list of resource names ` +
+          '(the EXACT names of discovered business resources this route writes)',
+      );
+    }
+    const names: string[] = [];
+    for (const name of writes) {
+      if (typeof name !== 'string' || name.trim().length === 0) {
+        throw new Error(`invalid endpoints config: ${at}.writes entries must be non-empty strings`);
+      }
+      names.push(name);
+    }
+    if (new Set(names).size !== names.length) {
+      throw new Error(`invalid endpoints config: ${at}.writes lists a resource name twice`);
+    }
+    declaredWrites = names;
+  }
   const reason = record['reason'];
   if (typeof reason !== 'string' || reason.trim().length === 0) {
     throw new Error(
@@ -287,6 +321,7 @@ function parseEndpointCapabilityRule(value: unknown, index: number): EndpointCap
     ...(method !== undefined ? { method } : {}),
     ...(declaredCapability !== undefined ? { capability: declaredCapability } : {}),
     ...(declaredResource !== undefined ? { resource: declaredResource } : {}),
+    ...(declaredWrites !== undefined ? { writes: declaredWrites } : {}),
     ...(noResource === true ? { noResource: true as const } : {}),
     reason,
   };
@@ -483,4 +518,32 @@ export function resolveDeclaredResources(
   const first = hits[0];
   const conflict = first !== undefined && hits.some((hit) => hit.resource !== first.resource);
   return { hits, conflict };
+}
+
+/** One `writes:` name a matching rule declares (config order preserved). */
+export interface EndpointSideEffectHit {
+  /** Index of the declaring rule in `config.rules`. */
+  readonly index: number;
+  /** The declared name; the compiler checks it against discovered resources. */
+  readonly name: string;
+}
+
+/**
+ * The side-effect twin of {@link resolveDeclaredResources} (Gap 1, plan
+ * 20261127_1305): every `writes:` name of every matching rule, in config
+ * order. A write link never sets the linked resource, so it cannot change
+ * adapter binding or DELETE semantics; empty when nothing matches.
+ */
+export function resolveSideEffectResources(
+  config: EndpointsConfig,
+  input: EndpointMatchInput,
+): EndpointSideEffectHit[] {
+  const hits: EndpointSideEffectHit[] = [];
+  for (let index = 0; index < config.rules.length; index += 1) {
+    const rule = config.rules[index];
+    if (rule === undefined || rule.writes === undefined) continue;
+    if (!endpointRuleMatches(rule, input)) continue;
+    for (const name of rule.writes) hits.push({ index, name });
+  }
+  return hits;
 }

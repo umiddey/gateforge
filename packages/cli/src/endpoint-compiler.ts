@@ -93,6 +93,7 @@ import {
   parseEndpointsConfigDocument,
   resolveDeclaredCapabilities,
   resolveDeclaredResources,
+  resolveSideEffectResources,
   type EndpointsConfig,
 } from './endpoint-config.js';
 import { UsageError } from './errors.js';
@@ -830,6 +831,31 @@ export function compileEndpointContribution(
     let declaredResource: string | null = null;
     let declarationBlocked = false;
     let noResourceDeclaration: { rule: number; reason: string } | null = null;
+    // Side-effect links (Gap 1, plan 20261127_1305): `writes:` names a route
+    // WRITES. Each must name a discovered business resource EXACTLY. A link
+    // never sets the linked resource, adapter binding, or DELETE semantics, so
+    // an unmatched name is a typed entry and blocks nothing else.
+    const sideEffectNames = new Set<string>();
+    if (endpointsConfig !== null) {
+      for (const hit of resolveSideEffectResources(endpointsConfig, endpointMatchInput)) {
+        if (businessNames.has(hit.name)) {
+          sideEffectNames.add(hit.name);
+          continue;
+        }
+        const key = `side-effect-config:${identity}:${hit.name}`;
+        if (seenEndpointUnresolved.has(key)) continue;
+        seenEndpointUnresolved.add(key);
+        unresolved.push({
+          code: ENDPOINT_RESOURCE_DECLARATION_UNMATCHED,
+          detail:
+            `endpoint '${identity}' rules[${String(hit.index)}] writes '${hit.name}', which names ` +
+            'no discovered business resource; a side-effect link must name a discovered business ' +
+            'resource EXACTLY — fix the name or remove it from writes',
+          location: endpointRoutes[0]?.source ?? { file: '<unknown>', line: 1, col: 0 },
+        });
+      }
+    }
+    const sideEffectResourceNames = [...sideEffectNames].toSorted(compareText);
     if (endpointsConfig !== null) {
       const resourceResolution = resolveDeclaredResources(endpointsConfig, endpointMatchInput);
       const declared = resourceResolution.hits[0];
@@ -1314,6 +1340,8 @@ export function compileEndpointContribution(
         ...(endpointRoutes.some((route) => route.typedPathParams === true)
           ? { typedPathParams: true }
           : {}),
+        // Side-effect links (Gap 1): present only when a rule declares `writes`.
+        ...(sideEffectResourceNames.length > 0 ? { sideEffectResourceNames } : {}),
         ...(linkedResourceName !== null ? { linkedResourceName } : {}),
         ...(noResourceDeclaration !== null ? { noResource: noResourceDeclaration } : {}),
         frontendConsumed: consumed,

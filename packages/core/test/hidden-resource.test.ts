@@ -298,3 +298,79 @@ describe('hidden resources (plan 20261028_1945, D)', () => {
     );
   });
 });
+
+/**
+ * Side-effect links (plan 20261127_1305, Gap 1): the writing route carries
+ * `attributes.sideEffectResourceNames` instead of `linkedResourceName`. The
+ * link is attribute-only (no adapter-binding signal), and it must count
+ * exactly like a resource link for the hidden proof.
+ */
+const SIDE_TABLE = 'audit_marks';
+
+function sideTableResource(): ClassifierResourceRef {
+  return { ...tableResource(), name: SIDE_TABLE, id: `tenant.${SIDE_TABLE}` };
+}
+
+/** The writing endpoint with only the given link attributes (no `linkedResourceName`). */
+function writingEndpoint(links: Record<string, unknown>): ClassifierResourceRef {
+  const endpoint = endpointResource();
+  return {
+    ...endpoint,
+    attributes: {
+      plane: 'tenant',
+      resourceName: ENDPOINT,
+      method: 'POST',
+      canonicalPath: '/api/v1/auth/password-reset-requests',
+      ...links,
+    },
+  };
+}
+
+/** The evidence set of a side-effect link: identities only, no adapter-binding. */
+function sideEffectSignals(): ClassificationSignal[] {
+  return [
+    signal('identity', ['id'], SIDE_TABLE, SQL_DETECTOR, TABLE_LOCATION),
+    signal('identity', ['method', 'path'], ENDPOINT, COMPILER_DETECTOR, ROUTE_LOCATION),
+  ];
+}
+
+function sideEffectInput(links: Record<string, unknown>, behaviorDeclaredEndpoints: string[]): ClassifyResourcesInput {
+  return {
+    resources: [sideTableResource(), writingEndpoint(links)],
+    signals: sideEffectSignals(),
+    policy: hiddenPolicy({ resourceName: SIDE_TABLE }),
+    adapters: [],
+    scan: scan(),
+    behaviorDeclaredEndpoints,
+  };
+}
+
+describe('hidden resources: side-effect links (plan 20261127_1305, Gap 1)', () => {
+  it('(H8) a side-effect link + a passing behavior proof: proven through the endpoint final id', () => {
+    const result = classifyResources(
+      sideEffectInput({ sideEffectResourceNames: [SIDE_TABLE] }, [`tenant.${ENDPOINT}`]),
+    );
+
+    const table = decisionFor(result, SIDE_TABLE);
+    expect(table.classification?.exposure).toBe('hidden');
+    expect(table.blocks.some((block) => block.code === 'INCOMPLETE_PROOF_SCOPE')).toBe(false);
+    expect(table.classification?.hiddenProof?.provenThrough).toEqual([`tenant.${ENDPOINT}`]);
+  });
+
+  it('(H9) a side-effect link without a passing behavior proof: blocked, naming the endpoint final id', () => {
+    const result = classifyResources(sideEffectInput({ sideEffectResourceNames: [SIDE_TABLE] }, []));
+
+    const table = decisionFor(result, SIDE_TABLE);
+    const block = table.blocks.find((entry) => entry.code === 'INCOMPLETE_PROOF_SCOPE');
+    expect(block?.detail).toContain(`tenant.${ENDPOINT}`);
+  });
+
+  it('(H10) no link of either kind: HIDDEN_RESOURCE_UNLINKED names the writes: channel too', () => {
+    const result = classifyResources(sideEffectInput({}, []));
+
+    const table = decisionFor(result, SIDE_TABLE);
+    const block = table.blocks.find((entry) => String(entry.code) === HIDDEN_RESOURCE_UNLINKED);
+    expect(block).toBeDefined();
+    expect(block?.detail).toContain('writes:');
+  });
+});

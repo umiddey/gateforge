@@ -160,4 +160,19 @@ describe('internal reachability guard', () => {
     expect(block?.detail).not.toContain('(trusted: migration)');
     expect(block?.locations).toEqual([seed]);
   });
+
+  it('G4 a side-effect link downgrades internal reachability like a resource link: not internal-certified', () => {
+    // The writing route links the table only through `sideEffectResourceNames`
+    // (no `linkedResourceName`, no adapter-binding signal).
+    const writer = { ...endpointResource(), attributes: { resourceName: ENDPOINT, method: 'POST', canonicalPath: '/notes', sideEffectResourceNames: [TABLE] } };
+    const result = classifyResources({
+      ...input(false, [reachability, primaryKey, hardDelete]),
+      resources: [tableResource(), writer],
+    } as unknown as ClassifyResourcesInput);
+    const text = decisionText(result, TABLE);
+    expect(text).toContain('"exposure":"user-facing"');
+    expect(text).toContain('INCOMPLETE_PROOF_SCOPE');
+    expect(text).toContain(ENDPOINT);
+    expect(text).not.toContain('EXPOSURE_INTERNAL_CERTIFICATE');
+  });
 });
