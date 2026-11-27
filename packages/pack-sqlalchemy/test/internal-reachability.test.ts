@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process';
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { cpSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -22,26 +23,31 @@ interface Sig {
   target?: { resourceName?: string; symbol?: string };
 }
 
-function pyFiles(root: string): string[] {
+function filesUnder(root: string, suffix = '.py'): string[] {
   const out: string[] = [];
   const walk = (dir: string) => {
     for (const name of readdirSync(dir)) {
       const full = join(dir, name);
       if (statSync(full).isDirectory()) walk(full);
-      else if (name.endsWith('.py')) out.push(relative(root, full));
+      else if (name.endsWith(suffix)) out.push(relative(root, full));
     }
   };
   walk(root);
   return out.sort();
 }
 
-async function discover(root: string, sections?: Record<string, unknown>, command?: readonly string[]): Promise<Sig[]> {
+async function discover(
+  root: string,
+  sections?: Record<string, unknown>,
+  command?: readonly string[],
+  paths: string[] = filesUnder(root),
+): Promise<Sig[]> {
   const detector = createSqlalchemyDetector({ command });
   const previous = process.cwd();
   process.chdir(root);
   try {
     const context = sections === undefined ? undefined : { sections };
-    const result = await detector.discover(pyFiles(root), context as never);
+    const result = await detector.discover(paths, context as never);
     return (result.classificationSignals ?? []) as Sig[];
   } finally {
     process.chdir(previous);
@@ -49,6 +55,7 @@ async function discover(root: string, sections?: Record<string, unknown>, comman
 }
 
 const internality = (sigs: Sig[]) => sigs.filter((s) => s.dimension === 'internality');
+const unreferenced = (sigs: Sig[]) => internality(sigs).filter((s) => s.assertion === 'unreferenced');
 
 function hits(sigs: Sig[], table: string, cls?: string): Sig[] {
   const clsRe = cls === undefined ? undefined : new RegExp(`(^|[.:/])${cls}$`);
@@ -305,7 +312,7 @@ describe('golden output', () => {
     const previous = process.cwd();
     process.chdir(rules);
     try {
-      const result = await createSqlalchemyDetector().discover(pyFiles(rules));
+      const result = await createSqlalchemyDetector().discover(filesUnder(rules));
       const golden = readFileSync(join(HERE, 'fixtures', 'reachability-rules.golden.json'), 'utf8');
       expect(`${JSON.stringify(result, null, 2)}\n`).toBe(golden);
     } finally {
@@ -468,5 +475,185 @@ describe('DBAPI cursor literal writes', () => {
   it('R99 execute on a receiver that is not a cursor binding: no signal', async () => {
     const sigs = await discover(F3, { trustedInternalEntryPoints: ALL });
     expect(hits(sigs, 'cursor_conn_rows', 'CursorConnRow')).toHaveLength(0);
+  });
+});
+
+describe('decorator-factory wrapper edges', () => {
+  const F4 = join(HERE, 'fixtures', 'reachability-decorators');
+
+  it('R100 a write in the wrapper of a @factory(...) decorator is a worker write', async () => {
+    const sigs = await discover(F4, { trustedInternalEntryPoints: ALL });
+    const found = hits(sigs, 'job_locks', 'JobLock');
+    expect(found).toHaveLength(1);
+    expect(found[0]?.assertion).toBe('worker');
+    expect(JSON.stringify(found[0]?.location)).toContain('tasks.py');
+  });
+
+  it('R101 a write in the wrapper of a bare @decorator is a worker write', async () => {
+    const sigs = await discover(F4, { trustedInternalEntryPoints: ALL });
+    const found = hits(sigs, 'audit_marks', 'AuditMark');
+    expect(found).toHaveLength(1);
+    expect(found[0]?.assertion).toBe('worker');
+    expect(JSON.stringify(found[0]?.location)).toContain('tasks.py');
+  });
+
+  it('R102 a factory that returns functools.partial is not followed: no signal', async () => {
+    const sigs = await discover(F4, { trustedInternalEntryPoints: ALL });
+    expect(hits(sigs, 'partial_rows', 'PartialRow')).toHaveLength(0);
+  });
+
+  it('R103 a decorator with two returns is not followed: no signal', async () => {
+    const sigs = await discover(F4, { trustedInternalEntryPoints: ALL });
+    expect(hits(sigs, 'branch_rows', 'BranchRow')).toHaveLength(0);
+  });
+
+  it('R104 a decorator that returns its argument, not the wrapper, is not followed: no signal', async () => {
+    const sigs = await discover(F4, { trustedInternalEntryPoints: ALL });
+    expect(hits(sigs, 'unreturned_rows', 'UnreturnedRow')).toHaveLength(0);
+  });
+
+  it('R105 a class decorator (__call__) is not followed: no signal', async () => {
+    const sigs = await discover(F4, { trustedInternalEntryPoints: ALL });
+    expect(hits(sigs, 'class_rows', 'ClassRow')).toHaveLength(0);
+  });
+});
+
+describe('unreferenced tables', () => {
+  const F5 = join(HERE, 'fixtures', 'reachability-unreferenced');
+  const GRANT = { trustedInternalEntryPoints: [{ category: 'unreferenced', detector: 'gateforge.pack-sqlalchemy' }] };
+  // Every input file, not only `.py`: a non-Python input can name a table too.
+  const run = (root = F5) => discover(root, GRANT, undefined, filesUnder(root, ''));
+  const modelsLine = (start: string) =>
+    readFileSync(join(F5, 'models.py'), 'utf8').split('\n').findIndex((l) => l.startsWith(start)) + 1;
+  // The fixture plus one extra module, built outside the repo.
+  const runWith = async (rel: string, source: string) => {
+    const copy = mkdtempSync(join(tmpdir(), 'gf-unreferenced-'));
+    try {
+      cpSync(F5, copy, { recursive: true });
+      writeFileSync(join(copy, rel), source);
+      return await run(copy);
+    } finally {
+      rmSync(copy, { recursive: true, force: true });
+    }
+  };
+
+  it('R106 orphan_ledger and loose_rows are unreferenced at their definitions', async () => {
+    const sigs = await run();
+    const ledger = hits(sigs, 'orphan_ledger', 'OrphanLedger');
+    expect(ledger).toHaveLength(1);
+    expect(ledger[0]?.assertion).toBe('unreferenced');
+    expect(ledger[0]?.basis).toBe('code-positive');
+    expect(ledger[0]?.target).not.toHaveProperty('resourceName');
+    expect(ledger[0]?.location).toMatchObject({ file: 'models.py', line: modelsLine('class OrphanLedger(') });
+    const loose = hits(sigs, 'loose_rows');
+    expect(loose).toHaveLength(1);
+    expect(loose[0]?.assertion).toBe('unreferenced');
+    expect(loose[0]?.location).toMatchObject({ file: 'models.py', line: modelsLine('loose_rows = Table(') });
+  });
+
+  it('R107 a model a serving module names is referenced: no signal', async () => {
+    expect(hits(await run(), 'used_things', 'UsedThing')).toHaveLength(0);
+  });
+
+  it('R108 a table a serving module names in a string is referenced: no signal', async () => {
+    expect(hits(await run(), 'named_in_text', 'NamedInText')).toHaveLength(0);
+  });
+
+  it('R109 a table a non-Python input names is referenced: no signal', async () => {
+    expect(hits(await run(), 'js_named', 'JsNamed')).toHaveLength(0);
+    // Control: the JavaScript file is the only reference.
+    expect(hits(await discover(F5, GRANT), 'js_named', 'JsNamed')).toHaveLength(1);
+  });
+
+  it('R110 a table only a standalone script names is referenced: no signal', async () => {
+    expect(hits(await run(), 'script_only', 'ScriptOnly')).toHaveLength(0);
+  });
+
+  it('R111 a script is serving code: no signal', async () => {
+    expect(hits(await run(), 'imported_script_only', 'ImportedScriptOnly')).toHaveLength(0);
+  });
+
+  it('R112 a computed INSERT target in a serving module voids every unreferenced signal', async () => {
+    const sigs = await runWith(
+      'app/loader.py',
+      'def load(cur, name):\n    cur.execute(f"INSERT INTO {name} (a) VALUES (1)")\n',
+    );
+    expect(unreferenced(sigs)).toHaveLength(0);
+  });
+
+  it('R113 without the unreferenced grant the output equals the no-grant output', async () => {
+    const files = filesUnder(F5, '');
+    const none = await discover(F5, undefined, undefined, files);
+    const others = await discover(F5, { trustedInternalEntryPoints: ALL }, undefined, files);
+    expect(internality(others)).toHaveLength(0);
+    expect(JSON.stringify(others)).toBe(JSON.stringify(none));
+  });
+
+  it('R114 the flag accepts unreferenced and still rejects an unknown name beside it', async () => {
+    const flag = '--internal-entry-categories=unreferenced';
+    const sigs = await discover(F5, undefined, ['python3', '-m', 'gateforge_sqlalchemy_detector', flag, F5]);
+    expect(unreferenced(sigs).length).toBeGreaterThan(0);
+    const bogus = spawnSync('python3', ['-m', 'gateforge_sqlalchemy_detector', `${flag},bogus`, F5], {
+      cwd: join(HERE, '..', 'python'),
+      input: '',
+      // See R25: no bytecode cache may be written into the sealed tree.
+      env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' },
+      encoding: 'utf8',
+      timeout: 10_000,
+    });
+    expect(bogus.status).not.toBe(0);
+    expect(bogus.stderr.split('\n')).toContain('unknown internal entry category: bogus');
+  });
+
+  it('R115 the unreferenced grant is accepted for this detector only', async () => {
+    const sigs = await run();
+    expect(unreferenced(sigs)).toHaveLength(2);
+    expect(internality(sigs)).toHaveLength(2);
+    const foreign = await discover(
+      F5,
+      { trustedInternalEntryPoints: [{ category: 'unreferenced', detector: 'other.detector' }] },
+      undefined,
+      filesUnder(F5, ''),
+    );
+    expect(internality(foreign)).toHaveLength(0);
+  });
+
+  it('R116 a revision-marked module with no alembic import is serving code: the model it uses gets no signal', async () => {
+    const sigs = await runWith(
+      'migrations/0002_probe.py',
+      [
+        'from models import OrphanLedger',
+        '',
+        'revision = "x"',
+        'down_revision = "0001"',
+        '',
+        '',
+        'def upgrade(session):',
+        '    session.add(OrphanLedger())',
+        '',
+      ].join('\n'),
+    );
+    expect(hits(sigs, 'orphan_ledger', 'OrphanLedger')).toHaveLength(0);
+    // Control: the run is not void, only the one table is named.
+    expect(hits(sigs, 'loose_rows')).toHaveLength(1);
+  });
+
+  it('R117 a computed INSERT target in a standalone script voids every unreferenced signal', async () => {
+    const sigs = await runWith(
+      'scripts/loader.py',
+      [
+        'import sys',
+        '',
+        '',
+        'def load(cur, name):',
+        '    cur.execute(f"INSERT INTO {name} (id) VALUES (1)")',
+        '',
+        '',
+        'if __name__ == "__main__":',
+        '    load(None, sys.argv[1])',
+        '',
+      ].join('\n'),
+    );
+    expect(unreferenced(sigs)).toHaveLength(0);
   });
 });

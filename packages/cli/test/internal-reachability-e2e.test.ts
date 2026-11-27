@@ -12,6 +12,7 @@ import { configYml, POLICIES_YML, runCli, type CliResult } from './helpers.js';
 import { ROOT } from './witnessed-run-fixture.js';
 
 const FIXTURE = join(ROOT, 'packages/pack-sqlalchemy/test/fixtures/reachability');
+const UNREFERENCED = join(ROOT, 'packages/pack-sqlalchemy/test/fixtures/reachability-unreferenced');
 const SQL = 'gateforge.pack-sqlalchemy';
 const CATEGORIES = ['migration', 'maintenance-command', 'worker'];
 const TABLES = ['seed_codes', 'export_logs', 'ledger_entries', 'orphan_rows', 'route_notes', 'indirect_rows'];
@@ -41,8 +42,8 @@ function trusted(options: { detector?: boolean; workerPatterns?: boolean } = {})
   }).join('\n');
 }
 
-function policyYml(trustedBlock: string): string {
-  const internal = TABLES.map(
+function policyYml(trustedBlock: string, tables: readonly string[] = TABLES, models = 'app/models.py'): string {
+  const internal = tables.map(
     (table) =>
       `  - match:\n      resourceName: ${table}\n    reason: 'fixture: organization-declared internal table'`,
   ).join('\n');
@@ -57,7 +58,7 @@ planes:
 internalRules:
 ${internal}
 deleteRules:
-  - match: app/models.py
+  - match: ${models}
     semantics: hard
     reason: 'fixture: hard delete'
 `;
@@ -70,14 +71,14 @@ function writeRepoFile(repo: TempRepo, rel: string, text: string): void {
 }
 
 /** Copies the fixture in and writes the config, the policy and the reviewed adapters. */
-function setupRepo(repo: TempRepo, policy: string): void {
+function setupRepo(repo: TempRepo, policy: string, fixture = FIXTURE, tables: readonly string[] = TABLES): void {
   // models_admin.py and models_tenant.py both declare dup_rows. A duplicate-table
   // finding inside scanRoots fails the run-wide complete-scan attestation
   // (scan.py:1643 _duplicate_findings, classify.ts:826), which turns every
   // internal claim into INCOMPLETE_PROOF_SCOPE. The dup_rows ambiguity is pinned
   // by pack case R4 (plan line 62); the pack fixture is unchanged. Here the two
   // files are left out of the copied repo only.
-  cpSync(FIXTURE, repo.root, {
+  cpSync(fixture, repo.root, {
     recursive: true,
     filter: (source) => !/models_(admin|tenant)\.py$/.test(source),
   });
@@ -88,7 +89,7 @@ function setupRepo(repo: TempRepo, policy: string): void {
   );
   writeRepoFile(repo, '.gateforge/classification-policy.yml', policy);
   writeRepoFile(repo, '.gateforge/policies.yml', POLICIES_YML);
-  for (const table of TABLES) writeRepoFile(repo, `.gateforge/adapters/${table}.mjs`, 'export default {};\n');
+  for (const table of tables) writeRepoFile(repo, `.gateforge/adapters/${table}.mjs`, 'export default {};\n');
 }
 
 function classifyJson(result: CliResult): { classification: { decisions: Array<{ name: string }> } } {
@@ -202,6 +203,16 @@ describe('internal reachability end-to-end (classify --json)', () => {
       writeRepoFile(repo, '.gateforge/classification-policy.yml', policyYml(trusted({ workerPatterns: true })));
       const changed = cacheOf(await runCli(repo, ['check', '--format', 'json']));
       expect(changed.misses).toBeGreaterThanOrEqual(1);
+    });
+  });
+
+  it('X8 a table no serving module names is internal under the unreferenced grant', async () => {
+    await withTempRepo({}, async (repo) => {
+      const tables = ['orphan_ledger'];
+      const grant = `  - category: unreferenced\n    detector: ${SQL}`;
+      setupRepo(repo, policyYml(grant, tables, 'models.py'), UNREFERENCED, tables);
+      const result = await runCli(repo, ['classify', '--json']);
+      expect(decision(result, 'orphan_ledger')).toContain('"exposure":"internal"');
     });
   });
 });

@@ -1399,8 +1399,8 @@ function classifyOne(
           detail:
             `hidden resource '${plane}.${resource.name}' is complete-proof only through ` +
             'its writing endpoints, but no adapter-binding signal in the scan links an ' +
-            "endpoint to it; declare the resource on the writing endpoint (`resource:` " +
-            'in the `endpoints:` section) so the link exists',
+            "endpoint to it; declare the resource on the writing endpoint (`resource:`, or " +
+            '`writes:` for a route that only writes it) in the `endpoints:` section so the link exists',
           locations: [resource.location],
         });
       } else {
@@ -1975,6 +1975,8 @@ function classifyOne(
  * `http.endpoint` resource. An endpoint proves the resource when its final
  * id is in `ctx.behaviorDeclared` — an id-less endpoint reads unproven,
  * never guessed. Sorted by endpoint identity; deterministic.
+ * An endpoint whose `writes:` attribute names the resource links too (Gap 1,
+ * plan 20261127_1305), carrying no signal of its own.
  */
 function hiddenLinkedEndpoints(
   resource: ClassifierResourceRef,
@@ -2004,6 +2006,16 @@ function hiddenLinkedEndpoints(
       entry.signals.push(signal);
       byEndpoint.set(key, entry);
     }
+  }
+  // Side-effect links (Gap 1): an endpoint whose `writes:` declaration named
+  // this resource (the compiler checked the name exactly). Attribute-only, so
+  // it adds no adapter-binding signal; an existing signal-linked entry is kept.
+  for (const candidate of ctx.resources) {
+    if (candidate.kind !== HTTP_ENDPOINT_RESOURCE_KIND) continue;
+    const writes = candidate.attributes['sideEffectResourceNames'];
+    if (!Array.isArray(writes) || !writes.includes(resource.name)) continue;
+    const key = candidate.id ?? `${candidate.name}\u0000${candidate.source}`;
+    if (!byEndpoint.has(key)) byEndpoint.set(key, { endpoint: candidate, signals: [] });
   }
   return [...byEndpoint.values()].toSorted((a, b) =>
     compareStrings(a.endpoint.id ?? a.endpoint.name, b.endpoint.id ?? b.endpoint.name),

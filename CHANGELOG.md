@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.25.0
+
+- **Added: `writes:` on an `endpoints.rules[]` entry declares a
+  side-effect write.** A route that serves one resource and also writes
+  rows of another lists the other resources' exact names in `writes`
+  (with the usual `reason`). A `hidden` resource is linked to every
+  endpoint that `writes` it, as it is by `resource:`: it is proven
+  through that endpoint's approved behavior declaration and is
+  `INCOMPLETE_PROOF_SCOPE` until one exists. A resource an endpoint
+  `writes` is never certified `internal`. An unknown name is a blocking
+  `ENDPOINT_RESOURCE_DECLARATION_UNMATCHED`. The link does not change the
+  endpoint's linked resource, adapter binding, DELETE semantics or
+  behavior effects. The `HIDDEN_RESOURCE_UNLINKED` text now names
+  `writes:`; with no `writes` key the output is otherwise unchanged.
+- **Added: reachability follows a decorator into the wrapper it
+  returns.** For `migration`, `maintenance-command` and `worker` entries,
+  a module-level decorator (`@deco`, `@module.deco`) or decorator factory
+  (`@factory(...)`) on the entry function, or on a function it reaches,
+  adds the body of the nested wrapper it returns. Followed only when each
+  level has one `return` of a nested `def` bound once, carrying at most
+  `functools.wraps`; class decorators, `functools.partial` and decorators
+  with several returns are not followed. This can add reachability
+  signals, and so internal certificates, on existing code.
+- **Added: the `unreferenced` internal category (opt-in).** With a
+  `trustedInternalEntryPoints` grant of `category: unreferenced` to
+  `gateforge.pack-sqlalchemy`, a table that no serving code names (by
+  class, by `Table` variable or by table name in a string or in any other
+  scanned file) gets one internality signal at its definition and goes
+  through the existing internal certificate. The grant trusts only
+  alembic-shaped revision modules as operator code; scripts are serving
+  code. One construct that can reach a table without naming it (a
+  computed `INSERT INTO` target, a metadata or mapper registry walk, a
+  computed `getattr` on a scanned module, `Table(<non-literal>)`) voids
+  every such signal of the run. Nothing changes without the grant. See
+  "The `unreferenced` category" in the reference for the exact rules and
+  limits.
+
 ## 0.24.0
 
 - **Fixed: an untrusted-reachability block names the file.** An

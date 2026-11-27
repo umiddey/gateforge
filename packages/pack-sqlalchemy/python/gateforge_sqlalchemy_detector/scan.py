@@ -1966,6 +1966,9 @@ def scan(
                 {rel: idx.tree for rel, idx in indexes.items()},
                 table_refs,
                 categories,
+                # Inputs that are not parsed Python can still name a table.
+                [path for path in relpaths if path not in indexes and not _is_test_path(path)],
+                base,
             )
         )
 
